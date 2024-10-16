@@ -1460,7 +1460,7 @@ struct SimWorker : SimShared
 	{
 		log_assert(top == nullptr);
 		fst = new FstData(sim_filename);
-
+        timescale = fst->getTimescaleString();
 		if (scope.empty())
 			log_error("Scope must be defined for co-simulation.\n");
 
@@ -2397,6 +2397,140 @@ struct VCDWriter : public OutputWriter
 	std::ofstream vcdfile;
 };
 
+struct AnnotateActivity : public OutputWriter
+{
+	AnnotateActivity(SimWorker *worker) : OutputWriter(worker) {
+	}
+	struct SignalActivityData {
+		std::vector<uint32_t> lastValues;
+		std::vector<uint32_t> toggleCounts;
+		std::vector<uint32_t> highTimes;
+	};
+
+    typedef std::map<int, SignalActivityData> SignalActivityDataMap;
+
+    void write(std::map<int, bool> &use_signal) override
+    {
+	    // Init map
+	    SignalActivityDataMap dataMap;
+	    for (auto &d : worker->output_data) {
+		    for (auto &data : d.second) {
+			    int sig = data.first;
+			    if (!use_signal.at(sig))
+				    continue;
+			    SignalActivityDataMap::iterator itr = dataMap.find(sig);
+			    if (itr == dataMap.end()) {
+				    Const value = data.second;
+				    std::vector<uint32_t> vals(GetSize(value), 0);
+				    SignalActivityData data;
+				    data.highTimes = vals;
+				    data.lastValues = vals;
+				    data.toggleCounts = vals;
+				    dataMap.emplace(sig, data);
+			    }
+		    }
+	    }
+	    int prev_time = 0;
+	    int max_time = 0;
+	    int clk = 0;
+	    int highest_toggle = 0;
+	    for (auto &d : worker->output_data) {
+		    int time = d.first;
+		    for (auto &data : d.second) {
+			    int sig = data.first;
+			    if (!use_signal.at(sig))
+				    continue;
+			    Const value = data.second;
+			    SignalActivityDataMap::iterator itr = dataMap.find(sig);
+			    std::vector<uint32_t> &lastVals = (*itr).second.lastValues;
+			    std::vector<uint32_t> &toggleCounts = (*itr).second.toggleCounts;
+			    std::vector<uint32_t> &highTimes = (*itr).second.highTimes;
+			    for (int i = GetSize(value) - 1; i >= 0; i--) {
+				    int val = '-';
+				    switch (value[i]) {
+				    case State::S0:
+					    val = '0';
+					    break;
+				    case State::S1:
+					    val = '1';
+					    break;
+				    case State::Sx:
+					    val = 'x';
+					    break;
+				    default:
+					    val = 'z';
+				    }
+				    if (val != lastVals[i]) {
+					    toggleCounts[i]++;
+					    if (toggleCounts[i] > highest_toggle) {
+						    highest_toggle = toggleCounts[i];
+						    clk = sig;
+					    }
+					    lastVals[i] = val;
+				    }
+				    if (lastVals[i] == '1') {
+					    highTimes[i] += time - prev_time;
+				    }
+			    }
+		    }
+		    prev_time = time;
+		    max_time = time;
+	    }
+	    std::string timescale = worker->timescale;
+	    double real_timescale = 1e-12; // ps
+	    if (timescale == "ns")
+		    real_timescale = 1e-9;
+	    if (timescale == "fs")
+		    real_timescale = 1e-15;
+
+	    SignalActivityDataMap::iterator itr = dataMap.find(clk);
+	    std::vector<uint32_t> &clktoggleCounts = (*itr).second.toggleCounts;
+	    double clk_period = real_timescale * (double)max_time / (clktoggleCounts[0] / 2);
+	    std::cout << "Clock toggle count: " << clktoggleCounts[0] << "\n";
+	    std::cout << "Max time: " << max_time << "\n";
+	    std::cout << "Clock period: " << clk_period << "\n";
+	    worker->top->write_output_header(
+	      [this](IdString name) { std::cout << stringf("module %s\n", log_id(name)); }, [this]() { std::cout << "endmodule\n"; },
+	      [this, use_signal, dataMap, max_time, real_timescale, clk_period](const char *name, int size, Wire *w, int id, bool is_reg) {
+		      if (!use_signal.at(id))
+			      return;
+		      std::string full_name = form_vcd_name(name, size, w);
+		      SignalActivityDataMap::const_iterator itr = dataMap.find(id);
+		      const std::vector<uint32_t> &toggleCounts = (*itr).second.toggleCounts;
+		      const std::vector<uint32_t> &highTimes = (*itr).second.highTimes;
+		      std::cout << full_name << ":\n";
+		      std::cout << "     TC: ";
+		      for (uint32_t i = 0; i < size; i++) {
+			      std::cout << toggleCounts[i] << " ";
+		      }
+		      std::cout << "\n";
+		      std::cout << "     HT: ";
+		      for (uint32_t i = 0; i < size; i++) {
+			      std::cout << highTimes[i] << " ";
+		      }
+		      std::cout << "\n";
+		      std::cout << "     ACK: ";
+		      std::string activity_str;
+		      for (uint32_t i = 0; i < size; i++) {
+			      double activity = toggleCounts[i] / (max_time * real_timescale / clk_period);
+			      activity_str += std::to_string(activity) + " ";
+		      }
+		      std::cout << activity_str;
+		      std::cout << "\n";
+		      std::cout << "     DUTY: ";
+		      std::string duty_str;
+		      for (uint32_t i = 0; i < size; i++) {
+			      double duty = (double)highTimes[i] / (double)max_time;
+			      duty_str += std::to_string(duty) + " ";
+		      }
+		      std::cout << duty_str;
+		      std::cout << "\n";
+		      w->set_string_attribute("$ACKT:", activity_str);
+		      w->set_string_attribute("$DUTY:", duty_str);
+	      });
+    }
+};
+
 struct FSTWriter : public OutputWriter
 {
 	FSTWriter(SimWorker *worker, std::string filename) : OutputWriter(worker) {
@@ -2870,6 +3004,10 @@ struct SimPass : public Pass {
 			if (args[argidx] == "-multiclock") {
 				worker.multiclock = true;
 				continue;
+			}
+			if (args[argidx] == "-activity") {
+			  worker.outputfiles.emplace_back(std::unique_ptr<AnnotateActivity>(new AnnotateActivity(&worker)));
+			  continue;
 			}
 			break;
 		}
