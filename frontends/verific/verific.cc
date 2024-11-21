@@ -54,6 +54,9 @@ USING_YOSYS_NAMESPACE
 #include "VeriWrite.h"
 #include "VeriLibrary.h"
 #include "VeriExpression.h"
+#ifdef VERIFIC_LINEFILE_INCLUDES_LOOPS
+#include "VeriConstVal.h"
+#endif
 #endif
 
 #ifdef VERIFIC_VHDL_SUPPORT
@@ -102,6 +105,10 @@ USING_YOSYS_NAMESPACE
 using namespace Verific;
 #endif
 
+#endif
+
+#ifdef VERIFIC_LINEFILE_INCLUDES_LOOPS
+#include "decorate_loops.h"
 #endif
 
 #ifdef YOSYS_ENABLE_VERIFIC
@@ -420,8 +427,14 @@ void VerificImporter::import_attributes(dict<RTLIL::IdString, RTLIL::Const> &att
 	Att *attr;
 
 #ifdef VERIFIC_LINEFILE_INCLUDES_COLUMNS 
-	if (obj->Linefile())
+	if (obj->Linefile()) {
 		attributes[ID::src] = stringf("%s:%d.%d-%d.%d", LineFile::GetFileName(obj->Linefile()), obj->Linefile()->GetLeftLine(), obj->Linefile()->GetLeftCol(), obj->Linefile()->GetRightLine(), obj->Linefile()->GetRightCol());
+#ifdef VERIFIC_LINEFILE_INCLUDES_LOOPS
+		if (uint32_t loopid = obj->Linefile()->GetInLoop()) {
+			attributes[RTLIL::escape_id("in_loop_" + std::to_string(loopid))] = std::to_string(loopid);
+		}
+#endif
+	}
 #else
 	if (obj->Linefile())
 		attributes[ID::src] = stringf("%s:%d", LineFile::GetFileName(obj->Linefile()), LineFile::GetLineNo(obj->Linefile()));
@@ -2901,6 +2914,17 @@ std::set<std::string> import_tops(const char* work, std::map<std::string,Netlist
 			}
 		}
 #endif
+
+#ifdef VERIFIC_LINEFILE_INCLUDES_LOOPS
+		// Decorate AST with loop scope id
+		VeriModule *module;
+    MapIter mi ;
+		DecorateLoopsVisitor loop_visitor;
+    FOREACH_VERILOG_MODULE_IN_LIBRARY(veri_lib, mi,module) {
+			module->Accept(loop_visitor);
+		}
+#endif
+
 #ifdef VERIFIC_HIER_TREE_SUPPORT
 		if (show_message)
 			log("Running hier_tree::Elaborate().\n");
