@@ -2918,9 +2918,9 @@ std::set<std::string> import_tops(const char* work, std::map<std::string,Netlist
 #ifdef VERIFIC_LINEFILE_INCLUDES_LOOPS
 		// Decorate AST with loop scope id
 		VeriModule *module;
-    	MapIter mi ;
+		MapIter mi ;
 		DecorateLoopsVisitor loop_visitor;
-    	FOREACH_VERILOG_MODULE_IN_LIBRARY(veri_lib, mi,module) {
+		FOREACH_VERILOG_MODULE_IN_LIBRARY(veri_lib, mi,module) {
 			module->Accept(loop_visitor);
 		}
 #endif
