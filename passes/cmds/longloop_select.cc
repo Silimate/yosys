@@ -170,7 +170,7 @@ struct LongLoopSelect : public ScriptPass {
 					    loopInd, logicdepth, log_id((*itrLastCell)));
 					// Select all cells in the loop cluster
 					for (auto cell : itrCluster->second) {
-						design->selected_member(module->name, cell->name);
+						design->select(module, cell);
 					}
 				}
 			}
