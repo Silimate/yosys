@@ -129,37 +129,35 @@ struct LongLoopSelect : public ScriptPass {
 				log_flush();
 			}
 
-			for (std::map<uint64_t, std::vector<Cell *>>::iterator itr = loopIndexCellMap.begin(); itr != loopIndexCellMap.end(); itr++) {
-				uint64_t loopInd = itr->first;
-				if (itr->second.size() < threshold_depth) {
+			for (std::map<uint64_t, std::vector<Cell *>>::iterator itrCluster = loopIndexCellMap.begin();
+			     itrCluster != loopIndexCellMap.end(); itrCluster++) {
+				uint64_t loopInd = itrCluster->first;
+				if (itrCluster->second.size() < threshold_depth) {
 					if (debug) {
-						log("  Skipping loop id %ld as it contains only %ld cells\n", loopInd, itr->second.size());
+						log("  Skipping loop id %ld as it contains only %ld cells\n", loopInd, itrCluster->second.size());
 						log_flush();
 					}
 					continue;
 				}
 				if (debug) {
-					log("  Analyzing loop id %ld containing %ld cells\n", loopInd, itr->second.size());
+					log("  Analyzing loop id %ld containing %ld cells\n", loopInd, itrCluster->second.size());
 					log_flush();
 				}
 				// For a given for-loop cell group, perform topological sorting to get the logic depth of the ending cell in
 				// the group
 				TopoSort<IdString, RTLIL::sort_by_id_str> toposort;
-				toposorting(itr->second, sigmap, toposort);
-				int logicdepth = 0;
-				for (auto itrRank = toposort.node_to_index.begin(); itrRank != toposort.node_to_index.end(); itrRank++) {
-					logicdepth = std::max(logicdepth, itrRank->second);
-				}
+				toposorting(itrCluster->second, sigmap, toposort);
+				std::vector<Yosys::RTLIL::IdString>::reverse_iterator itrLastCell = toposort.sorted.rbegin();
+				int logicdepth = toposort.node_to_index.find(*itrLastCell)->second;
 				if (debug) {
 					log("  Logic depth: %d\n", logicdepth);
 					log_flush();
 				}
 				if (logicdepth > (int)threshold_depth) {
-					std::vector<Yosys::RTLIL::IdString>::reverse_iterator itrLastCell = toposort.sorted.rbegin();
-					log("  Selecting %ld cells in for-loop id %ld of depth %d ending with cell %s\n", itr->second.size(), loopInd,
-					    logicdepth, log_id((*itrLastCell)));
+					log("  Selecting %ld cells in for-loop id %ld of depth %d ending with cell %s\n", itrCluster->second.size(),
+					    loopInd, logicdepth, log_id((*itrLastCell)));
 					// Select all cells in the loop cluster
-					for (auto cell : itr->second) {
+					for (auto cell : itrCluster->second) {
 						design->selected_member(module->name, cell->name);
 					}
 				}
