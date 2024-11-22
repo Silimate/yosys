@@ -33,9 +33,14 @@ struct LongLoopSelect : public ScriptPass {
 	void script() override {}
 
 	// Adapted from the torder pass
-	void toposorting(std::vector<Cell *> &cells, SigMap &sigmap, TopoSort<IdString, RTLIL::sort_by_id_str> &toposort)
+	void toposorting(std::vector<Cell *> &cells, SigMap &sigmap,
+			 TopoSort<RTLIL::Cell *, RTLIL::IdString::compare_ptr_by_name<RTLIL::Cell>> &toposort, bool debug)
 	{
-		dict<SigBit, pool<IdString>> bit_drivers, bit_users;
+		if (debug) {
+			log("  Collecting design data\n");
+			log_flush();
+		}
+		dict<SigBit, pool<Cell *>> bit_drivers, bit_users;
 		for (Cell *cell : cells) {
 			for (auto conn : cell->connections()) {
 				bool noautostop = true;
@@ -48,24 +53,31 @@ struct LongLoopSelect : public ScriptPass {
 
 				if (cell->input(conn.first))
 					for (auto bit : sigmap(conn.second))
-						bit_users[bit].insert(cell->name);
+						bit_users[bit].insert(cell);
 
 				if (cell->output(conn.first))
 					for (auto bit : sigmap(conn.second))
-						bit_drivers[bit].insert(cell->name);
+						bit_drivers[bit].insert(cell);
 
-				toposort.node(cell->name);
+				toposort.node(cell);
 			}
-
-			for (auto &it : bit_users)
-				if (bit_drivers.count(it.first))
-					for (auto driver_cell : bit_drivers.at(it.first))
-						for (auto user_cell : it.second)
-							toposort.edge(driver_cell, user_cell);
-
-			toposort.analyze_loops = false;
-			toposort.sort();
 		}
+		if (debug) {
+			log("  Creating sorting data structure\n");
+			log_flush();
+		}
+		for (auto &it : bit_users)
+			if (bit_drivers.count(it.first))
+				for (auto driver_cell : bit_drivers.at(it.first))
+					for (auto user_cell : it.second)
+						toposort.edge(driver_cell, user_cell);
+
+		toposort.analyze_loops = false;
+		if (debug) {
+			log("  Sorting\n");
+			log_flush();
+		}
+		toposort.sort();
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -145,10 +157,10 @@ struct LongLoopSelect : public ScriptPass {
 				}
 				// For a given for-loop cell group, perform topological sorting to get the logic depth of the ending cell in
 				// the group
-				TopoSort<IdString, RTLIL::sort_by_id_str> toposort;
-				toposorting(itrCluster->second, sigmap, toposort);
-				std::vector<Yosys::RTLIL::IdString>::reverse_iterator itrLastCell = toposort.sorted.rbegin();
-				int logicdepth = toposort.node_to_index.find(*itrLastCell)->second;
+				TopoSort<RTLIL::Cell *, RTLIL::IdString::compare_ptr_by_name<RTLIL::Cell>> toposort;
+				toposorting(itrCluster->second, sigmap, toposort, debug);
+				std::vector<Cell *>::reverse_iterator itrLastCell = toposort.sorted.rbegin();
+				int logicdepth = toposort.node_to_index.find((*itrLastCell))->second;
 				if (debug) {
 					log("  Logic depth: %d\n", logicdepth);
 					log_flush();
