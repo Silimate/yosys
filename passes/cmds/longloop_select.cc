@@ -106,14 +106,12 @@ struct LongLoopSelect : public ScriptPass {
 			}
 			SigMap sigmap(module);
 			TopoSort<IdString, RTLIL::sort_by_id_str> toposort;
-			std::vector<Cell *> cells;
 			std::map<uint64_t, std::vector<Cell *>> loopIndexCellMap;
 			if (debug) {
 				log("  Creating sorting datastructures\n");
 				log_flush();
 			}
 			for (auto cell : module->selected_cells()) {
-				cells.push_back(cell);
 				std::string loopIndex = cell->get_string_attribute("\\in_for_loop");
 				if (!loopIndex.empty()) {
 					uint64_t loopInd = std::stoul(loopIndex, nullptr, 10);
