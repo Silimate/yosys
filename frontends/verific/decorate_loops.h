@@ -56,7 +56,7 @@ class DecorateLoopsVisitor : public VeriVisitor
 		if (loopStack.size()) {
 			if (loopStack.top() == (VeriLoop *)&node) {
 				loopStack.pop();
-				std::cout << "Loop out: " << (VeriFor *)&node << std::endl;
+				// std::cout << "Loop out: " << (VeriFor *)&node << std::endl;
 				return;
 			}
 			Verific::linefile_type linefile = (Verific::linefile_type)node.Linefile();

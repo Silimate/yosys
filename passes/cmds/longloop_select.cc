@@ -106,7 +106,6 @@ struct LongLoopSelect : public ScriptPass {
 		}
 		log("Running longloop_select pass\n");
 		log_flush();
-
 		for (auto module : design->modules()) {
 			if (debug) {
 				log("Module %s\n", log_id(module));
@@ -122,7 +121,7 @@ struct LongLoopSelect : public ScriptPass {
 				log("  Creating sorting datastructures\n");
 				log_flush();
 			}
-			for (auto cell : module->selected_cells()) {
+			for (auto cell : module->cells()) {
 				std::string loopIndex = cell->get_string_attribute("\\in_for_loop");
 				if (!loopIndex.empty()) {
 					uint64_t loopInd = std::stoul(loopIndex, nullptr, 10);
