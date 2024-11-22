@@ -44,7 +44,7 @@ struct LongLoopSelect : public ScriptPass {
 						for (auto user_cell : it.second)
 							toposort.edge(driver_cell, user_cell);
 
-			toposort.analyze_loops = true;
+			toposort.analyze_loops = false;
 			toposort.sort();
 		}
 	}
@@ -79,11 +79,11 @@ struct LongLoopSelect : public ScriptPass {
 		for (auto module : design->modules()) {
 			if (debug) {
 				log("Module %s\n", log_id(module));
-			  log_flush();
+				log_flush();
 			}
 			if (debug) {
 				log("  Creating sigmap\n");
-			  log_flush();
+				log_flush();
 			}
 			SigMap sigmap(module);
 			TopoSort<IdString, RTLIL::sort_by_id_str> toposort;
@@ -91,7 +91,7 @@ struct LongLoopSelect : public ScriptPass {
 			std::map<uint64_t, std::vector<Cell *>> loopIndexCellMap;
 			if (debug) {
 				log("  Creating sorting datastructures\n");
-			  log_flush();
+				log_flush();
 			}
 			for (auto cell : module->selected_cells()) {
 				cells.push_back(cell);
@@ -109,51 +109,31 @@ struct LongLoopSelect : public ScriptPass {
 				}
 			}
 			if (debug) {
-				log("  Sorting\n");
-			  log_flush();
-			}
-			// Module-level topological sorting to identify the for-loop ending cell points
-			toposorting(cells, sigmap, toposort);
-			if (debug) {
 				log("  Found %ld for-loop clusters\n", loopIndexCellMap.size());
 				log_flush();
 			}
-			std::set<uint64_t> treadtedLoops;
-			for (std::vector<Yosys::RTLIL::IdString>::reverse_iterator itr = toposort.sorted.rbegin(); itr != toposort.sorted.rend();
-			     itr++) {
-				Yosys::RTLIL::IdString cellname = (*itr);
-				Cell *actual = module->cell(cellname);
-				std::string loopIndex = actual->get_string_attribute("\\in_for_loop");
-				if (!loopIndex.empty()) {
-					uint64_t loopInd = std::stoul(loopIndex, nullptr, 10);
-					if (treadtedLoops.find(loopInd) == treadtedLoops.end()) {
-						treadtedLoops.insert(loopInd);
-						if (debug) {
-							log("  End cell in loop %ld: %s\n", loopInd, log_id(cellname));
-							log_flush();
-						}
-						// For a given for-loop cell group, topological sorting to get the logic depth of the ending cell in
-						// the group
-						std::map<uint64_t, std::vector<Cell *>>::iterator itr = loopIndexCellMap.find(loopInd);
-						TopoSort<IdString, RTLIL::sort_by_id_str> toposort;
-						toposorting(itr->second, sigmap, toposort);
-						std::map<IdString, int, RTLIL::sort_by_id_str>::iterator itrRank =
-						  toposort.node_to_index.find(cellname);
-						if (itrRank != toposort.node_to_index.end()) {
-							int logicdepth = itrRank->second;
-							if (debug) {
-								log("  Logic depth: %d\n",logicdepth);
-								log_flush();
-							}
-							if (logicdepth > (int)threshold_depth) {
-								log("  Selecting %ld cells in for-loop id %ld of depth %d ending with cell %s\n", itr->second.size(), loopInd, logicdepth,
-								    log_id(cellname));
-								// Select all cells in the loop cluster
-								for (auto cell : itr->second) {
-									design->selected_member(module->name, cell->name);
-								}
-							}
-						}
+
+			for (std::map<uint64_t, std::vector<Cell *>>::iterator itr = loopIndexCellMap.begin(); itr != loopIndexCellMap.end(); itr++) {
+				uint64_t loopInd = itr->first;
+				// For a given for-loop cell group, perform topological sorting to get the logic depth of the ending cell in
+				// the group
+				TopoSort<IdString, RTLIL::sort_by_id_str> toposort;
+				toposorting(itr->second, sigmap, toposort);
+				int logicdepth = 0;
+				for (auto itrRank = toposort.node_to_index.begin(); itrRank != toposort.node_to_index.end(); itrRank++) {
+					logicdepth = std::max(logicdepth, itrRank->second);
+				}
+				if (debug) {
+					log("  Logic depth: %d\n", logicdepth);
+					log_flush();
+				}
+				if (logicdepth > (int)threshold_depth) {
+					std::vector<Yosys::RTLIL::IdString>::reverse_iterator itrLastCell = toposort.sorted.rbegin();
+					log("  Selecting %ld cells in for-loop id %ld of depth %d ending with cell %s\n", itr->second.size(), loopInd,
+					    logicdepth, log_id((*itrLastCell)));
+					// Select all cells in the loop cluster
+					for (auto cell : itr->second) {
+						design->selected_member(module->name, cell->name);
 					}
 				}
 			}
