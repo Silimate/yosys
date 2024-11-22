@@ -751,6 +751,7 @@ OBJS += passes/cmds/tee.o
 OBJS += passes/cmds/activity.o
 OBJS += passes/cmds/splitnetlist.o
 OBJS += passes/cmds/reconstructbusses.o
+OBJS += passes/cmds/longloop_select.o
 OBJS += passes/sat/sim.o
 OBJS += passes/techmap/bufnorm.o
 
