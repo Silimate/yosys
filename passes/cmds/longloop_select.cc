@@ -55,7 +55,7 @@ struct LongLoopSelect : public ScriptPass {
 			log_error("No design object");
 			return;
 		}
-		uint32_t threshold_depth = 10;
+		uint32_t threshold_depth = 100;
 		bool debug = false;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -82,7 +82,7 @@ struct LongLoopSelect : public ScriptPass {
 			  log_flush();
 			}
 			if (debug) {
-				log("Creating sigmap\n");
+				log("  Creating sigmap\n");
 			  log_flush();
 			}
 			SigMap sigmap(module);
@@ -90,12 +90,12 @@ struct LongLoopSelect : public ScriptPass {
 			std::vector<Cell *> cells;
 			std::map<uint64_t, std::vector<Cell *>> loopIndexCellMap;
 			if (debug) {
-				log("Creating sorting datastructures\n");
+				log("  Creating sorting datastructures\n");
 			  log_flush();
 			}
 			for (auto cell : module->selected_cells()) {
 				cells.push_back(cell);
-				std::string loopIndex = cell->get_string_attribute("\\in_loop");
+				std::string loopIndex = cell->get_string_attribute("\\in_for_loop");
 				if (!loopIndex.empty()) {
 					uint64_t loopInd = std::stoul(loopIndex, nullptr, 10);
 					std::map<uint64_t, std::vector<Cell *>>::iterator itr = loopIndexCellMap.find(loopInd);
@@ -109,7 +109,7 @@ struct LongLoopSelect : public ScriptPass {
 				}
 			}
 			if (debug) {
-				log("Sorting\n");
+				log("  Sorting\n");
 			  log_flush();
 			}
 			// Module-level topological sorting to identify the for-loop ending cell points
@@ -123,7 +123,7 @@ struct LongLoopSelect : public ScriptPass {
 			     itr++) {
 				Yosys::RTLIL::IdString cellname = (*itr);
 				Cell *actual = module->cell(cellname);
-				std::string loopIndex = actual->get_string_attribute("\\in_loop");
+				std::string loopIndex = actual->get_string_attribute("\\in_for_loop");
 				if (!loopIndex.empty()) {
 					uint64_t loopInd = std::stoul(loopIndex, nullptr, 10);
 					if (treadtedLoops.find(loopInd) == treadtedLoops.end()) {
@@ -146,12 +146,12 @@ struct LongLoopSelect : public ScriptPass {
 								log_flush();
 							}
 							if (logicdepth > (int)threshold_depth) {
-								log("  Selecting %ld cells in loop %ld ending with cell %s of depth: %d\n", itr->second.size(), loopInd,
-								    log_id(cellname), logicdepth);
+								log("  Selecting %ld cells in for-loop id %ld of depth %d ending with cell %s\n", itr->second.size(), loopInd, logicdepth,
+								    log_id(cellname));
 								// Select all cells in the loop cluster
-								//for (auto cell : itr->second) {
-								//	design->selected_member(module->name, cell->name);
-								//}
+								for (auto cell : itr->second) {
+									design->selected_member(module->name, cell->name);
+								}
 							}
 						}
 					}

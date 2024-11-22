@@ -431,7 +431,7 @@ void VerificImporter::import_attributes(dict<RTLIL::IdString, RTLIL::Const> &att
 		attributes[ID::src] = stringf("%s:%d.%d-%d.%d", LineFile::GetFileName(obj->Linefile()), obj->Linefile()->GetLeftLine(), obj->Linefile()->GetLeftCol(), obj->Linefile()->GetRightLine(), obj->Linefile()->GetRightCol());
 #ifdef VERIFIC_LINEFILE_INCLUDES_LOOPS
 		if (uint32_t loopid = obj->Linefile()->GetInLoop()) {
-			attributes[RTLIL::escape_id("in_loop_" + std::to_string(loopid))] = std::to_string(loopid);
+			attributes[RTLIL::escape_id("in_for_loop")] = std::to_string(loopid);
 		}
 #endif
 	}
