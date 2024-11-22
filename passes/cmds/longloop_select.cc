@@ -105,7 +105,6 @@ struct LongLoopSelect : public ScriptPass {
 				log_flush();
 			}
 			SigMap sigmap(module);
-			TopoSort<IdString, RTLIL::sort_by_id_str> toposort;
 			std::map<uint64_t, std::vector<Cell *>> loopIndexCellMap;
 			if (debug) {
 				log("  Creating sorting datastructures\n");
