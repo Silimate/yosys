@@ -1,3 +1,22 @@
+/*
+ *  yosys -- Yosys Open SYnthesis Suite
+ *
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
+ *
+ *  Permission to use, copy, modify, and/or distribute this software for any
+ *  purpose with or without fee is hereby granted, provided that the above
+ *  copyright notice and this permission notice appear in all copies.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ *  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ *  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ *  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ *  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ *  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ *  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ *
+ */
+
 #include "kernel/celltypes.h"
 #include "kernel/sigtools.h"
 #include "kernel/utils.h"
@@ -19,7 +38,7 @@ struct LongLoopSelect : public ScriptPass {
 		dict<SigBit, pool<IdString>> bit_drivers, bit_users;
 		for (Cell *cell : cells) {
 			for (auto conn : cell->connections()) {
-				bool noautostop = false;
+				bool noautostop = true;
 				if (!noautostop && yosys_celltypes.cell_known(cell->type)) {
 					if (conn.first.in(ID::Q, ID::CTRL_OUT, ID::RD_DATA))
 						continue;
@@ -115,6 +134,17 @@ struct LongLoopSelect : public ScriptPass {
 
 			for (std::map<uint64_t, std::vector<Cell *>>::iterator itr = loopIndexCellMap.begin(); itr != loopIndexCellMap.end(); itr++) {
 				uint64_t loopInd = itr->first;
+				if (itr->second.size() < threshold_depth) {
+					if (debug) {
+						log("  Skipping loop id %ld as it contains only %ld cells\n", loopInd, itr->second.size());
+						log_flush();
+					}
+					continue;
+				}
+				if (debug) {
+					log("  Analyzing loop id %ld containing %ld cells\n", loopInd, itr->second.size());
+					log_flush();
+				}
 				// For a given for-loop cell group, perform topological sorting to get the logic depth of the ending cell in
 				// the group
 				TopoSort<IdString, RTLIL::sort_by_id_str> toposort;
