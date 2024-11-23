@@ -388,6 +388,9 @@ struct TechmapWorker
 						c->attributes[attr.first] = attr.second;
 				c->attributes.erase(ID::reprocess_after);
 			}
+			for (auto attr : tpl_cell->attributes) {
+				c->attributes[attr.first] = attr.second;
+			}
 		}
 
 		for (auto &it : tpl->connections()) {
@@ -527,9 +530,9 @@ struct TechmapWorker
 						{
 							extmapper_module = extmapper_design->addModule(m_name);
 							RTLIL::Cell *extmapper_cell = extmapper_module->addCell(cell->type, cell);
-
-							extmapper_cell->set_src_attribute(cell->get_src_attribute());
-
+							for (auto attr : cell->attributes) {
+								extmapper_cell->attributes[attr.first] = attr.second;
+							}
 							int port_counter = 1;
 							for (auto &c : extmapper_cell->connections_) {
 								RTLIL::Wire *w = extmapper_module->addWire(c.first, GetSize(c.second));

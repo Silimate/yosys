@@ -491,7 +491,7 @@ struct AlumaccWorker
 			log(": %s\n", log_id(n->alu_cell));
 
 			if (n->cells.size() > 0)
-				n->alu_cell->set_src_attribute(n->cells[0]->get_src_attribute());
+				n->alu_cell->attributes = n->cells[0]->attributes;
 
 			n->alu_cell->setPort(ID::A, n->a);
 			n->alu_cell->setPort(ID::B, n->b);
