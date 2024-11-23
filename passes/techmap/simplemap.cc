@@ -374,7 +374,6 @@ void simplemap_sop(RTLIL::Module *module, RTLIL::Cell *cell)
 				pat.append(State::S1);
 			}
 		}
-		// (RTLIL::IdString name, const RTLIL::SigSpec &sig_a, const RTLIL::SigSpec &sig_b, const RTLIL::SigSpec &sig_y, bool is_signed = false, const std::string &src = "");
 		SigSpec eq_y = module->addWire(NEW_ID2_SUFFIX("eq_out"), max(GetSize(in), GetSize(pat))); // SILIMATE: Improve the naming
 		Cell* eq = module->addEq(NEW_ID2_SUFFIX("eq"), in, pat, eq_y, false, cell->get_src_attribute());
 		eq->attributes = cell->attributes;
