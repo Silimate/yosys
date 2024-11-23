@@ -380,7 +380,7 @@ void simplemap_sop(RTLIL::Module *module, RTLIL::Cell *cell)
 		products.append(GetSize(in) > 0 ? eq_y : State::S1); // SILIMATE: Improve the naming
 	}
 
-  SigSpec red_or_y = module->addWire(NEW_ID2_SUFFIX("red_or_out"), GetSize(products)); // SILIMATE: Improve the naming
+	SigSpec red_or_y = module->addWire(NEW_ID2_SUFFIX("red_or_out"), GetSize(products)); // SILIMATE: Improve the naming
 	Cell* red_or = module->addReduceOr(NEW_ID2_SUFFIX("reduce_or"), products, red_or_y, false, cell->get_src_attribute());
 	red_or->attributes = cell->attributes;
 	module->connect(cell->getPort(ID::Y), red_or_y); // SILIMATE: Improve the naming
