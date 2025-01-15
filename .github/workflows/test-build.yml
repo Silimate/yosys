@@ -45,7 +45,7 @@ jobs:
       - name: Checkout Yosys
         uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: recursive
           ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Setup environment
