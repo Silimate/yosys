@@ -24,97 +24,6 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-struct ExclusiveDatabase
-{
-	Module *module;
-	const SigMap &sigmap;
-
-	dict<SigBit, std::pair<SigSpec,std::vector<Const>>> sig_cmp_prev;
-
-	ExclusiveDatabase(Module *module, const SigMap &sigmap, bool assume_excl, bool make_excl) : module(module), sigmap(sigmap)
-	{
-		if (assume_excl || make_excl) return;
-		SigSpec const_sig, nonconst_sig;
-		SigBit y_port;
-		pool<Cell*> reduce_or;
-		for (auto cell : module->cells()) {
-			if (cell->type == ID($eq)) {
-				nonconst_sig = sigmap(cell->getPort(ID::A));
-				const_sig = sigmap(cell->getPort(ID::B));
-				if (!const_sig.is_fully_const()) {
-					if (!nonconst_sig.is_fully_const())
-						continue;
-					std::swap(nonconst_sig, const_sig);
-				}
-				y_port = sigmap(cell->getPort(ID::Y));
-			}
-			else if (cell->type == ID($logic_not)) {
-				nonconst_sig = sigmap(cell->getPort(ID::A));
-				const_sig = Const(State::S0, GetSize(nonconst_sig));
-				y_port = sigmap(cell->getPort(ID::Y));
-			}
-			else if (cell->type == ID($reduce_or)) {
-				reduce_or.insert(cell);
-				continue;
-			}
-			else continue;
-
-			log_assert(!nonconst_sig.empty());
-			log_assert(!const_sig.empty());
-			sig_cmp_prev[y_port] = std::make_pair(nonconst_sig,std::vector<Const>{const_sig.as_const()});
-		}
-
-		for (auto cell : reduce_or) {
-			nonconst_sig = SigSpec();
-			std::vector<Const> values;
-			SigSpec a_port = sigmap(cell->getPort(ID::A));
-			for (auto bit : a_port) {
-				auto it = sig_cmp_prev.find(bit);
-				if (it == sig_cmp_prev.end()) {
-					nonconst_sig = SigSpec();
-					break;
-				}
-				if (nonconst_sig.empty())
-					nonconst_sig = it->second.first;
-				else if (nonconst_sig != it->second.first) {
-					nonconst_sig = SigSpec();
-					break;
-				}
-				for (auto value : it->second.second)
-					values.push_back(value);
-			}
-			if (nonconst_sig.empty())
-				continue;
-			y_port = sigmap(cell->getPort(ID::Y));
-			sig_cmp_prev[y_port] = std::make_pair(nonconst_sig,std::move(values));
-		}
-	}
-
-	bool query(const SigSpec &sig) const
-	{
-		SigSpec nonconst_sig;
-		pool<Const> const_values;
-
-		for (auto bit : sig) {
-			auto it = sig_cmp_prev.find(bit);
-			if (it == sig_cmp_prev.end())
-				return false;
-
-			if (nonconst_sig.empty())
-				nonconst_sig = it->second.first;
-			else if (nonconst_sig != it->second.first)
-				return false;
-
-			for (auto value : it->second.second)
-				if (!const_values.insert(value).second)
-					return false;
-		}
-
-		return true;
-	}
-};
-
-
 struct MuxpackWorker
 {
 	Module *module;
@@ -134,10 +43,6 @@ struct MuxpackWorker
 	pool<Cell*> chain_start_cells;
 	pool<Cell*> candidate_cells;
 
-	ExclusiveDatabase excl_db;
-	// Splitfanout limit
-	int limit = -1;
-
 	bool fanout_in_range(SigSpec outsig)
 	{
 		// Check if output signal is "bit-split", skip if so
@@ -147,11 +52,6 @@ struct MuxpackWorker
 			if (bit_users_db[outsig[i]] != bit_users) {
 				return false;
 			}
-		}
-
-		// Skip if fanout is above limit
-		if (limit != -1 && GetSize(bit_users) > limit) {
-			return false;
 		}
 		return true;
 	}
@@ -213,7 +113,7 @@ struct MuxpackWorker
 		}
 	}
 
-	void find_chain_start_cells(bool assume_excl)
+	void find_chain_start_cells()
 	{
 		for (auto cell : candidate_cells)
 		{
@@ -243,8 +143,6 @@ struct MuxpackWorker
 				log_assert(prev_cell);
 				SigSpec s_sig = sigmap(cell->getPort(ID::S));
 				s_sig.append(sigmap(prev_cell->getPort(ID::S)));
-				if (!assume_excl && !excl_db.query(s_sig))
-					goto start_cell;
 			}
 
 			continue;
@@ -276,7 +174,7 @@ struct MuxpackWorker
 		return chain;
 	}
 
-	void process_chain(vector<Cell*> &chain, bool make_excl)
+	void process_chain(vector<Cell*> &chain)
 	{
 		if (GetSize(chain) < 2)
 			return;
@@ -322,69 +220,64 @@ struct MuxpackWorker
 				remove_cells.insert(cursor_cell);
 			}
 
-			if (make_excl) {
-        /*   We create the following one-hot select line decoder
-              S0           S1             S2                S3   ...
-              |            |              |                 |
-              +--------+   +----------+   +-------------+   |
-              |       _|_  |         _|_  |            _|_  |
-              |       \_/  |         \_/  |            \_/  |
-              |        o   |          o   |             o   |
-              |        |   |          |   |      ___    |   |
-              |        +----------+   |   |     /   |   |   |
-              |        |   |      |___|   |    /    |___|   |
-              |        |___|      | & |  /    /     | & |   /     ...
-              |        | & |      \___/ /    /      \___/  /    / 
-              |        \___/        |   |   /         |   |    /
-              |          |          +------+          +-------+   
-              |          |          |   |             |   |
-              |          |          |___|             |___|
-              |          |          | & |             | & |
-              |          |          \___/             \___/
-              |          |            |                 |
-              S0       S0'S1       S0'S1'S2         S0'S1'S2'S3  ...
-        */
-				SigSpec decodedSelect;
-				Cell *cell = last_cell;
-				std::vector<RTLIL::SigBit> select_bits = s_sig.bits();
-				RTLIL::SigBit prevSigNot = RTLIL::State::S1;
-				RTLIL::SigBit prevSigAnd = RTLIL::State::S1;
-				for (int i = (int) (select_bits.size() -1); i >= 0; i--) { 
-					Yosys::RTLIL::SigBit sigbit = select_bits[i];
-					if (i == (int) (select_bits.size() -1)) {
-						decodedSelect.append(sigbit);
-						Wire *not_y = module->addWire(NEW_ID, 1);
-						module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute());
-						prevSigNot = not_y;
-					} else if (i == (int) (select_bits.size() -2)) {
-						Wire *and_y = module->addWire(NEW_ID, 1);
-						module->addAndGate(NEW_ID2_SUFFIX("sel"), sigbit, prevSigNot, and_y, last_cell->get_src_attribute());
-						decodedSelect.append(and_y);
-						Wire *not_y = module->addWire(NEW_ID, 1);
-						module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute());
-						prevSigAnd = prevSigNot;
-						prevSigNot = not_y;
-					} else {
-						Wire *and_y1 = module->addWire(NEW_ID, 1);
-						module->addAndGate(NEW_ID2_SUFFIX("sel"), prevSigAnd, prevSigNot, and_y1, last_cell->get_src_attribute());
-						Wire *and_y2 = module->addWire(NEW_ID, 1);
-						module->addAndGate(NEW_ID2_SUFFIX("sel"), sigbit, and_y1, and_y2, last_cell->get_src_attribute());
-						decodedSelect.append(and_y2);
-						Wire *not_y = module->addWire(NEW_ID, 1);
-						module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute());
-						prevSigAnd = and_y1;
-						prevSigNot = not_y;
-					}					
-				}
-				decodedSelect.reverse();
-				first_cell->setPort(ID::S, decodedSelect);
-			} else {
-				first_cell->setPort(ID::S, s_sig);
+			/*   We create the following one-hot select line decoder
+						S0           S1             S2                S3   ...
+						|            |              |                 |
+						+--------+   +----------+   +-------------+   |
+						|       _|_  |         _|_  |            _|_  |
+						|       \_/  |         \_/  |            \_/  |
+						|        o   |          o   |             o   |
+						|        |   |          |   |      ___    |   |
+						|        +----------+   |   |     /   |   |   |
+						|        |   |      |___|   |    /    |___|   |
+						|        |___|      | & |  /    /     | & |   /     ...
+						|        | & |      \___/ /    /      \___/  /    / 
+						|        \___/        |   |   /         |   |    /
+						|          |          +------+          +-------+   
+						|          |          |   |             |   |
+						|          |          |___|             |___|
+						|          |          | & |             | & |
+						|          |          \___/             \___/
+						|          |            |                 |
+						S0       S0'S1       S0'S1'S2         S0'S1'S2'S3  ...
+			*/
+			SigSpec decodedSelect;
+			Cell *cell = last_cell;
+			std::vector<RTLIL::SigBit> select_bits = s_sig.bits();
+			RTLIL::SigBit prevSigNot = RTLIL::State::S1;
+			RTLIL::SigBit prevSigAnd = RTLIL::State::S1;
+			for (int i = (int) (select_bits.size() -1); i >= 0; i--) { 
+				Yosys::RTLIL::SigBit sigbit = select_bits[i];
+				if (i == (int) (select_bits.size() -1)) {
+					decodedSelect.append(sigbit);
+					Wire *not_y = module->addWire(NEW_ID, 1);
+					module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute());
+					prevSigNot = not_y;
+				} else if (i == (int) (select_bits.size() -2)) {
+					Wire *and_y = module->addWire(NEW_ID, 1);
+					module->addAndGate(NEW_ID2_SUFFIX("sel"), sigbit, prevSigNot, and_y, last_cell->get_src_attribute());
+					decodedSelect.append(and_y);
+					Wire *not_y = module->addWire(NEW_ID, 1);
+					module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute());
+					prevSigAnd = prevSigNot;
+					prevSigNot = not_y;
+				} else {
+					Wire *and_y1 = module->addWire(NEW_ID, 1);
+					module->addAndGate(NEW_ID2_SUFFIX("sel"), prevSigAnd, prevSigNot, and_y1, last_cell->get_src_attribute());
+					Wire *and_y2 = module->addWire(NEW_ID, 1);
+					module->addAndGate(NEW_ID2_SUFFIX("sel"), sigbit, and_y1, and_y2, last_cell->get_src_attribute());
+					decodedSelect.append(and_y2);
+					Wire *not_y = module->addWire(NEW_ID, 1);
+					module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute());
+					prevSigAnd = and_y1;
+					prevSigNot = not_y;
+				}					
 			}
-			first_cell->setPort(ID::B, b_sig);
+			decodedSelect.reverse();
 			first_cell->setParam(ID::S_WIDTH, GetSize(s_sig));
+			first_cell->setPort(ID::B, b_sig);
+			first_cell->setPort(ID::S, decodedSelect);
 			first_cell->setPort(ID::Y, last_cell->getPort(ID::Y));
-
 			cursor += cases;
 		}
 	}
@@ -402,8 +295,8 @@ struct MuxpackWorker
 		candidate_cells.clear();
 	}
 
-	MuxpackWorker(Design *design, Module *module, bool assume_excl, bool make_excl, int limit)
-	    : module(module), sigmap(module), mux_count(0), pmux_count(0), excl_db(module, sigmap, assume_excl, make_excl), limit(limit)
+	MuxpackWorker(Design *design, Module *module)
+	    : module(module), sigmap(module), mux_count(0), pmux_count(0)
 	{
 
 		// Build bit_drivers_db
@@ -451,12 +344,12 @@ struct MuxpackWorker
 		}
 
 		make_sig_chain_next_prev();
-		find_chain_start_cells(assume_excl);
+		find_chain_start_cells();
 
 		// Make the actual transform
 		for (auto c : chain_start_cells) {
 			vector<Cell *> chain = create_chain(c);
-			process_chain(chain, make_excl);
+			process_chain(chain);
 		}
 		// Clean up
 		cleanup(true);
@@ -475,52 +368,17 @@ struct MuxpackPass : public Pass {
 		log("constructs) and $mux cells (e.g. those created by if-else constructs) into\n");
 		log("$pmux cells.\n");
 		log("\n");
-		log("This optimisation is conservative --- it will only pack $mux or $pmux cells\n");
-		log("whose select lines are driven by '$eq' cells with other such cells if it can be\n");
-		log("certain that their select inputs are mutually exclusive.\n");
-		log("\n");
-		log("    -fanout_limit n\n");
-		log("        max fanout to split.\n");
-		log("\n");
-		log("    -assume_excl\n");
-		log("        assume mutually exclusive constraint when packing (may result in inequivalence)\n");
-		log("    -make_excl\n");
-		log("        Adds a one-hot decoder on the control signals\n");
-		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
-		bool assume_excl = false;
-		bool make_excl = false;
-		int limit = -1;
-
 		log_header(design, "Executing MUXPACK pass ($mux cell cascades to $pmux).\n");
-
-		size_t argidx;
-		for (argidx = 1; argidx < args.size(); argidx++)
-		{
-			if (args[argidx] == "-fanout_limit" && argidx + 1 < args.size()) {
-				limit = std::stoi(args[++argidx]);
-				continue;
-			}
-			if (args[argidx] == "-assume_excl") {
-				assume_excl = true;
-				continue;
-			}
-			if (args[argidx] == "-make_excl") {
-				make_excl = true;
-				assume_excl = true;
-				continue;
-			}
-			break;
-		}
-		extra_args(args, argidx, design);
+		extra_args(args, 1, design);
 
 		int mux_count = 0;
 		int pmux_count = 0;
 
 		for (auto module : design->selected_modules()) {
-			MuxpackWorker worker(design, module, assume_excl, make_excl, limit);
+			MuxpackWorker worker(design, module);
 			mux_count += worker.mux_count;
 			pmux_count += worker.pmux_count;
 		}
