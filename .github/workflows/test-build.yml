@@ -45,8 +45,12 @@ jobs:
       - name: Checkout Yosys
         uses: actions/checkout@v4
         with:
-          submodules: true
-          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          submodules: 'recursive'
+
+      - name: Set up Git for submodule access
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.ACCESS_TOKEN }}@github.com".insteadOf "https://github.com"
+          git submodule update --init --recursive
 
       - name: Setup environment
         uses: ./.github/actions/setup-build-env
