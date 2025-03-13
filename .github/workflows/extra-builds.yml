@@ -60,7 +60,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-         submodules: true
+          token: ${{ secrets.ACCESS_TOKEN }}
+          submodules: true
       - name: Build
         run: |
           WASI_SDK=wasi-sdk-19.0
@@ -95,6 +96,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          token: ${{ secrets.ACCESS_TOKEN }}
           submodules: true
       - uses: cachix/install-nix-action@v26
         with:
