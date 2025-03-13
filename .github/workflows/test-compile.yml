@@ -43,7 +43,8 @@ jobs:
     steps:
       - name: Checkout Yosys
         uses: actions/checkout@v4
-        with:
+	with:
+	  token: ${{ secrets.ACCESS_TOKEN }}
           submodules: true
 
       - name: Setup environment
