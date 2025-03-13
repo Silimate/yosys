@@ -44,8 +44,6 @@ jobs:
     steps:
       - name: Checkout Yosys
         uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
 
       - name: Set up Git for submodule access
         run: |
