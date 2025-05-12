@@ -2940,7 +2940,7 @@ RTLIL::Process *RTLIL::Module::addProcess(RTLIL::IdString name, const RTLIL::Pro
 		cell->setPort(ID::A, sig_a);                        \
 		cell->setPort(ID::Y, sig_y);                        \
 		cell->set_src_attribute(src);                       \
-		cell->attributes[ID::submod] = submod;              \
+		cell->set_submod_attribute(submod);                 \
 		return cell;                                        \
 	} \
 	RTLIL::SigSpec RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigSpec &sig_a, bool is_signed, const std::string &src, const std::string &submod) { \
@@ -2967,7 +2967,7 @@ DEF_METHOD(LogicNot,   1, ID($logic_not))
 		cell->setPort(ID::A, sig_a);                        \
 		cell->setPort(ID::Y, sig_y);                        \
 		cell->set_src_attribute(src);                       \
-		cell->attributes[ID::submod] = submod;              \
+		cell->set_submod_attribute(submod);                 \
 		return cell;                                        \
 	} \
 	RTLIL::SigSpec RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigSpec &sig_a, bool is_signed, const std::string &src, const std::string &submod) { \
@@ -2991,7 +2991,7 @@ DEF_METHOD(Buf, sig_a.size(), ID($buf))
 		cell->setPort(ID::B, sig_b);                        \
 		cell->setPort(ID::Y, sig_y);                        \
 		cell->set_src_attribute(src);                       \
-		cell->attributes[ID::submod] = submod;              \
+		cell->set_submod_attribute(submod);                 \
 		return cell;                                        \
 	} \
 	RTLIL::SigSpec RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigSpec &sig_a, const RTLIL::SigSpec &sig_b, bool is_signed, const std::string &src, const std::string &submod) { \
@@ -3036,7 +3036,7 @@ DEF_METHOD(LogicOr,  1, ID($logic_or))
 		cell->setPort(ID::B, sig_b);                        \
 		cell->setPort(ID::Y, sig_y);                        \
 		cell->set_src_attribute(src);                       \
-		cell->attributes[ID::submod] = submod;              \
+		cell->set_submod_attribute(submod);                 \
 		return cell;                                        \
 	} \
 	RTLIL::SigSpec RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigSpec &sig_a, const RTLIL::SigSpec &sig_b, bool is_signed, const std::string &src, const std::string &submod) { \
@@ -3063,7 +3063,7 @@ DEF_METHOD(Sshr,     sig_a.size(), ID($sshr))
 		cell->setPort(ID::B, sig_b);                        \
 		cell->setPort(ID::Y, sig_y);                        \
 		cell->set_src_attribute(src);                       \
-		cell->attributes[ID::submod] = submod;              \
+		cell->set_submod_attribute(submod);                 \
 		return cell;                                        \
 	} \
 	RTLIL::SigSpec RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigSpec &sig_a, const RTLIL::SigSpec &sig_b, bool is_signed, const std::string &src, const std::string &submod) { \
@@ -3085,7 +3085,7 @@ DEF_METHOD(Shiftx,      sig_a.size(), ID($shiftx))
 		cell->setPort(ID::S, sig_s);                              \
 		cell->setPort(ID::Y, sig_y);                              \
 		cell->set_src_attribute(src);                             \
-		cell->attributes[ID::submod] = submod;                    \
+		cell->set_submod_attribute(submod);                       \
 		return cell;                                              \
 	} \
 	RTLIL::SigSpec RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigSpec &sig_a, const RTLIL::SigSpec &sig_b, const RTLIL::SigSpec &sig_s, const std::string &src, const std::string &submod) { \
@@ -3108,7 +3108,7 @@ DEF_METHOD(Pmux,     ID($pmux),       1)
 		cell->setPort(ID::S, sig_s);                              \
 		cell->setPort(ID::Y, sig_y);                              \
 		cell->set_src_attribute(src);                             \
-		cell->attributes[ID::submod] = submod;                    \
+		cell->set_submod_attribute(submod);                       \
 		return cell;                                              \
 	} \
 	RTLIL::SigSpec RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigSpec &sig_a, const RTLIL::SigSpec &sig_s, const std::string &src, const std::string &submod) { \
@@ -3129,7 +3129,7 @@ DEF_METHOD(Demux,    ID($demux),      1)
 		cell->setPort(ID::B, sig_b);                              \
 		cell->setPort(ID::Y, sig_y);                              \
 		cell->set_src_attribute(src);                             \
-		cell->attributes[ID::submod] = submod;                    \
+		cell->set_submod_attribute(submod);                       \
 		return cell;                                              \
 	} \
 	RTLIL::SigSpec RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigSpec &sig_a, const RTLIL::SigSpec &sig_s, const std::string &src, const std::string &submod) { \
@@ -3147,7 +3147,7 @@ DEF_METHOD(Bweqx,    ID($bweqx))
 		cell->setPort("\\" #_P1, sig1);                   \
 		cell->setPort("\\" #_P2, sig2);                   \
 		cell->set_src_attribute(src);                     \
-		cell->attributes[ID::submod] = submod;            \
+		cell->set_submod_attribute(submod);               \
 		return cell;                                      \
 	} \
 	RTLIL::SigBit RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigBit &sig1, const std::string &src, const std::string &submod) { \
@@ -3163,7 +3163,7 @@ DEF_METHOD(Bweqx,    ID($bweqx))
 		cell->setPort("\\" #_P2, sig2);                   \
 		cell->setPort("\\" #_P3, sig3);                   \
 		cell->set_src_attribute(src);                     \
-		cell->attributes[ID::submod] = submod;            \
+		cell->set_submod_attribute(submod);               \
 		return cell;                                      \
 	} \
 	RTLIL::SigBit RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigBit &sig1, const RTLIL::SigBit &sig2, const std::string &src, const std::string &submod) { \
@@ -3180,7 +3180,7 @@ DEF_METHOD(Bweqx,    ID($bweqx))
 		cell->setPort("\\" #_P3, sig3);                   \
 		cell->setPort("\\" #_P4, sig4);                   \
 		cell->set_src_attribute(src);                     \
-		cell->attributes[ID::submod] = submod;            \
+		cell->set_submod_attribute(submod);               \
 		return cell;                                      \
 	} \
 	RTLIL::SigBit RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigBit &sig1, const RTLIL::SigBit &sig2, const RTLIL::SigBit &sig3, const std::string &src, const std::string &submod) { \
@@ -3198,7 +3198,7 @@ DEF_METHOD(Bweqx,    ID($bweqx))
 		cell->setPort("\\" #_P4, sig4);                   \
 		cell->setPort("\\" #_P5, sig5);                   \
 		cell->set_src_attribute(src);                     \
-		cell->attributes[ID::submod] = submod;            \
+		cell->set_submod_attribute(submod);               \
 		return cell;                                      \
 	} \
 	RTLIL::SigBit RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigBit &sig1, const RTLIL::SigBit &sig2, const RTLIL::SigBit &sig3, const RTLIL::SigBit &sig4, const std::string &src, const std::string &submod) { \
@@ -3240,7 +3240,7 @@ RTLIL::Cell* RTLIL::Module::addPow(RTLIL::IdString name, const RTLIL::SigSpec &s
 	cell->setPort(ID::B, sig_b);
 	cell->setPort(ID::Y, sig_y);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3254,7 +3254,7 @@ RTLIL::Cell* RTLIL::Module::addFa(RTLIL::IdString name, const RTLIL::SigSpec &si
 	cell->setPort(ID::X, sig_x);
 	cell->setPort(ID::Y, sig_y);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3267,7 +3267,7 @@ RTLIL::Cell* RTLIL::Module::addSlice(RTLIL::IdString name, const RTLIL::SigSpec 
 	cell->setPort(ID::A, sig_a);
 	cell->setPort(ID::Y, sig_y);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3280,7 +3280,7 @@ RTLIL::Cell* RTLIL::Module::addConcat(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::B, sig_b);
 	cell->setPort(ID::Y, sig_y);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3292,7 +3292,7 @@ RTLIL::Cell* RTLIL::Module::addLut(RTLIL::IdString name, const RTLIL::SigSpec &s
 	cell->setPort(ID::A, sig_a);
 	cell->setPort(ID::Y, sig_y);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3304,7 +3304,7 @@ RTLIL::Cell* RTLIL::Module::addTribuf(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::EN, sig_en);
 	cell->setPort(ID::Y, sig_y);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3314,7 +3314,7 @@ RTLIL::Cell* RTLIL::Module::addAssert(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::A, sig_a);
 	cell->setPort(ID::EN, sig_en);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3324,7 +3324,7 @@ RTLIL::Cell* RTLIL::Module::addAssume(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::A, sig_a);
 	cell->setPort(ID::EN, sig_en);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3334,7 +3334,7 @@ RTLIL::Cell* RTLIL::Module::addLive(RTLIL::IdString name, const RTLIL::SigSpec &
 	cell->setPort(ID::A, sig_a);
 	cell->setPort(ID::EN, sig_en);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3344,7 +3344,7 @@ RTLIL::Cell* RTLIL::Module::addFair(RTLIL::IdString name, const RTLIL::SigSpec &
 	cell->setPort(ID::A, sig_a);
 	cell->setPort(ID::EN, sig_en);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3354,7 +3354,7 @@ RTLIL::Cell* RTLIL::Module::addCover(RTLIL::IdString name, const RTLIL::SigSpec 
 	cell->setPort(ID::A, sig_a);
 	cell->setPort(ID::EN, sig_en);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3365,7 +3365,7 @@ RTLIL::Cell* RTLIL::Module::addEquiv(RTLIL::IdString name, const RTLIL::SigSpec 
 	cell->setPort(ID::B, sig_b);
 	cell->setPort(ID::Y, sig_y);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3379,7 +3379,7 @@ RTLIL::Cell* RTLIL::Module::addSr(RTLIL::IdString name, const RTLIL::SigSpec &si
 	cell->setPort(ID::CLR, sig_clr);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3390,7 +3390,7 @@ RTLIL::Cell* RTLIL::Module::addFf(RTLIL::IdString name, const RTLIL::SigSpec &si
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3403,7 +3403,7 @@ RTLIL::Cell* RTLIL::Module::addDff(RTLIL::IdString name, const RTLIL::SigSpec &s
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3418,7 +3418,7 @@ RTLIL::Cell* RTLIL::Module::addDffe(RTLIL::IdString name, const RTLIL::SigSpec &
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3436,7 +3436,7 @@ RTLIL::Cell* RTLIL::Module::addDffsr(RTLIL::IdString name, const RTLIL::SigSpec 
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3456,7 +3456,7 @@ RTLIL::Cell* RTLIL::Module::addDffsre(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3473,7 +3473,7 @@ RTLIL::Cell* RTLIL::Module::addAdff(RTLIL::IdString name, const RTLIL::SigSpec &
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3492,7 +3492,7 @@ RTLIL::Cell* RTLIL::Module::addAdffe(RTLIL::IdString name, const RTLIL::SigSpec 
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3509,7 +3509,7 @@ RTLIL::Cell* RTLIL::Module::addAldff(RTLIL::IdString name, const RTLIL::SigSpec 
 	cell->setPort(ID::AD, sig_ad);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3528,7 +3528,7 @@ RTLIL::Cell* RTLIL::Module::addAldffe(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::AD, sig_ad);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3545,7 +3545,7 @@ RTLIL::Cell* RTLIL::Module::addSdff(RTLIL::IdString name, const RTLIL::SigSpec &
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3564,7 +3564,7 @@ RTLIL::Cell* RTLIL::Module::addSdffe(RTLIL::IdString name, const RTLIL::SigSpec 
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3583,7 +3583,7 @@ RTLIL::Cell* RTLIL::Module::addSdffce(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3596,7 +3596,7 @@ RTLIL::Cell* RTLIL::Module::addDlatch(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3613,7 +3613,7 @@ RTLIL::Cell* RTLIL::Module::addAdlatch(RTLIL::IdString name, const RTLIL::SigSpe
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3631,7 +3631,7 @@ RTLIL::Cell* RTLIL::Module::addDlatchsr(RTLIL::IdString name, const RTLIL::SigSp
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3643,7 +3643,7 @@ RTLIL::Cell* RTLIL::Module::addSrGate(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::R, sig_clr);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3653,7 +3653,7 @@ RTLIL::Cell* RTLIL::Module::addFfGate(RTLIL::IdString name, const RTLIL::SigSpec
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3664,7 +3664,7 @@ RTLIL::Cell* RTLIL::Module::addDffGate(RTLIL::IdString name, const RTLIL::SigSpe
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3676,7 +3676,7 @@ RTLIL::Cell* RTLIL::Module::addDffeGate(RTLIL::IdString name, const RTLIL::SigSp
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3690,7 +3690,7 @@ RTLIL::Cell* RTLIL::Module::addDffsrGate(RTLIL::IdString name, const RTLIL::SigS
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3705,7 +3705,7 @@ RTLIL::Cell* RTLIL::Module::addDffsreGate(RTLIL::IdString name, const RTLIL::Sig
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3718,7 +3718,7 @@ RTLIL::Cell* RTLIL::Module::addAdffGate(RTLIL::IdString name, const RTLIL::SigSp
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3732,7 +3732,7 @@ RTLIL::Cell* RTLIL::Module::addAdffeGate(RTLIL::IdString name, const RTLIL::SigS
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3746,7 +3746,7 @@ RTLIL::Cell* RTLIL::Module::addAldffGate(RTLIL::IdString name, const RTLIL::SigS
 	cell->setPort(ID::AD, sig_ad);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3761,7 +3761,7 @@ RTLIL::Cell* RTLIL::Module::addAldffeGate(RTLIL::IdString name, const RTLIL::Sig
 	cell->setPort(ID::AD, sig_ad);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3774,7 +3774,7 @@ RTLIL::Cell* RTLIL::Module::addSdffGate(RTLIL::IdString name, const RTLIL::SigSp
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3788,7 +3788,7 @@ RTLIL::Cell* RTLIL::Module::addSdffeGate(RTLIL::IdString name, const RTLIL::SigS
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3802,7 +3802,7 @@ RTLIL::Cell* RTLIL::Module::addSdffceGate(RTLIL::IdString name, const RTLIL::Sig
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3813,7 +3813,7 @@ RTLIL::Cell* RTLIL::Module::addDlatchGate(RTLIL::IdString name, const RTLIL::Sig
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3826,7 +3826,7 @@ RTLIL::Cell* RTLIL::Module::addAdlatchGate(RTLIL::IdString name, const RTLIL::Si
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3840,7 +3840,7 @@ RTLIL::Cell* RTLIL::Module::addDlatchsrGate(RTLIL::IdString name, const RTLIL::S
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3851,7 +3851,7 @@ RTLIL::Cell* RTLIL::Module::addAnyinit(RTLIL::IdString name, const RTLIL::SigSpe
 	cell->setPort(ID::D, sig_d);
 	cell->setPort(ID::Q, sig_q);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3863,7 +3863,7 @@ RTLIL::SigSpec RTLIL::Module::Anyconst(RTLIL::IdString name, int width, const st
 	cell->setParam(ID::WIDTH, width);
 	cell->setPort(ID::Y, sig);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return sig;
 }
 
@@ -3875,7 +3875,7 @@ RTLIL::SigSpec RTLIL::Module::Anyseq(RTLIL::IdString name, int width, const std:
 	cell->setParam(ID::WIDTH, width);
 	cell->setPort(ID::Y, sig);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return sig;
 }
 
@@ -3887,7 +3887,7 @@ RTLIL::SigSpec RTLIL::Module::Allconst(RTLIL::IdString name, int width, const st
 	cell->setParam(ID::WIDTH, width);
 	cell->setPort(ID::Y, sig);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return sig;
 }
 
@@ -3899,7 +3899,7 @@ RTLIL::SigSpec RTLIL::Module::Allseq(RTLIL::IdString name, int width, const std:
 	cell->setParam(ID::WIDTH, width);
 	cell->setPort(ID::Y, sig);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return sig;
 }
 
@@ -3910,7 +3910,7 @@ RTLIL::SigSpec RTLIL::Module::Initstate(RTLIL::IdString name, const std::string 
 	Cell *cell = addCell(name, ID($initstate));
 	cell->setPort(ID::Y, sig);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return sig;
 }
 
@@ -3926,7 +3926,7 @@ RTLIL::SigSpec RTLIL::Module::SetTag(RTLIL::IdString name, const std::string &ta
 	cell->setPort(ID::CLR, sig_c);
 	cell->setPort(ID::Y, sig);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 
 	return sig;
 }
@@ -3941,7 +3941,7 @@ RTLIL::Cell* RTLIL::Module::addSetTag(RTLIL::IdString name, const std::string &t
 	cell->setPort(ID::CLR, sig_c);
 	cell->setPort(ID::Y, sig_y);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3955,7 +3955,7 @@ RTLIL::SigSpec RTLIL::Module::GetTag(RTLIL::IdString name, const std::string &ta
 	cell->setPort(ID::A, sig_a);
 	cell->setPort(ID::Y, sig);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return sig;
 }
 
@@ -3968,7 +3968,7 @@ RTLIL::Cell* RTLIL::Module::addOverwriteTag(RTLIL::IdString name, const std::str
 	cell->setPort(ID::SET, sig_s);
 	cell->setPort(ID::CLR, sig_c);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return cell;
 }
 
@@ -3982,7 +3982,7 @@ RTLIL::SigSpec RTLIL::Module::OriginalTag(RTLIL::IdString name, const std::strin
 	cell->setPort(ID::A, sig_a);
 	cell->setPort(ID::Y, sig);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return sig;
 }
 
@@ -3995,7 +3995,7 @@ RTLIL::SigSpec RTLIL::Module::FutureFF(RTLIL::IdString name, const RTLIL::SigSpe
 	cell->setPort(ID::A, sig_e);
 	cell->setPort(ID::Y, sig);
 	cell->set_src_attribute(src);
-	cell->attributes[ID::submod] = submod;
+	cell->set_submod_attribute(submod); 
 	return sig;
 }
 

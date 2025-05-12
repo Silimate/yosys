@@ -894,6 +894,13 @@ struct RTLIL::AttrObject
 		return get_string_attribute(ID::src);
 	}
 
+	void set_submod_attribute(const std::string &submod) {
+		set_string_attribute(ID::submod, submod);
+	}
+	std::string get_submod_attribute() const {
+		return get_string_attribute(ID::submod);
+	}
+
 	void set_hdlname_attribute(const std::vector<string> &hierarchy);
 	std::vector<string> get_hdlname_attribute() const;
 
