@@ -363,13 +363,13 @@ struct ExtractReducePass : public Pass
 						}
 
 						if (head_cell->type == ID($_AND_) || head_cell->type == ID($and)) {
-							module->addReduceAnd(NEW_ID2_SUFFIX("reduce_and"), input, output, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addReduceAnd(NEW_ID2_SUFFIX("reduce_and"), input, output, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else if (head_cell->type == ID($_OR_) || head_cell->type == ID($or)) {
-							module->addReduceOr(NEW_ID2_SUFFIX("reduce_or"), input, output, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addReduceOr(NEW_ID2_SUFFIX("reduce_or"), input, output, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else if (head_cell->type == ID($_XOR_) || head_cell->type == ID($xor)) {
-							module->addReduceXor(NEW_ID2_SUFFIX("reduce_xor"), input, output, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addReduceXor(NEW_ID2_SUFFIX("reduce_xor"), input, output, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else if (head_cell->type == ID($_MUX_) || head_cell->type == ID($mux)) {
-							module->addPmux(NEW_ID2_SUFFIX("pmux"), State::Sx, input, sel, output, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addPmux(NEW_ID2_SUFFIX("pmux"), State::Sx, input, sel, output, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else {
 							log_assert(false);
 						}
