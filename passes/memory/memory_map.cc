@@ -88,12 +88,12 @@ struct MemoryMapWorker
 		log_assert(GetSize(addr_sig) == GetSize(addr_val));
 		if (decoder_cache.count(key) == 0) {
 			if (GetSize(addr_sig) < 2) {
-				decoder_cache[key] = module->Eq(NEW_MEM_ID_SUFFIX("addr_decode"), addr_sig, addr_val, false, mem.get_src_attribute()); // SILIMATE: Improve the naming
+				decoder_cache[key] = module->Eq(NEW_MEM_ID_SUFFIX("addr_decode"), addr_sig, addr_val, false, mem.get_src_attribute(), mem.get_submod_attribute()); // SILIMATE: Improve the naming
 			} else {
 				int split_at = GetSize(addr_sig) / 2;
 				RTLIL::SigBit left_eq = addr_decode(addr_sig.extract(0, split_at), addr_val.extract(0, split_at), module, mem);
 				RTLIL::SigBit right_eq = addr_decode(addr_sig.extract(split_at, GetSize(addr_sig) - split_at), addr_val.extract(split_at, GetSize(addr_val) - split_at), module, mem);
-				decoder_cache[key] = module->And(NEW_MEM_ID_SUFFIX("addr_decode"), left_eq, right_eq, false, mem.get_src_attribute()); // SILIMATE: Improve the naming
+				decoder_cache[key] = module->And(NEW_MEM_ID_SUFFIX("addr_decode"), left_eq, right_eq, false, mem.get_src_attribute(), mem.get_submod_attribute()); // SILIMATE: Improve the naming
 			}
 		}
 

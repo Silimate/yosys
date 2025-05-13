@@ -270,8 +270,8 @@ struct MemoryShareWorker
 						port1.data.replace(pos, port2.data.extract(pos, width));
 						new_en = port2.en[pos];
 					} else {
-						port1.data.replace(pos, module->Mux(NEW_MEM_ID_SUFFIX("data_mux"), port1.data.extract(pos, width), port2.data.extract(pos, width), port2.en[pos], mem.get_src_attribute())); // SILIMATE: Improve the naming
-						new_en = module->Or(NEW_MEM_ID_SUFFIX("en"), port1.en[pos], port2.en[pos], false, mem.get_src_attribute()); // SILIMATE: Improve the naming
+						port1.data.replace(pos, module->Mux(NEW_MEM_ID_SUFFIX("data_mux"), port1.data.extract(pos, width), port2.data.extract(pos, width), port2.en[pos], mem.get_src_attribute(), mem.get_submod_attribute())); // SILIMATE: Improve the naming
+						new_en = module->Or(NEW_MEM_ID_SUFFIX("en"), port1.en[pos], port2.en[pos], false, mem.get_src_attribute(), mem.get_submod_attribute()); // SILIMATE: Improve the naming
 					}
 					for (int k = pos; k < epos; k++)
 						port1.en[k] = new_en;
@@ -423,17 +423,17 @@ struct MemoryShareWorker
 					RTLIL::SigSpec this_data = port2.data;
 					std::vector<RTLIL::SigBit> this_en = modwalker.sigmap(port2.en);
 
-					RTLIL::SigBit this_en_active = module->ReduceOr(NEW_MEM_ID_SUFFIX("en_active"), this_en, false, mem.get_src_attribute()); // SILIMATE: Improve the naming
+					RTLIL::SigBit this_en_active = module->ReduceOr(NEW_MEM_ID_SUFFIX("en_active"), this_en, false, mem.get_src_attribute(), mem.get_submod_attribute()); // SILIMATE: Improve the naming
 
 					if (GetSize(last_addr) < GetSize(this_addr))
 						last_addr.extend_u0(GetSize(this_addr));
 					else
 						this_addr.extend_u0(GetSize(last_addr));
 
-					SigSpec new_addr = module->Mux(NEW_MEM_ID_SUFFIX("addr"), last_addr.extract_end(port1.wide_log2), this_addr.extract_end(port1.wide_log2), this_en_active, mem.get_src_attribute()); // SILIMATE: Improve the naming
+					SigSpec new_addr = module->Mux(NEW_MEM_ID_SUFFIX("addr"), last_addr.extract_end(port1.wide_log2), this_addr.extract_end(port1.wide_log2), this_en_active, mem.get_src_attribute(), mem.get_submod_attribute()); // SILIMATE: Improve the naming
 
 					port1.addr = SigSpec({new_addr, port1.addr.extract(0, port1.wide_log2)});
-					port1.data = module->Mux(NEW_MEM_ID_SUFFIX("data"), last_data, this_data, this_en_active, mem.get_src_attribute()); // SILIMATE: Improve the naming
+					port1.data = module->Mux(NEW_MEM_ID_SUFFIX("data"), last_data, this_data, this_en_active, mem.get_src_attribute(), mem.get_submod_attribute()); // SILIMATE: Improve the naming
 
 					std::map<std::pair<RTLIL::SigBit, RTLIL::SigBit>, int> groups_en;
 					RTLIL::SigSpec grouped_last_en, grouped_this_en, en;
@@ -450,7 +450,7 @@ struct MemoryShareWorker
 						en.append(RTLIL::SigSpec(grouped_en, groups_en[key]));
 					}
 
-					module->addMux(NEW_MEM_ID_SUFFIX("en_mux"), grouped_last_en, grouped_this_en, this_en_active, grouped_en, mem.get_src_attribute()); // SILIMATE: Improve the naming
+					module->addMux(NEW_MEM_ID_SUFFIX("en_mux"), grouped_last_en, grouped_this_en, this_en_active, grouped_en, mem.get_src_attribute(), mem.get_submod_attribute()); // SILIMATE: Improve the naming
 					port1.en = en;
 
 					port2.removed = true;
