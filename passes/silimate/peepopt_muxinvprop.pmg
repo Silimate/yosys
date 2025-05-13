@@ -45,8 +45,8 @@ code mux_a mux_b mux_y  inv_a inv_y
 	Cell *cell = mux_gate;
 
 	// Set new ports
-	mux_gate->setPort(\A, module->Not(NEW_ID2_SUFFIX("not_a"), mux_a, false, mux_gate->get_src_attribute()));
-	mux_gate->setPort(\B, module->Not(NEW_ID2_SUFFIX("not_b"), mux_b, false, mux_gate->get_src_attribute()));
+	mux_gate->setPort(\A, module->Not(NEW_ID2_SUFFIX("not_a"), mux_a, false, mux_gate->get_src_attribute(), mux_gate->get_submod_attribute()));
+	mux_gate->setPort(\B, module->Not(NEW_ID2_SUFFIX("not_b"), mux_b, false, mux_gate->get_src_attribute(), mux_gate->get_submod_attribute()));
 	mux_gate->setPort(\Y, inv_y);
 
 	// Rename MUX gate for formal

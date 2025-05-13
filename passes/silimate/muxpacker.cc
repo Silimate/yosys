@@ -241,21 +241,21 @@ struct MuxpackerPass : public Pass
 							if (gt == GateType::Mux) {
 								s_port = sigmap(x->getPort(ID::S)[0]);
 								if (port == ID::A)
-									sel_sig = module->Not(NEW_ID2_SUFFIX("not"), s_port, false, x->get_src_attribute());
+									sel_sig = module->Not(NEW_ID2_SUFFIX("not"), s_port, false, x->get_src_attribute(), x->get_submod_attribute());
 								else
-									sel_sig = module->Buf(NEW_ID2_SUFFIX("buf"), s_port, false, x->get_src_attribute());
+									sel_sig = module->Buf(NEW_ID2_SUFFIX("buf"), s_port, false, x->get_src_attribute(), x->get_submod_attribute());
 							}
 
 							if (drv_ok && (allow_off_chain || sink_single)) {
 								inner_cells++;
 								if (gt == GateType::Mux && !assume_excl) { // if not assuming exclusivity, add to excl signal
-									SigBit sel_sig_inv = (port == ID::A) ? module->Not(NEW_ID2_SUFFIX("not"), s_port, false, x->get_src_attribute())[0] : s_port;
-									bfs_queue.push_back({drv, module->And(NEW_ID2_SUFFIX("excl_and"), sel_sig_inv, excl, false, x->get_src_attribute())});
+									SigBit sel_sig_inv = (port == ID::A) ? module->Not(NEW_ID2_SUFFIX("not"), s_port, false, x->get_src_attribute(), x->get_submod_attribute())[0] : s_port;
+									bfs_queue.push_back({drv, module->And(NEW_ID2_SUFFIX("excl_and"), sel_sig_inv, excl, false, x->get_src_attribute(), x->get_submod_attribute())});
 								} else { // otherwise, just use the drv signal and don't worry about exclusivity
 									bfs_queue.push_back({drv, excl});
 								}
 							} else {
-								sources[module->Buf(NEW_ID2_SUFFIX("buf"), bit, false, x->get_src_attribute())]++;
+								sources[module->Buf(NEW_ID2_SUFFIX("buf"), bit, false, x->get_src_attribute(), x->get_submod_attribute())]++;
 								if (gt == GateType::Mux) {
 									if (assume_excl) // if assuming exclusivity, just use select signal
 										sels[sel_sig]++;
@@ -291,15 +291,15 @@ struct MuxpackerPass : public Pass
 						}
 
 						if (head_cell->type == ID($_AND_) || head_cell->type == ID($and)) {
-							module->addReduceAnd(NEW_ID2_SUFFIX("reduce_and"), input, output, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addReduceAnd(NEW_ID2_SUFFIX("reduce_and"), input, output, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else if (head_cell->type == ID($_OR_) || head_cell->type == ID($or)) {
-							module->addReduceOr(NEW_ID2_SUFFIX("reduce_or"), input, output, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addReduceOr(NEW_ID2_SUFFIX("reduce_or"), input, output, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else if (head_cell->type == ID($_XOR_) || head_cell->type == ID($xor)) {
-							module->addReduceXor(NEW_ID2_SUFFIX("reduce_xor"), input, output, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addReduceXor(NEW_ID2_SUFFIX("reduce_xor"), input, output, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else if (head_cell->type == ID($_XNOR_) || head_cell->type == ID($xnor)) {
-							module->addReduceXnor(NEW_ID2_SUFFIX("reduce_xnor"), input, output, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addReduceXnor(NEW_ID2_SUFFIX("reduce_xnor"), input, output, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else if (head_cell->type == ID($_MUX_) || head_cell->type == ID($mux)) {
-							module->addPmux(NEW_ID2_SUFFIX("pmux"), State::Sx, input, sel, output, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addPmux(NEW_ID2_SUFFIX("pmux"), State::Sx, input, sel, output, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else {
 							log_assert(false);
 						}
