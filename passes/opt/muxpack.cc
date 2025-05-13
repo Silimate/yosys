@@ -285,10 +285,11 @@ struct MuxpackWorker
 				else {
 					log_assert(cursor_cell->type == ID($mux));
 					b_sig.append(cursor_cell->getPort(ID::A));
-					s_sig.append(module->LogicNot(NEW_ID2_SUFFIX("sel"), cursor_cell->getPort(ID::S), false, cell->get_src_attribute())); // SILIMATE: Improve the naming
+					s_sig.append(module->LogicNot(NEW_ID2_SUFFIX("sel"), cursor_cell->getPort(ID::S), false, cell->get_src_attribute(), cell->get_submod_attribute())); // SILIMATE: Improve the naming
 				}
 				remove_cells.insert(cursor_cell);
 				first_cell->add_strpool_attribute(ID::src, cursor_cell->get_strpool_attribute(ID::src)); // SILIMATE: Improve src attribution
+				first_cell->add_strpool_attribute(ID::submod, cursor_cell->get_strpool_attribute(ID::submod)); // SILIMATE: Add submod attribution
 			}
 
 			if (make_excl) {
@@ -323,24 +324,24 @@ struct MuxpackWorker
 					if (i == (int) (select_bits.size() -1)) {
 						decodedSelect.append(sigbit);
 						Wire *not_y = module->addWire(NEW_ID2_SUFFIX("not_y"), 1);
-						module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute());
+						module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute(), last_cell->get_submod_attribute());
 						prevSigNot = not_y;
 					} else if (i == (int) (select_bits.size() -2)) {
 						Wire *and_y = module->addWire(NEW_ID2_SUFFIX("and_y"), 1);
-						module->addAnd(NEW_ID2_SUFFIX("sel"), sigbit, prevSigNot, and_y, false, last_cell->get_src_attribute());
+						module->addAnd(NEW_ID2_SUFFIX("sel"), sigbit, prevSigNot, and_y, false, last_cell->get_src_attribute(), last_cell->get_submod_attribute());
 						decodedSelect.append(and_y);
 						Wire *not_y = module->addWire(NEW_ID2_SUFFIX("not_y"), 1);
-						module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute());
+						module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute(), last_cell->get_submod_attribute());
 						prevSigAnd = prevSigNot;
 						prevSigNot = not_y;
 					} else {
 						Wire *and_y1 = module->addWire(NEW_ID2_SUFFIX("and_y1"), 1);
-						module->addAnd(NEW_ID2_SUFFIX("sel"), prevSigAnd, prevSigNot, and_y1, false, last_cell->get_src_attribute());
+						module->addAnd(NEW_ID2_SUFFIX("sel"), prevSigAnd, prevSigNot, and_y1, false, last_cell->get_src_attribute(), last_cell->get_submod_attribute());
 						Wire *and_y2 = module->addWire(NEW_ID2_SUFFIX("and_y2"), 1);
-						module->addAnd(NEW_ID2_SUFFIX("sel"), sigbit, and_y1, and_y2, false, last_cell->get_src_attribute());
+						module->addAnd(NEW_ID2_SUFFIX("sel"), sigbit, and_y1, and_y2, false, last_cell->get_src_attribute(), last_cell->get_submod_attribute());
 						decodedSelect.append(and_y2);
 						Wire *not_y = module->addWire(NEW_ID2_SUFFIX("not_y"), 1);
-						module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute());
+						module->addNot(NEW_ID2_SUFFIX("not"), sigbit, not_y, false, last_cell->get_src_attribute(), last_cell->get_submod_attribute());
 						prevSigAnd = and_y1;
 						prevSigNot = not_y;
 					}					

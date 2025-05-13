@@ -152,7 +152,7 @@ code
 		shift->setParam(\B_WIDTH, GetSize(new_b));
 	} else {
 		SigSpec b_neg = module->addWire(NEW_ID2_SUFFIX("b_neg"), GetSize(new_b) + 1); // SILIMATE: Improve the naming
-		module->addNeg(NEW_ID2_SUFFIX("neg"), new_b, b_neg, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+		module->addNeg(NEW_ID2_SUFFIX("neg"), new_b, b_neg, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 		shift->setPort(\B, b_neg);
 		shift->setParam(\B_WIDTH, GetSize(b_neg));
 	}

@@ -134,6 +134,7 @@ struct OptReduceWorker
 				reduce_or_cell->parameters[ID::A_WIDTH] = RTLIL::Const(this_s.size());
 				reduce_or_cell->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
 				reduce_or_cell->set_src_attribute(cell->get_src_attribute()); // SILIMATE: Improve the naming
+				reduce_or_cell->set_submod_attribute(cell->get_submod_attribute()); // SILIMATE: Add submod attribution
 
 				RTLIL::Wire *reduce_or_wire = module->addWire(NEW_ID2_SUFFIX("reduce_or_wire")); // SILIMATE: Improve the naming
 				this_s = RTLIL::SigSpec(reduce_or_wire);

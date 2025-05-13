@@ -192,7 +192,7 @@ struct OptDffWorker
 			}
 
 			RTLIL::SigSpec y = module->addWire(NEW_ID2_SUFFIX("pat_y")); // SILIMATE: Improve the naming
-			RTLIL::Cell *c = module->addNe(NEW_ID2_SUFFIX("pat_ne"), s1, s2, y, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+			RTLIL::Cell *c = module->addNe(NEW_ID2_SUFFIX("pat_ne"), s1, s2, y, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 
 			if (make_gates) {
 				simplemap(module, c);
@@ -205,9 +205,9 @@ struct OptDffWorker
 			if (item.second)
 				or_input.append(item.first);
 			else if (make_gates)
-				or_input.append(module->NotGate(NEW_ID2_SUFFIX("ctrl_inv"), item.first, cell->get_src_attribute())); // SILIMATE: Improve the naming
+				or_input.append(module->NotGate(NEW_ID2_SUFFIX("ctrl_inv"), item.first, cell->get_src_attribute(), cell->get_submod_attribute())); // SILIMATE: Improve the naming
 			else
-				or_input.append(module->Not(NEW_ID2_SUFFIX("ctrl_inv"), item.first, false, cell->get_src_attribute())); // SILIMATE: Improve the naming
+				or_input.append(module->Not(NEW_ID2_SUFFIX("ctrl_inv"), item.first, false, cell->get_src_attribute(), cell->get_submod_attribute())); // SILIMATE: Improve the naming
 		}
 
 		if (GetSize(or_input) == 0)
@@ -217,7 +217,7 @@ struct OptDffWorker
 			return ctrl_t(or_input, true);
 
 		RTLIL::SigSpec y = module->addWire(NEW_ID2_SUFFIX("pat_logic_y")); // SILIMATE: Improve the naming
-		RTLIL::Cell *c = module->addReduceAnd(NEW_ID2_SUFFIX("pat_logic_reduce_and"), or_input, y, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+		RTLIL::Cell *c = module->addReduceAnd(NEW_ID2_SUFFIX("pat_logic_reduce_and"), or_input, y, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 
 		if (make_gates) {
 			simplemap(module, c);
@@ -245,17 +245,17 @@ struct OptDffWorker
 			if (item.second == final_pol)
 				or_input.append(item.first);
 			else if (make_gates)
-				or_input.append(module->NotGate(NEW_ID2_SUFFIX("comb_rst_inv"), item.first, cell->get_src_attribute())); // SILIMATE: Improve the naming
+				or_input.append(module->NotGate(NEW_ID2_SUFFIX("comb_rst_inv"), item.first, cell->get_src_attribute(), cell->get_submod_attribute())); // SILIMATE: Improve the naming
 			else
-				or_input.append(module->Not(NEW_ID2_SUFFIX("comb_rst_inv"), item.first, false, cell->get_src_attribute())); // SILIMATE: Improve the naming
+				or_input.append(module->Not(NEW_ID2_SUFFIX("comb_rst_inv"), item.first, false, cell->get_src_attribute(), cell->get_submod_attribute())); // SILIMATE: Improve the naming
 		}
 
 		RTLIL::SigSpec y = module->addWire(NEW_ID2_SUFFIX("comb_rst_y")); // SILIMATE: Improve the naming
 		RTLIL::Cell *c;
 		if (final_pol)
-		  c = module->addReduceOr(NEW_ID2_SUFFIX("comb_rst_reduce_or"), or_input, y, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+		  c = module->addReduceOr(NEW_ID2_SUFFIX("comb_rst_reduce_or"), or_input, y, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 		else
-			c = module->addReduceAnd(NEW_ID2_SUFFIX("comb_rst_reduce_and"), or_input, y, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+			c = module->addReduceAnd(NEW_ID2_SUFFIX("comb_rst_reduce_and"), or_input, y, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 
 		if (make_gates) {
 			simplemap(module, c);
@@ -299,9 +299,9 @@ struct OptDffWorker
 						if (!ff.pol_clr) {
 							module->connect(ff.sig_q[i], ff.sig_clr[i]);
 						} else if (ff.is_fine) {
-							module->addNotGate(NEW_ID2_SUFFIX("aactive_set"), ff.sig_clr[i], ff.sig_q[i], cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addNotGate(NEW_ID2_SUFFIX("aactive_set"), ff.sig_clr[i], ff.sig_q[i], cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else {
-							module->addNot(NEW_ID2_SUFFIX("aactive_set"), ff.sig_clr[i], ff.sig_q[i], false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							module->addNot(NEW_ID2_SUFFIX("aactive_set"), ff.sig_clr[i], ff.sig_q[i], false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						}
 						log_debug("Handling always-active SET at position %d on %s (%s) from module %s (changing to combinatorial circuit).\n",
 								i, log_id(cell), log_id(cell->type), log_id(module));
@@ -399,40 +399,40 @@ struct OptDffWorker
 						SigSpec tmp;
 						if (ff.is_fine) {
 							if (ff.pol_set)
-								tmp = module->MuxGate(NEW_ID2_SUFFIX("aactive_aload"), ff.sig_ad, State::S1, ff.sig_set, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								tmp = module->MuxGate(NEW_ID2_SUFFIX("aactive_aload"), ff.sig_ad, State::S1, ff.sig_set, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 							else
-								tmp = module->MuxGate(NEW_ID2_SUFFIX("aactive_aload"), State::S1, ff.sig_ad, ff.sig_set, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								tmp = module->MuxGate(NEW_ID2_SUFFIX("aactive_aload"), State::S1, ff.sig_ad, ff.sig_set, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 							if (ff.pol_clr)
-								module->addMuxGate(NEW_ID2_SUFFIX("aactive_aload"), tmp, State::S0, ff.sig_clr, ff.sig_q, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								module->addMuxGate(NEW_ID2_SUFFIX("aactive_aload"), tmp, State::S0, ff.sig_clr, ff.sig_q, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 							else
-								module->addMuxGate(NEW_ID2_SUFFIX("aactive_aload"), State::S0, tmp, ff.sig_clr, ff.sig_q, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								module->addMuxGate(NEW_ID2_SUFFIX("aactive_aload"), State::S0, tmp, ff.sig_clr, ff.sig_q, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else {
 							if (ff.pol_set)
-								tmp = module->Or(NEW_ID2_SUFFIX("aactive_aload"), ff.sig_ad, ff.sig_set, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								tmp = module->Or(NEW_ID2_SUFFIX("aactive_aload"), ff.sig_ad, ff.sig_set, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 							else {
 								IdString aactive_aload_idstr = NEW_ID2_SUFFIX("aactive_aload");
 								IdString aactive_aload_inv_idstr = NEW_ID2_SUFFIX("aactive_aload_inv");
-								tmp = module->Or(aactive_aload_idstr, ff.sig_ad, module->Not(aactive_aload_inv_idstr, ff.sig_set, false, cell->get_src_attribute())); // SILIMATE: Improve the naming
+								tmp = module->Or(aactive_aload_idstr, ff.sig_ad, module->Not(aactive_aload_inv_idstr, ff.sig_set, false, cell->get_src_attribute(), cell->get_submod_attribute())); // SILIMATE: Improve the naming
 							}
 							if (ff.pol_clr) {
 								IdString aactive_aload_idstr = NEW_ID2_SUFFIX("aactive_aload");
 								IdString aactive_aload_inv_idstr = NEW_ID2_SUFFIX("aactive_aload_inv");
-								module->addAnd(aactive_aload_idstr, tmp, module->Not(aactive_aload_inv_idstr, ff.sig_clr, false, cell->get_src_attribute()), ff.sig_q); // SILIMATE: Improve the naming
+								module->addAnd(aactive_aload_idstr, tmp, module->Not(aactive_aload_inv_idstr, ff.sig_clr, false, cell->get_src_attribute(), cell->get_submod_attribute()), ff.sig_q); // SILIMATE: Improve the naming
 							}
 							else
-								module->addAnd(NEW_ID2_SUFFIX("aactive_aload"), tmp, ff.sig_clr, ff.sig_q, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								module->addAnd(NEW_ID2_SUFFIX("aactive_aload"), tmp, ff.sig_clr, ff.sig_q, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						}
 					} else if (ff.has_arst) {
 						if (ff.is_fine) {
 							if (ff.pol_arst)
-								module->addMuxGate(NEW_ID2_SUFFIX("aactive_aload"), ff.sig_ad, ff.val_arst[0], ff.sig_arst, ff.sig_q, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								module->addMuxGate(NEW_ID2_SUFFIX("aactive_aload"), ff.sig_ad, ff.val_arst[0], ff.sig_arst, ff.sig_q, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 							else
-								module->addMuxGate(NEW_ID2_SUFFIX("aactive_aload"), ff.val_arst[0], ff.sig_ad, ff.sig_arst, ff.sig_q, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								module->addMuxGate(NEW_ID2_SUFFIX("aactive_aload"), ff.val_arst[0], ff.sig_ad, ff.sig_arst, ff.sig_q, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						} else {
 							if (ff.pol_arst)
-								module->addMux(NEW_ID2_SUFFIX("aactive_aload"), ff.sig_ad, ff.val_arst, ff.sig_arst, ff.sig_q, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								module->addMux(NEW_ID2_SUFFIX("aactive_aload"), ff.sig_ad, ff.val_arst, ff.sig_arst, ff.sig_q, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 							else
-								module->addMux(NEW_ID2_SUFFIX("aactive_aload"), ff.val_arst, ff.sig_ad, ff.sig_arst, ff.sig_q, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								module->addMux(NEW_ID2_SUFFIX("aactive_aload"), ff.val_arst, ff.sig_ad, ff.sig_arst, ff.sig_q, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						}
 					} else {
 						module->connect(ff.sig_q, ff.sig_ad);
@@ -549,20 +549,20 @@ struct OptDffWorker
 					if (ff.has_ce && ff.ce_over_srst) {
 						if (!ff.pol_ce) {
 							if (ff.is_fine)
-								ff.sig_ce = module->NotGate(NEW_ID2_SUFFIX("ce"), ff.sig_ce, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								ff.sig_ce = module->NotGate(NEW_ID2_SUFFIX("ce"), ff.sig_ce, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 							else
-								ff.sig_ce = module->Not(NEW_ID2_SUFFIX("ce"), ff.sig_ce, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								ff.sig_ce = module->Not(NEW_ID2_SUFFIX("ce"), ff.sig_ce, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						}
 						if (!ff.pol_srst) {
 							if (ff.is_fine)
-								ff.sig_srst = module->NotGate(NEW_ID2_SUFFIX("srst"), ff.sig_srst, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								ff.sig_srst = module->NotGate(NEW_ID2_SUFFIX("srst"), ff.sig_srst, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 							else
-								ff.sig_srst = module->Not(NEW_ID2_SUFFIX("srst"), ff.sig_srst, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+								ff.sig_srst = module->Not(NEW_ID2_SUFFIX("srst"), ff.sig_srst, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						}
 						if (ff.is_fine)
-							ff.sig_ce = module->AndGate(NEW_ID2_SUFFIX("ce"), ff.sig_ce, ff.sig_srst, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							ff.sig_ce = module->AndGate(NEW_ID2_SUFFIX("ce"), ff.sig_ce, ff.sig_srst, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						else
-							ff.sig_ce = module->And(NEW_ID2_SUFFIX("ce"), ff.sig_ce, ff.sig_srst, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							ff.sig_ce = module->And(NEW_ID2_SUFFIX("ce"), ff.sig_ce, ff.sig_srst, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 						ff.pol_ce = true;
 					} else {
 						ff.pol_ce = ff.pol_srst;

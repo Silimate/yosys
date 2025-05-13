@@ -110,6 +110,9 @@ struct FlattenWorker
 		dict<IdString, IdString> memory_map;
 		for (auto &tpl_memory_it : tpl->memories) {
 			RTLIL::Memory *new_memory = module->addMemory(map_name(cell, tpl_memory_it.second, separator), tpl_memory_it.second);
+			if (mark_submod) {
+				new_memory->attributes[ID::submod] = Const(cell->name.str());
+			}
 			map_attributes(cell, new_memory, tpl_memory_it.second->name);
 			memory_map[tpl_memory_it.first] = new_memory->name;
 			design->select(module, new_memory);
