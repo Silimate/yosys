@@ -261,8 +261,6 @@ void extract_cell(RTLIL::Cell *cell, bool keepff)
 	{
 		RTLIL::SigSpec sig_a = cell->getPort(ID::A);
 		RTLIL::SigSpec sig_y = cell->getPort(ID::Y);
-		sig_y.as_wire()->set_submod_attribute(cell->get_submod_attribute());
-		log("Mapping %s with submod %s\n", log_id(cell), sig_y.as_wire()->get_submod_attribute().c_str());
 
 		assign_map.apply(sig_a);
 		assign_map.apply(sig_y);
@@ -278,7 +276,6 @@ void extract_cell(RTLIL::Cell *cell, bool keepff)
 		RTLIL::SigSpec sig_a = cell->getPort(ID::A);
 		RTLIL::SigSpec sig_b = cell->getPort(ID::B);
 		RTLIL::SigSpec sig_y = cell->getPort(ID::Y);
-		sig_y.as_wire()->set_submod_attribute(cell->get_submod_attribute());
 
 		assign_map.apply(sig_a);
 		assign_map.apply(sig_b);
@@ -316,7 +313,6 @@ void extract_cell(RTLIL::Cell *cell, bool keepff)
 		RTLIL::SigSpec sig_b = cell->getPort(ID::B);
 		RTLIL::SigSpec sig_s = cell->getPort(ID::S);
 		RTLIL::SigSpec sig_y = cell->getPort(ID::Y);
-		sig_y.as_wire()->set_submod_attribute(cell->get_submod_attribute());
 
 		assign_map.apply(sig_a);
 		assign_map.apply(sig_b);
@@ -339,7 +335,6 @@ void extract_cell(RTLIL::Cell *cell, bool keepff)
 		RTLIL::SigSpec sig_b = cell->getPort(ID::B);
 		RTLIL::SigSpec sig_c = cell->getPort(ID::C);
 		RTLIL::SigSpec sig_y = cell->getPort(ID::Y);
-		sig_y.as_wire()->set_submod_attribute(cell->get_submod_attribute());
 
 		assign_map.apply(sig_a);
 		assign_map.apply(sig_b);
@@ -363,7 +358,6 @@ void extract_cell(RTLIL::Cell *cell, bool keepff)
 		RTLIL::SigSpec sig_c = cell->getPort(ID::C);
 		RTLIL::SigSpec sig_d = cell->getPort(ID::D);
 		RTLIL::SigSpec sig_y = cell->getPort(ID::Y);
-		sig_y.as_wire()->set_submod_attribute(cell->get_submod_attribute());
 
 		assign_map.apply(sig_a);
 		assign_map.apply(sig_b);
