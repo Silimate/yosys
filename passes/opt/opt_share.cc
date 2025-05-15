@@ -198,6 +198,7 @@ void merge_operators(RTLIL::Module *module, RTLIL::Cell *mux, const std::vector<
 		operand.sig.extend_u0(max_width, operand.is_signed);
 		if (operand.sign != muxed_operands[0].sign)
 			operand = ExtSigSpec(module->Neg(NEW_ID2_SUFFIX("neg"), operand.sig, operand.is_signed, cell->get_src_attribute(), cell->get_submod_attribute())); // SILIMATE: Improve the naming
+
 	}
 
 	for (const auto& p : ports) {
@@ -558,13 +559,13 @@ struct OptSharePass : public Pass {
 			}
 
 			for (auto &shared : merged_ops) {
-				log("    Found cells that share an operand and can be merged by moving the %s %s in front "
+				log_debug("    Found cells that share an operand and can be merged by moving the %s %s in front "
 				    "of "
 				    "them:\n",
 				    log_id(shared.mux->type), log_id(shared.mux));
 				for (const auto& op : shared.ports)
-					log("        %s\n", log_id(op.op));
-				log("\n");
+					log_debug("        %s\n", log_id(op.op));
+				log_debug("\n");
 
 				merge_operators(module, shared.mux, shared.ports, shared.shared_operand, sigmap);
 			}

@@ -386,12 +386,8 @@ void extract_cell(RTLIL::Cell *cell, bool keepff)
 std::string remap_name(RTLIL::IdString abc_name, RTLIL::Wire **orig_wire = nullptr)
 {
 	std::string abc_sname = abc_name.substr(1);
-	bool isnew = false;
-	if (abc_sname.compare(0, 4, "new_") == 0)
-	{
+	if (abc_sname.compare(0, 9, "new_ys__n") == 0)
 		abc_sname.erase(0, 4);
-		isnew = true;
-	}
 	if (abc_sname.compare(0, 5, "ys__n") == 0)
 	{
 		abc_sname.erase(0, 5);
@@ -409,8 +405,6 @@ std::string remap_name(RTLIL::IdString abc_name, RTLIL::Wire **orig_wire = nullp
 					std::string s = stringf("\\%s_ix%d", sig.bit.wire->name.c_str()+1, map_autoidx); // SILIMATE: Improve the naming
 					if (sig.bit.wire->width != 1)
 						s += stringf("[%d]", sig.bit.offset);
-					if (isnew)
-						s += "_new";
 					s += postfix;
 					if (orig_wire != nullptr)
 						*orig_wire = sig.bit.wire;
@@ -419,7 +413,7 @@ std::string remap_name(RTLIL::IdString abc_name, RTLIL::Wire **orig_wire = nullp
 			}
 		}
 	}
-	return stringf("\\%s_ix%d", abc_name.c_str()+1, map_autoidx); // SILIMATE: Improve the naming
+	return stringf("\\%s_ix%d", abc_sname.c_str(), map_autoidx); // SILIMATE: Improve the naming
 }
 
 void dump_loop_graph(FILE *f, int &nr, dict<int, pool<int>> &edges, pool<int> &workpool, std::vector<int> &in_counts)
@@ -713,10 +707,27 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 		std::vector<std::string> &liberty_files, std::vector<std::string> &genlib_files, std::string constr_file,
 		bool cleanup, vector<int> lut_costs, bool dff_mode, std::string clk_str, bool keepff, std::string delay_target,
 		std::string sop_inputs, std::string sop_products, std::string lutin_shared, bool fast_mode,
-		const std::vector<RTLIL::Cell*> &cells, bool show_tempdir, bool sop_mode, bool abc_dress, std::vector<std::string> &dont_use_cells, const std::string& map_src)
+		const std::vector<RTLIL::Cell*> &cells, bool show_tempdir, bool sop_mode, bool word_mode, bool abc_dress, std::vector<std::string> &dont_use_cells, const std::string& map_src)
 {
 	module = current_module;
 	map_autoidx = autoidx++;
+
+	// SILIMATE: Create a map of all signals and their corresponding driver attributes
+	SigMap sigmap(module);
+	dict<SigSpec, dict<RTLIL::IdString, RTLIL::Const>> sig_to_driver_attrs;
+	for (auto wire : module->wires())
+		if (wire->port_input)
+			for (auto bit : sigmap(wire))
+				sig_to_driver_attrs[bit] = wire->attributes;
+	for (auto cell : module->cells())
+		for (auto &conn : cell->connections())
+			if (cell->output(conn.first))
+				for (auto bit : sigmap(conn.second)) {
+					if (GetSize(cell->attributes) > 0)
+						sig_to_driver_attrs[bit] = cell->attributes;
+					else
+						sig_to_driver_attrs[bit] = bit.wire->attributes;
+				}
 
 	signal_map.clear();
 	signal_list.clear();
@@ -1178,33 +1189,32 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 
 		log_header(design, "Re-integrating ABC results.\n");
 		RTLIL::Module *mapped_mod = mapped_design->module(ID(netlist));
+		SigMap mapped_sigmap(mapped_mod);
+		FfInitVals mapped_initvals(&mapped_sigmap, mapped_mod);
 		if (mapped_mod == nullptr)
 			log_error("ABC output file does not contain a module `netlist'.\n");
 		for (auto w : mapped_mod->wires()) {
 			RTLIL::Wire *orig_wire = nullptr;
 			RTLIL::Wire *wire = module->addWire(remap_name(w->name, &orig_wire));
-			if (orig_wire != nullptr && orig_wire->attributes.count(ID::src))
-				wire->attributes[ID::src] = orig_wire->attributes[ID::src];
 			if (orig_wire != nullptr) {
-				log("Original wire submod attribute: %s\n",
-					orig_wire->get_submod_attribute().empty() ? "<none>" : orig_wire->get_submod_attribute().c_str());
-				log("New wire submod attribute: %s\n",
-					wire->get_submod_attribute().empty() ? "<none>" : wire->get_submod_attribute().c_str());
-				
-				wire->set_submod_attribute(orig_wire->get_submod_attribute());	// SILIMATE: add submod attribute
-			} else {
-				log("orig_wire is null\n");
+				if (sig_to_driver_attrs.count(sigmap(orig_wire))) {
+					wire->attributes = sig_to_driver_attrs[sigmap(orig_wire)];
+					sig_to_driver_attrs[mapped_sigmap(wire)] = wire->attributes;
+					log_debug("Matched wire %s to driver attributes:\n", orig_wire->name.c_str());
+					for (auto &attr : wire->attributes)
+						log_debug("  %s = %s\n", attr.first.c_str(), attr.second.decode_string().c_str());
+				} else {
+					log_debug("No driver attributes found for wire %s\n", orig_wire->name.c_str());
+				}
 			}
 			if (markgroups) wire->attributes[ID::abcgroup] = map_autoidx;
 			design->select(module, wire);
 		}
 
-		SigMap mapped_sigmap(mapped_mod);
-		FfInitVals mapped_initvals(&mapped_sigmap, mapped_mod);
-
 		dict<std::string, int> cell_stats;
 		for (auto c : mapped_mod->cells())
 		{
+			c->attributes = sig_to_driver_attrs[mapped_sigmap(module->wire(remap_name(c->getPort(ID::Y).as_wire()->name)))];
 			if (builtin_lib)
 			{
 				cell_stats[RTLIL::unescape_id(c->type)]++;
@@ -1226,7 +1236,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					continue;
 				}
 				if (c->type == ID(NOT)) {
-					RTLIL::Cell *cell = module->addCell(remap_name(c->name), ID($_NOT_));
+					// SILIMATE: use word-level primitives
+					RTLIL::Cell *cell = module->addCell(remap_name(c->name), word_mode ? ID($not) : ID($_NOT_)); // SILIMATE: use word-level primitives
+					cell->attributes = c->attributes;
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
@@ -1248,11 +1260,24 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 						cell->setPort(name, module->wire(remapped_name));
 					}
+					cell->fixup_parameters();
 					design->select(module, cell);
 					continue;
 				}
 				if (c->type.in(ID(AND), ID(OR), ID(XOR), ID(NAND), ID(NOR), ID(XNOR), ID(ANDNOT), ID(ORNOT))) {
-					RTLIL::Cell *cell = module->addCell(remap_name(c->name), stringf("$_%s_", c->type.c_str()+1));
+					// SILIMATE: use word-level primitives
+					std::string cell_type;
+					if (c->type == ID(AND) && word_mode)
+						cell_type = "$and";
+					else if (c->type == ID(OR) && word_mode)
+						cell_type = "$or";
+					else if (c->type == ID(XOR) && word_mode)
+						cell_type = "$xor";
+					else
+						cell_type = stringf("$_%s_", c->type.c_str()+1);
+
+					RTLIL::Cell *cell = module->addCell(remap_name(c->name), cell_type);
+					cell->attributes = c->attributes;
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
 					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
@@ -1274,11 +1299,20 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 						cell->setPort(name, module->wire(remapped_name));
 					}
+					cell->fixup_parameters();
 					design->select(module, cell);
 					continue;
 				}
 				if (c->type.in(ID(MUX), ID(NMUX))) {
-					RTLIL::Cell *cell = module->addCell(remap_name(c->name), stringf("$_%s_", c->type.c_str()+1));
+					// SILIMATE: use word-level primitives
+					std::string cell_type;
+					if (c->type == ID(MUX) && word_mode)
+						cell_type = "$mux";
+					else
+						cell_type = stringf("$_%s_", c->type.c_str()+1);
+
+					RTLIL::Cell *cell = module->addCell(remap_name(c->name), cell_type);
+					cell->attributes = c->attributes;
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
 					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
@@ -1300,6 +1334,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 						cell->setPort(name, module->wire(remapped_name));
 					}
+					cell->fixup_parameters();
 					design->select(module, cell);
 					continue;
 				}
@@ -1532,6 +1567,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 			}
 
 			RTLIL::Cell *cell = module->addCell(remap_name(c->name), c->type);
+			cell->attributes = c->attributes;
 			if (!map_src.empty())
 				cell->attributes[ID::src] = map_src;
 			cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
@@ -1818,7 +1854,7 @@ struct AbcPass : public Pass {
 		std::vector<std::string> liberty_files, genlib_files, dont_use_cells;
 		std::string delay_target, sop_inputs, sop_products, lutin_shared = "-S 1";
 		bool fast_mode = false, dff_mode = false, keepff = false, cleanup = true;
-		bool show_tempdir = false, sop_mode = false;
+		bool show_tempdir = false, sop_mode = false, word_mode = false;
 		bool abc_dress = false;
 		vector<int> lut_costs;
 		markgroups = false;
@@ -1850,6 +1886,7 @@ struct AbcPass : public Pass {
 		lut_arg = design->scratchpad_get_string("abc.lut", lut_arg);
 		luts_arg = design->scratchpad_get_string("abc.luts", luts_arg);
 		sop_mode = design->scratchpad_get_bool("abc.sop", sop_mode);
+		word_mode = design->scratchpad_get_bool("abc.word", word_mode);
 		map_mux4 = design->scratchpad_get_bool("abc.mux4", map_mux4);
 		map_mux8 = design->scratchpad_get_bool("abc.mux8", map_mux8);
 		map_mux16 = design->scratchpad_get_bool("abc.mux16", map_mux16);
@@ -1940,6 +1977,10 @@ struct AbcPass : public Pass {
 			}
 			if (arg == "-sop") {
 				sop_mode = true;
+				continue;
+			}
+			if (arg == "-word") {
+				word_mode = true;
 				continue;
 			}
 			if (arg == "-mux4") {
@@ -2212,7 +2253,7 @@ struct AbcPass : public Pass {
 
 			if (!dff_mode || !clk_str.empty()) {
 				abc_module(design, mod, script_file, exe_file, liberty_files, genlib_files, constr_file, cleanup, lut_costs, dff_mode, clk_str, keepff,
-						delay_target, sop_inputs, sop_products, lutin_shared, fast_mode, mod->selected_cells(), show_tempdir, sop_mode, abc_dress, dont_use_cells, map_src);
+						delay_target, sop_inputs, sop_products, lutin_shared, fast_mode, mod->selected_cells(), show_tempdir, sop_mode, word_mode, abc_dress, dont_use_cells, map_src);
 				continue;
 			}
 
@@ -2374,7 +2415,7 @@ struct AbcPass : public Pass {
 				srst_polarity = std::get<6>(it.first);
 				srst_sig = assign_map(std::get<7>(it.first));
 				abc_module(design, mod, script_file, exe_file, liberty_files, genlib_files, constr_file, cleanup, lut_costs, !clk_sig.empty(), "$",
-						keepff, delay_target, sop_inputs, sop_products, lutin_shared, fast_mode, it.second, show_tempdir, sop_mode, abc_dress, dont_use_cells, map_src);
+						keepff, delay_target, sop_inputs, sop_products, lutin_shared, fast_mode, it.second, show_tempdir, sop_mode, word_mode, abc_dress, dont_use_cells, map_src);
 				assign_map.set(mod);
 			}
 		}
