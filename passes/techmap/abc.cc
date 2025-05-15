@@ -1200,11 +1200,11 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 				if (sig_to_driver_attrs.count(sigmap(orig_wire))) {
 					wire->attributes = sig_to_driver_attrs[sigmap(orig_wire)];
 					sig_to_driver_attrs[mapped_sigmap(wire)] = wire->attributes;
-					log("Matched wire %s to driver attributes:\n", orig_wire->name.c_str());
+					log_debug("Matched wire %s to driver attributes:\n", orig_wire->name.c_str());
 					for (auto &attr : wire->attributes)
-						log("  %s = %s\n", attr.first.c_str(), attr.second.decode_string().c_str());
+						log_debug("  %s = %s\n", attr.first.c_str(), attr.second.decode_string().c_str());
 				} else {
-					log("No driver attributes found for wire %s\n", orig_wire->name.c_str());
+					log_debug("No driver attributes found for wire %s\n", orig_wire->name.c_str());
 				}
 			}
 			if (markgroups) wire->attributes[ID::abcgroup] = map_autoidx;
@@ -1242,12 +1242,8 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
 					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
-					log("Previous cell has submod attribute: %s\n",
-						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
-					log("1: Created cell %s with submod attribute: %s\n",
-						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					for (auto name : {ID::A, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
@@ -1273,12 +1269,8 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					cell->attributes = c->attributes;
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
 					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
-					log("Previous cell has submod attribute: %s\n",
-						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
-					log("2: Created cell %s with submod attribute: %s\n",
-						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::Y}) {
@@ -1301,14 +1293,10 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					cell->attributes = c->attributes;
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
-					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
-					log("Previous cell has submod attribute: %s\n",
-						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
-					log("3: Created cell %s with submod attribute: %s\n",
-						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 
-						if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+
+					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::S, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 						cell->setPort(name, module->wire(remapped_name));
@@ -1321,12 +1309,8 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), ID($_MUX4_));
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
 					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
-					log("Previous cell has submod attribute: %s\n",
-						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
-					log("4: Created cell %s with submod attribute: %s\n",
-						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::S, ID::T, ID::Y}) {
@@ -1340,12 +1324,8 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), ID($_MUX8_));
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
 					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
-					log("Previous cell has submod attribute: %s\n",
-						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
-					log("5: Created cell %s with submod attribute: %s\n",
-						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::E, ID::F, ID::G, ID::H, ID::S, ID::T, ID::U, ID::Y}) {
@@ -1359,12 +1339,8 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), ID($_MUX16_));
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
 					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
-					log("Previous cell has submod attribute: %s\n",
-						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
-					log("6: Created cell %s with submod attribute: %s\n",
-						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::E, ID::F, ID::G, ID::H, ID::I, ID::J, ID::K,
@@ -1397,13 +1373,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 				if (c->type.in(ID(AOI4), ID(OAI4))) {
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), stringf("$_%s_", c->type.c_str()+1));
 					if (!map_src.empty())
-						 cell->attributes[ID::src] = map_src;
-						cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
-						log("Previous cell has submod attribute: %s\n",
-							c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
-						log("8: Created cell %s with submod attribute: %s\n",
-							log_id(cell),
-							cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
+						cell->attributes[ID::src] = map_src;
+						
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::Y}) {
@@ -1514,12 +1486,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 			cell->attributes = c->attributes;
 			if (!map_src.empty())
 				cell->attributes[ID::src] = map_src;
+
 			cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
-			log("Previous cell has submod attribute: %s\n",
-				c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
-			log("Created cell %s with submod attribute: %s\n",
-				log_id(cell),
-				cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());		
+	
 			if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 			cell->parameters = c->parameters;
 			for (auto &conn : c->connections()) {
