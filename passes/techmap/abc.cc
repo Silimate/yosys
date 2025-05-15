@@ -1349,12 +1349,8 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), stringf("$_%s_", c->type.c_str()+1));
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
 					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
-					log("Previous cell has submod attribute: %s\n",
-						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
-					log("7: Created cell %s with submod attribute: %s\n",
-						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::Y}) {
