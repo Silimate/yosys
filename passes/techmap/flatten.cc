@@ -110,8 +110,12 @@ struct FlattenWorker
 		dict<IdString, IdString> memory_map;
 		for (auto &tpl_memory_it : tpl->memories) {
 			RTLIL::Memory *new_memory = module->addMemory(map_name(cell, tpl_memory_it.second, separator), tpl_memory_it.second);
-			if (mark_submod) {
-				new_memory->attributes[ID::submod] = Const(cell->name.str());
+			if (mark_submod) {	// SILIMATE: submod propagation
+				// Store both cell type and instance name to get that back in our submod pass
+				// Chose ";;" as delimiter as that is not a valid character in Verilog module names
+				std::string instance_name = cell->name.c_str();
+				std::string cell_type = cell->type.c_str();
+				new_memory->set_submod_attribute(instance_name + ";;" + cell_type);
 			}
 			map_attributes(cell, new_memory, tpl_memory_it.second->name);
 			memory_map[tpl_memory_it.first] = new_memory->name;
@@ -161,8 +165,12 @@ struct FlattenWorker
 
 		for (auto tpl_cell : tpl->cells()) {
 			RTLIL::Cell *new_cell = module->addCell(map_name(cell, tpl_cell, separator), tpl_cell);
-			if (mark_submod) {
-				new_cell->attributes[ID::submod] = Const(cell->name.str());
+			if (mark_submod) {	// SILIMATE: submod propagation
+				// Store both cell type and instance name to get that back in our submod pass
+				// Chose ";;" as delimiter as that is not a valid character in Verilog module names
+				std::string instance_name = cell->name.c_str();
+				std::string cell_type = cell->type.c_str();
+				new_cell->set_submod_attribute(instance_name + ";;" + cell_type);
 			}
 			map_attributes(cell, new_cell, tpl_cell->name);
 			if (new_cell->has_memid()) {

@@ -1200,11 +1200,11 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 				if (sig_to_driver_attrs.count(sigmap(orig_wire))) {
 					wire->attributes = sig_to_driver_attrs[sigmap(orig_wire)];
 					sig_to_driver_attrs[mapped_sigmap(wire)] = wire->attributes;
-					log_debug("Matched wire %s to driver attributes:\n", orig_wire->name.c_str());
+					log("Matched wire %s to driver attributes:\n", orig_wire->name.c_str());
 					for (auto &attr : wire->attributes)
-						log_debug("  %s = %s\n", attr.first.c_str(), attr.second.decode_string().c_str());
+						log("  %s = %s\n", attr.first.c_str(), attr.second.decode_string().c_str());
 				} else {
-					log_debug("No driver attributes found for wire %s\n", orig_wire->name.c_str());
+					log("No driver attributes found for wire %s\n", orig_wire->name.c_str());
 				}
 			}
 			if (markgroups) wire->attributes[ID::abcgroup] = map_autoidx;
@@ -1248,13 +1248,6 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					log("1: Created cell %s with submod attribute: %s\n",
 						log_id(cell),
 						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
-
-					RTLIL::Wire *y_wire = module->wire(remap_name(c->getPort(ID::Y).as_wire()->name));
-					if (y_wire) {
-						log("Wire %s, %s\n", log_signal(y_wire), y_wire->get_submod_attribute().c_str());
-						cell->set_submod_attribute(y_wire->get_submod_attribute());	// SILIMATE: add submod attribute
-					} else
-						log("y_wire is null\n");
 					
 					for (auto name : {ID::A, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
@@ -1285,14 +1278,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
 					log("2: Created cell %s with submod attribute: %s\n",
 						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());		
-					
-					RTLIL::Wire *y_wire = module->wire(remap_name(c->getPort(ID::Y).as_wire()->name));
-					if (y_wire) {
-						log("Wire %s, %s\n", log_signal(y_wire), y_wire->get_submod_attribute().c_str());
-						cell->set_submod_attribute(y_wire->get_submod_attribute());	// SILIMATE: add submod attribute
-					} else
-						log("y_wire is null\n");
+						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::Y}) {
@@ -1320,14 +1306,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
 					log("3: Created cell %s with submod attribute: %s\n",
 						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());		
-					
-					RTLIL::Wire *y_wire = module->wire(remap_name(c->getPort(ID::Y).as_wire()->name));
-					if (y_wire) {
-						log("Wire %s, %s\n", log_signal(y_wire), y_wire->get_submod_attribute().c_str());
-						cell->set_submod_attribute(y_wire->get_submod_attribute());	// SILIMATE: add submod attribute
-					} else
-						log("y_wire is null\n");
+						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 
 						if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::S, ID::Y}) {
@@ -1347,14 +1326,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
 					log("4: Created cell %s with submod attribute: %s\n",
 						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());		
-					
-					RTLIL::Wire *y_wire = module->wire(remap_name(c->getPort(ID::Y).as_wire()->name));
-					if (y_wire) {
-						log("Wire %s, %s\n", log_signal(y_wire), y_wire->get_submod_attribute().c_str());
-						cell->set_submod_attribute(y_wire->get_submod_attribute());	// SILIMATE: add submod attribute
-					} else
-						log("y_wire is null\n");
+						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::S, ID::T, ID::Y}) {
@@ -1373,14 +1345,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
 					log("5: Created cell %s with submod attribute: %s\n",
 						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());		
-					
-					RTLIL::Wire *y_wire = module->wire(remap_name(c->getPort(ID::Y).as_wire()->name));
-					if (y_wire) {
-						log("Wire %s, %s\n", log_signal(y_wire), y_wire->get_submod_attribute().c_str());
-						cell->set_submod_attribute(y_wire->get_submod_attribute());	// SILIMATE: add submod attribute
-					} else
-						log("y_wire is null\n");
+						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::E, ID::F, ID::G, ID::H, ID::S, ID::T, ID::U, ID::Y}) {
@@ -1399,14 +1364,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
 					log("6: Created cell %s with submod attribute: %s\n",
 						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());		
-					
-					RTLIL::Wire *y_wire = module->wire(remap_name(c->getPort(ID::Y).as_wire()->name));
-					if (y_wire) {
-						log("Wire %s, %s\n", log_signal(y_wire), y_wire->get_submod_attribute().c_str());
-						cell->set_submod_attribute(y_wire->get_submod_attribute());	// SILIMATE: add submod attribute
-					} else
-						log("y_wire is null\n");
+						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::E, ID::F, ID::G, ID::H, ID::I, ID::J, ID::K,
@@ -1426,14 +1384,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 						c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
 					log("7: Created cell %s with submod attribute: %s\n",
 						log_id(cell),
-						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());		
-					
-					RTLIL::Wire *y_wire = module->wire(remap_name(c->getPort(ID::Y).as_wire()->name));
-					if (y_wire) {
-						log("Wire %s, %s\n", log_signal(y_wire), y_wire->get_submod_attribute().c_str());
-						cell->set_submod_attribute(y_wire->get_submod_attribute());	// SILIMATE: add submod attribute
-					} else
-						log("y_wire is null\n");
+						cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::Y}) {
@@ -1452,14 +1403,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 							c->get_submod_attribute().empty() ? "<none>" : c->get_submod_attribute().c_str());
 						log("8: Created cell %s with submod attribute: %s\n",
 							log_id(cell),
-							cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());		
-					
-						RTLIL::Wire *y_wire = module->wire(remap_name(c->getPort(ID::Y).as_wire()->name));
-						if (y_wire) {
-							log("Wire %s, %s\n", log_signal(y_wire), y_wire->get_submod_attribute().c_str());
-							cell->set_submod_attribute(y_wire->get_submod_attribute());	// SILIMATE: add submod attribute
-						} else
-							log("y_wire is null\n");
+							cell->get_submod_attribute().empty() ? "<none>" : cell->get_submod_attribute().c_str());
 					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::Y}) {
