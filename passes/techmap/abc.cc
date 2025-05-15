@@ -1236,6 +1236,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+					
 					for (auto name : {ID::A, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 						cell->setPort(name, module->wire(remapped_name));
@@ -1260,6 +1263,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					cell->attributes = c->attributes;
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
@@ -1281,6 +1287,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					cell->attributes = c->attributes;
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::S, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
@@ -1294,6 +1303,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), ID($_MUX4_));
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::S, ID::T, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
@@ -1306,6 +1318,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), ID($_MUX8_));
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::E, ID::F, ID::G, ID::H, ID::S, ID::T, ID::U, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
@@ -1318,6 +1333,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), ID($_MUX16_));
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::E, ID::F, ID::G, ID::H, ID::I, ID::J, ID::K,
 							ID::L, ID::M, ID::N, ID::O, ID::P, ID::S, ID::T, ID::U, ID::V, ID::Y}) {
@@ -1331,6 +1349,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), stringf("$_%s_", c->type.c_str()+1));
 					if (!map_src.empty())
 						cell->attributes[ID::src] = map_src;
+
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
@@ -1342,7 +1363,10 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 				if (c->type.in(ID(AOI4), ID(OAI4))) {
 					RTLIL::Cell *cell = module->addCell(remap_name(c->name), stringf("$_%s_", c->type.c_str()+1));
 					if (!map_src.empty())
-						 cell->attributes[ID::src] = map_src;
+						cell->attributes[ID::src] = map_src;
+						
+					cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+					
 					if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 					for (auto name : {ID::A, ID::B, ID::C, ID::D, ID::Y}) {
 						RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
@@ -1452,6 +1476,9 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 			cell->attributes = c->attributes;
 			if (!map_src.empty())
 				cell->attributes[ID::src] = map_src;
+
+			cell->set_submod_attribute(c->get_submod_attribute());	// SILIMATE: add submod attribute
+	
 			if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 			cell->parameters = c->parameters;
 			for (auto &conn : c->connections()) {

@@ -54,6 +54,7 @@ struct FlattenWorker
 	bool create_scopeinfo = true;
 	bool create_scopename = false;
 	std::string separator = ".";
+	bool mark_submod = false;
 
 	template<class T>
 	void map_attributes(RTLIL::Cell *cell, T *object, IdString orig_object_name)
@@ -109,6 +110,13 @@ struct FlattenWorker
 		dict<IdString, IdString> memory_map;
 		for (auto &tpl_memory_it : tpl->memories) {
 			RTLIL::Memory *new_memory = module->addMemory(map_name(cell, tpl_memory_it.second, separator), tpl_memory_it.second);
+			if (mark_submod) {	// SILIMATE: submod propagation
+				// Store both cell type and instance name to get that back in our submod pass
+				// Chose ";;" as delimiter as that is not a valid character in Verilog module names
+				std::string instance_name = cell->name.c_str();
+				std::string cell_type = cell->type.c_str();
+				new_memory->set_submod_attribute(instance_name + ";;" + cell_type);
+			}
 			map_attributes(cell, new_memory, tpl_memory_it.second->name);
 			memory_map[tpl_memory_it.first] = new_memory->name;
 			design->select(module, new_memory);
@@ -157,6 +165,13 @@ struct FlattenWorker
 
 		for (auto tpl_cell : tpl->cells()) {
 			RTLIL::Cell *new_cell = module->addCell(map_name(cell, tpl_cell, separator), tpl_cell);
+			if (mark_submod) {	// SILIMATE: submod propagation
+				// Store both cell type and instance name to get that back in our submod pass
+				// Chose ";;" as delimiter as that is not a valid character in Verilog module names
+				std::string instance_name = cell->name.c_str();
+				std::string cell_type = cell->type.c_str();
+				new_cell->set_submod_attribute(instance_name + ";;" + cell_type);
+			}
 			map_attributes(cell, new_cell, tpl_cell->name);
 			if (new_cell->has_memid()) {
 				IdString memid = new_cell->getParam(ID::MEMID).decode_string();
@@ -347,6 +362,9 @@ struct FlattenPass : public Pass {
 		log("        Don't remove unused submodules, leave a flattened version of each\n");
 		log("        submodule in the design.\n");
 		log("\n");
+		log("    -submod\n");
+		log("        Sets the flattened submodule cells submod attribute\n");
+		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
@@ -382,6 +400,10 @@ struct FlattenPass : public Pass {
 				cleanup = false;
 				continue;
 			}
+			if (args[argidx] == "-submod") {
+				worker.mark_submod = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -405,7 +427,7 @@ struct FlattenPass : public Pass {
 			for (auto cell : module->selected_cells()) {
 				RTLIL::Module *tpl = design->module(cell->type);
 				if (tpl != nullptr) {
-                                        if (!topo_modules.has_node(tpl))
+					if (!topo_modules.has_node(tpl))
 						worklist.insert(tpl);
 					topo_modules.edge(tpl, module);
 				}

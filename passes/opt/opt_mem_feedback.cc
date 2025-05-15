@@ -120,7 +120,7 @@ struct OptMemFeedbackWorker
 				sig1.append(it.first);
 				sig2.append(it.second ? RTLIL::State::S1 : RTLIL::State::S0);
 			}
-			terms.append(module->Ne(NEW_MEM_ID_SUFFIX("cond_ne"), sig1, sig2, false, mem.get_src_attribute())); // SILIMATE: Improve the naming
+			terms.append(module->Ne(NEW_MEM_ID_SUFFIX("cond_ne"), sig1, sig2, false, mem.get_src_attribute(), mem.get_submod_attribute())); // SILIMATE: Improve the naming
 		}
 
 		if (olden != State::S1)
@@ -130,7 +130,7 @@ struct OptMemFeedbackWorker
 			terms = State::S1;
 
 		if (GetSize(terms) > 1)
-			terms = module->ReduceAnd(NEW_MEM_ID_SUFFIX("cond_reduce_and"), terms, false, mem.get_src_attribute()); // SILIMATE: Improve the naming
+			terms = module->ReduceAnd(NEW_MEM_ID_SUFFIX("cond_reduce_and"), terms, false, mem.get_src_attribute(), mem.get_submod_attribute()); // SILIMATE: Improve the naming
 
 		return conditions_logic_cache[key] = terms;
 	}

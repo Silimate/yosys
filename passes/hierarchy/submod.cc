@@ -222,7 +222,7 @@ struct SubmodWorker
 		submod.cells.clear();
 
 		if (!copy_mode) {
-			RTLIL::Cell *new_cell = module->addCell(submod.full_name, submod.full_name);
+			RTLIL::Cell *new_cell = module->addCell(submod.name, submod.full_name);	// SILIMATE: get back our submod type and name
 			for (auto &it : wire_flags)
 			{
 				RTLIL::SigSpec old_sig = sigmap(it.first);
@@ -288,13 +288,31 @@ struct SubmodWorker
 				std::string submod_str = cell->attributes[ID::submod].decode_string();
 				cell->attributes.erase(ID::submod);
 
+				// SILIMATE: added to get back our submod type and name
+				//     Previously, this pass used to set the entire cell name and type to be {top_module}_{instance_name}
+				//     Now, we set the cell name to be the instance name and the cell type to be the submod type
+				size_t delim_pos = submod_str.find(";;");
+				std::string instance_name, cell_type;
+
+				if (delim_pos != std::string::npos) {
+					instance_name = submod_str.substr(0, delim_pos);
+					cell_type = submod_str.substr(delim_pos + 2);
+				} else {
+					instance_name = submod_str;
+					cell_type = submod_str;
+				}
+
+				submod_str = instance_name;
+
 				if (submodules.count(submod_str) == 0) {
 					submodules[submod_str].name = submod_str;
-					submodules[submod_str].full_name = module->name.str() + "_" + submod_str;
+					submodules[submod_str].full_name = cell_type;
 					while (design->module(submodules[submod_str].full_name) != nullptr ||
 							module->count_id(submodules[submod_str].full_name) != 0)
 						submodules[submod_str].full_name += "_";
 				}
+
+				// END SILIMATE
 
 				submodules[submod_str].cells.insert(cell);
 			}

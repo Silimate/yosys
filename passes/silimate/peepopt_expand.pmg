@@ -53,8 +53,8 @@ code and_a and_b and_y  or_a or_b or_y
 	Wire *new_or_b = module->addWire(NEW_ID2, GetSize(and_y));
 
 	// Create new AND gates connected to the OR gate
-	module->addAnd(NEW_ID2, or_a, and_b, new_or_a, false, cell->get_src_attribute());
-	module->addAnd(NEW_ID2, or_b, and_b, new_or_b, false, cell->get_src_attribute());
+	module->addAnd(NEW_ID2, or_a, and_b, new_or_a, false, cell->get_src_attribute(), cell->get_submod_attribute());
+	module->addAnd(NEW_ID2, or_b, and_b, new_or_b, false, cell->get_src_attribute(), cell->get_submod_attribute());
 
 	// Update OR gate ports
 	or_gate->setPort(\A, new_or_a);

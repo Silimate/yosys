@@ -61,9 +61,9 @@ code mux_y  prim_a prim_b
 		prim_gate->setPort(\B, State::S1);
 	} else if (prim_gate->type == $xor) {
 		prim_gate->setPort(\A, prim_b);
-		prim_gate->setPort(\B, module->Not(NEW_ID2, prim_b, false, cell->get_src_attribute()));
+		prim_gate->setPort(\B, module->Not(NEW_ID2, prim_b, false, cell->get_src_attribute(), cell->get_submod_attribute()));
 	} else if (prim_gate->type == $xnor) {
-		prim_gate->setPort(\A, module->Not(NEW_ID2, prim_b, false, cell->get_src_attribute()));
+		prim_gate->setPort(\A, module->Not(NEW_ID2, prim_b, false, cell->get_src_attribute(), cell->get_submod_attribute()));
 		prim_gate->setPort(\B, prim_b);
 	} else {
 		log_abort();

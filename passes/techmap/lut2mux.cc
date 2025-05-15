@@ -33,9 +33,9 @@ int lut2mux(Cell *cell, bool word_mode)
 	if (GetSize(sig_a) == 1)
 	{
 		if (!word_mode)
-			cell->module->addMuxGate(NEW_ID2, lut.extract(0)[0], lut.extract(1)[0], sig_a, sig_y, cell->get_src_attribute()); // SILIMATE: Improve the naming
+			cell->module->addMuxGate(NEW_ID2, lut.extract(0)[0], lut.extract(1)[0], sig_a, sig_y, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 		else
-			cell->module->addMux(NEW_ID2, lut.extract(0)[0], lut.extract(1)[0], sig_a, sig_y, cell->get_src_attribute()); // SILIMATE: Improve the naming
+			cell->module->addMux(NEW_ID2, lut.extract(0)[0], lut.extract(1)[0], sig_a, sig_y, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 	}
 	else
 	{
@@ -47,13 +47,13 @@ int lut2mux(Cell *cell, bool word_mode)
 		Const lut1 = lut.extract(0, GetSize(lut)/2);
 		Const lut2 = lut.extract(GetSize(lut)/2, GetSize(lut)/2);
 
-		count += lut2mux(cell->module->addLut(NEW_ID2, sig_a_lo, sig_y1, lut1), word_mode); // SILIMATE: Improve the naming
-		count += lut2mux(cell->module->addLut(NEW_ID2, sig_a_lo, sig_y2, lut2), word_mode); // SILIMATE: Improve the naming
+		count += lut2mux(cell->module->addLut(NEW_ID2, sig_a_lo, sig_y1, lut1, cell->get_src_attribute(), cell->get_submod_attribute()), word_mode); // SILIMATE: Improve the naming
+		count += lut2mux(cell->module->addLut(NEW_ID2, sig_a_lo, sig_y2, lut2, cell->get_src_attribute(), cell->get_submod_attribute()), word_mode); // SILIMATE: Improve the naming
 
 		if (!word_mode)
-			cell->module->addMuxGate(NEW_ID2, sig_y1, sig_y2, sig_a_hi, sig_y, cell->get_src_attribute()); // SILIMATE: Improve the naming
+			cell->module->addMuxGate(NEW_ID2, sig_y1, sig_y2, sig_a_hi, sig_y, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 		else
-			cell->module->addMux(NEW_ID2, sig_y1, sig_y2, sig_a_hi, sig_y, cell->get_src_attribute()); // SILIMATE: Improve the naming
+			cell->module->addMux(NEW_ID2, sig_y1, sig_y2, sig_a_hi, sig_y, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 	}
 
 	cell->module->remove(cell);

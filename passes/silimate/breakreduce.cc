@@ -193,16 +193,16 @@ void breakeqne(RTLIL::Module *module, RTLIL::Cell *cell)
 	bool is_ne = cell->type.in(ID($ne), ID($nex));
 
 	RTLIL::SigSpec xor_out = module->addWire(NEW_ID2_SUFFIX("xor"), max(GetSize(sig_a), GetSize(sig_b))); // SILIMATE: Improve the naming
-	RTLIL::Cell *xor_cell = module->addXor(NEW_ID2, sig_a, sig_b, xor_out, is_signed, cell->get_src_attribute()); // SILIMATE: Improve the naming
+	RTLIL::Cell *xor_cell = module->addXor(NEW_ID2, sig_a, sig_b, xor_out, is_signed, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 	xor_cell->attributes = cell->attributes;
 
 	RTLIL::SigSpec reduce_out = is_ne ? sig_y : module->addWire(NEW_ID2_SUFFIX("reduce_out")); // SILIMATE: Improve the naming
-	RTLIL::Cell *reduce_cell = module->addReduceOr(NEW_ID2_SUFFIX("reduce_or"), xor_out, reduce_out, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+	RTLIL::Cell *reduce_cell = module->addReduceOr(NEW_ID2_SUFFIX("reduce_or"), xor_out, reduce_out, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 	reduce_cell->attributes = cell->attributes;
 	breakreduce(module, reduce_cell);
 
 	if (!is_ne) {
-		RTLIL::Cell *not_cell = module->addLogicNot(NEW_ID2_SUFFIX("not"), reduce_out, sig_y, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+		RTLIL::Cell *not_cell = module->addLogicNot(NEW_ID2_SUFFIX("not"), reduce_out, sig_y, false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 		not_cell->attributes = cell->attributes;
 		breaklognot(module, not_cell);
 	}
