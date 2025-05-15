@@ -90,13 +90,13 @@ struct BmuxmapPass : public Pass {
 				SigSpec new_s = module->addWire(NEW_ID2_SUFFIX("sel"), num_cases); // SILIMATE: Improve the naming
 				SigSpec new_data = module->addWire(NEW_ID2_SUFFIX("data"), width); // SILIMATE: Improve the naming
 				for (int val = 0; val < num_cases; val++) {
-					RTLIL::Cell *eq = module->addEq(NEW_ID2_SUFFIX("eq"), sel, SigSpec(val, GetSize(sel)), new_s[val]); // SILIMATE: Improve the naming
+					RTLIL::Cell *eq = module->addEq(NEW_ID2_SUFFIX("eq"), sel, SigSpec(val, GetSize(sel)), new_s[val], false, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 					for (auto attr : cell->attributes) // SILIMATE: Copy all attributes from original cell to new cell
 						eq->attributes[attr.first] = attr.second;
 				}
 				IdString cell_name = cell->name; // SILIMATE: Save the original cell name
 				module->rename(cell_name, NEW_ID); // SILIMATE: Rename the original cell, which will be deleted
-				RTLIL::Cell *pmux = module->addPmux(cell_name, new_a, data, new_s, new_data); // SILIMATE: Improve the naming
+				RTLIL::Cell *pmux = module->addPmux(cell_name, new_a, data, new_s, new_data, cell->get_src_attribute(), cell->get_submod_attribute()); // SILIMATE: Improve the naming
 				for (auto attr : cell->attributes) // SILIMATE: Copy all attributes from original cell to new cell
 					pmux->attributes[attr.first] = attr.second;
 				pmux->set_bool_attribute("\\bmuxmap"); // SILIMATE: Mark the cell as created by bmuxmap
@@ -111,7 +111,9 @@ struct BmuxmapPass : public Pass {
 							data.extract(i*2, width),
 							data.extract(i*2+width, width),
 							sel[idx],
-							new_data.extract(i, width));
+							new_data.extract(i, width), 
+							cell->get_src_attribute(), 
+							cell->get_submod_attribute());
 						for (auto attr : cell->attributes) // SILIMATE: Copy all attributes from original cell to new cell
 							mux->attributes[attr.first] = attr.second;
 						mux->set_bool_attribute("\\bmuxmap"); // SILIMATE: Mark the cell as created by bmuxmap

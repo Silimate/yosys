@@ -507,11 +507,11 @@ struct MemoryDffWorker
 
 		merger.remove_output_ff(bits);
 		if (ff.has_ce && !ff.pol_ce)
-			ff.sig_ce = module->LogicNot(NEW_MEM_ID_SUFFIX("ce"), ff.sig_ce); // SILIMATE: Improve the naming
+			ff.sig_ce = module->LogicNot(NEW_MEM_ID_SUFFIX("ce"), ff.sig_ce, false, ff.cell->get_src_attribute(), ff.cell->get_submod_attribute()); // SILIMATE: Improve the naming
 		if (ff.has_arst && !ff.pol_arst)
-			ff.sig_arst = module->LogicNot(NEW_MEM_ID_SUFFIX("arst"), ff.sig_arst); // SILIMATE: Improve the naming
+			ff.sig_arst = module->LogicNot(NEW_MEM_ID_SUFFIX("arst"), ff.sig_arst, false, ff.cell->get_src_attribute(), ff.cell->get_submod_attribute()); // SILIMATE: Improve the naming
 		if (ff.has_srst && !ff.pol_srst)
-			ff.sig_srst = module->LogicNot(NEW_MEM_ID_SUFFIX("srst"), ff.sig_srst); // SILIMATE: Improve the naming
+			ff.sig_srst = module->LogicNot(NEW_MEM_ID_SUFFIX("srst"), ff.sig_srst, false, ff.cell->get_src_attribute(), ff.cell->get_submod_attribute()); // SILIMATE: Improve the naming
 		port.clk = ff.sig_clk;
 		port.clk_enable = true;
 		port.clk_polarity = ff.pol_clk;
