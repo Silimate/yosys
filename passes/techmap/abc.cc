@@ -142,6 +142,7 @@ struct AbcConfig
 	bool map_mux8 = false;
 	bool map_mux16 = false;
 	bool markgroups = false;
+	bool read_blif_m = false;  // Add -m flag to read_blif command
 	pool<std::string> enabled_gates;
 	bool cmos_cost = false;
 	int max_threads = -1;    // -1 means auto (use number of modules)
@@ -991,7 +992,8 @@ void AbcModuleState::prepare_module(RTLIL::Design *design, RTLIL::Module *module
 	log_header(design, "Extracting gate netlist of module `%s' to `%s/input.blif'..\n",
 			module->name.c_str(), replace_tempdir(run_abc.tempdir_name, run_abc.tempdir_name, config.show_tempdir).c_str());
 
-	std::string abc_script = stringf("read_blif \"%s/input.blif\"; ", run_abc.tempdir_name);
+	std::string abc_script = stringf("read_blif%s \"%s/input.blif\"; ", 
+			config.read_blif_m ? " -m" : "", run_abc.tempdir_name);
 
 	if (!config.liberty_files.empty() || !config.genlib_files.empty()) {
 		std::string dont_use_args;
@@ -1455,6 +1457,8 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 	for (auto w : mapped_mod->wires()) {
 		RTLIL::Wire *orig_wire = nullptr;
 		RTLIL::Wire *wire = module->addWire(remap_name(w->name, &orig_wire));
+		log("ABC REINTEGRATION: Processing wire: mapped_name=%s, orig_name=%s\n", 
+		    w->name.c_str(), orig_wire ? orig_wire->name.c_str() : "<null>");
 		if (orig_wire != nullptr && orig_wire->attributes.count(ID::src))
 			wire->attributes[ID::src] = orig_wire->attributes[ID::src];
 
@@ -1463,9 +1467,9 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			if (sig2src.count(orig_sigmap(orig_wire))) {
 				wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
 				sig2src[mapped_sigmap(wire)] = wire->get_src_attribute();
-				log_debug("Matched wire %s to driver attributes:\n", orig_wire->name.c_str());
+				log("ABC REINTEGRATION: Matched wire %s to driver attributes\n", orig_wire->name.c_str());
 			} else {
-				log_debug("No driver attributes found for wire %s\n", orig_wire->name.c_str());
+				log("ABC REINTEGRATION: No driver attributes found for wire %s\n", orig_wire->name.c_str());
 			}
 		}
 
@@ -2063,6 +2067,7 @@ struct AbcPass : public Pass {
 		config.cleanup = !design->scratchpad_get_bool("abc.nocleanup", false);
 		config.show_tempdir = design->scratchpad_get_bool("abc.showtmp", false);
 		config.markgroups = design->scratchpad_get_bool("abc.markgroups", false);
+		config.read_blif_m = design->scratchpad_get_bool("abc.readblifm", false);
 		config.max_threads = design->scratchpad_get_int("abc.max_threads", -1);
 		config.reserved_cores = design->scratchpad_get_int("abc.reserved_cores", 4);
 
