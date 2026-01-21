@@ -29,6 +29,7 @@
 // Kahn, Arthur B. (1962), "Topological sorting of large networks", Communications of the ACM 5 (11): 558-562, doi:10.1145/368996.369025
 // http://en.wikipedia.org/wiki/Topological_sorting
 
+#include <cmath>
 #define ABC_COMMAND_LIB "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; &get -n; &dch -f; &nf {D}; &put"
 #define ABC_COMMAND_CTR "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; &get -n; &dch -f; &nf {D}; &put; buffer; upsize {D}; dnsize {D}; stime -p"
 #define ABC_COMMAND_LUT "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; dch -f; if; mfs2"
@@ -1448,6 +1449,8 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 
 	ifs.close();
 
+	IdString node_retention_id = RTLIL::IdString("\\node_retention_sources");
+
 	log_header(design, "Re-integrating ABC results.\n");
 	RTLIL::Module *mapped_mod = mapped_design->module(ID(netlist));
 	if (mapped_mod == nullptr)
@@ -1477,7 +1480,6 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 		// END TODO
 
 		// Add node retention sources to source attribute pool
-		IdString node_retention_id = RTLIL::IdString("\\node_retention_sources");
 		if (w->attributes.count(node_retention_id)) {
 			std::string sources_str = w->attributes.at(node_retention_id).decode_string();
 			log("ABC REINTEGRATION: Node retention sources for wire %s = %s\n", w->name.c_str(), sources_str.c_str());
@@ -1493,9 +1495,9 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 				if (orig_wire != nullptr) {
 						log("Printing the original source attribute %s\n", orig_wire->get_src_attribute().c_str());
 						log("Printing the original source attribute 2 %s\n", sig2src[orig_sigmap(orig_wire)]);
-						src_pool.insert(orig_wire->get_src_attribute());
+						src_pool.insert(sig2src[orig_sigmap(orig_wire)]);
 				} else {
-						log("WARNING: Source wire %s not found in module\n", src_node.c_str());
+						log("WARNING: Source wire not found");
 				}
 			}
 			wire->add_strpool_attribute(ID::src, src_pool);
@@ -1514,6 +1516,14 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 		Wire *out_wire = c->getPort((c->hasPort(ID::Y)) ? ID::Y : ID::Q).as_wire();
 		Wire *remapped_out_wire = module->wire(remap_name(out_wire->name));
 		std::string src_attribute = sig2src[remapped_out_wire];
+		// need to find the original source nodes
+		// extract the original source nodes
+		log("For cell %s the output wire is %s\n", c->name.c_str(), remapped_out_wire->name.c_str());
+		pool<string> src_pool = remapped_out_wire->get_strpool_attribute(ID::src);
+		c->add_strpool_attribute(ID::src, src_pool);
+		for (auto src : src_pool) {
+			log("The source for cell %s is %s\n", c->name.c_str(), src.c_str());
+		}
 
 		if (builtin_lib)
 		{
@@ -1753,25 +1763,26 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 		}
 
 		// Add node retention sources to source attribute pool
-		IdString node_retention_id = RTLIL::IdString("\\node_retention_sources");
-		if (c->attributes.count(node_retention_id)) {
-			std::string sources_str = c->attributes.at(node_retention_id).decode_string();
-			log("ABC REINTEGRATION: Node retention sources for cell %s = %s\n", c->name.c_str(), sources_str.c_str());
-			pool<string> src_pool;
-			std::istringstream src_stream(sources_str);
-			std::string src_node;
-			while (src_stream >> src_node) {
-				// RTLIL::Cell *src_cell = module->addCell(remap_name(RTLIL::IdString("\\" + src_node)));
-				// if (src_cell != nullptr) {
-				// 	log("Printing the original source attribute for cell %s = %s\n", src_cell->name.c_str(), src_cell->get_src_attribute().c_str());
-				// 	src_pool.insert(src_cell->get_src_attribute());
-				// }
-				(void)src_node; // Suppress unused variable warning
-			}
-			cell->add_strpool_attribute(ID::src, src_pool);
-		}
+		// IdString node_retention_id = RTLIL::IdString("\\node_retention_sources");
+		// if (c->attributes.count(node_retention_id)) {
+		// 	std::string sources_str = c->attributes.at(node_retention_id).decode_string();
+		// 	log("ABC REINTEGRATION: Node retention sources for cell %s = %s\n", c->name.c_str(), sources_str.c_str());
+		// 	pool<string> src_pool = cell->get_strpool_attribute(ID::src);
+		// // 	std::istringstream src_stream(sources_str);
+		// // 	std::string src_node;
+		// // 	while (src_stream >> src_node) {
+		// 	Wire *out_wire = c->getPort((c->hasPort(ID::Y)) ? ID::Y : ID::Q).as_wire();
+		// 	SigSpec remapped_out_wire = remap_name(out_wire->name);
+		// 	SigSpec orig_out_wire = orig_sigmap(out_wire);
+		// 	if (orig_out_wire != nullptr) {
+		// 		log("Printing the original source attribute for cell %s = %s\n", c->name.c_str(), orig_out_wire.c_str());
+		// 		src_pool.insert(sig2src[orig_sigmap(orig_out_wire)]);
+		// 	} else {
+		// 		log("WARNING: Source wire not found");
+		// 	}
+		// 	cell->add_strpool_attribute(ID::src, src_pool);
 
-		design->select(module, cell);
+		// design->select(module, cell);
 	}
 
 	for (auto conn : mapped_mod->connections()) {
