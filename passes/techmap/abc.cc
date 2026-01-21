@@ -1468,6 +1468,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 				wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
 				sig2src[mapped_sigmap(wire)] = wire->get_src_attribute();
 				log("ABC REINTEGRATION: Matched wire %s to driver attributes\n", orig_wire->name.c_str());
+				log("ABC REINTEGRATION: Source attribute = %s\n", wire->get_src_attribute().c_str());
 			} else {
 				log("ABC REINTEGRATION: No driver attributes found for wire %s\n", orig_wire->name.c_str());
 			}
