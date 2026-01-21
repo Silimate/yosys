@@ -1496,6 +1496,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 						log("Printing the original source attribute %s\n", orig_wire->get_src_attribute().c_str());
 						log("Printing the original source attribute 2 %s\n", sig2src[orig_sigmap(orig_wire)]);
 						src_pool.insert(sig2src[orig_sigmap(orig_wire)]);
+						src_pool.insert(orig_wire->get_src_attribute().c_str());
 				} else {
 						log("WARNING: Source wire not found");
 				}
@@ -1513,6 +1514,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 	for (auto c : mapped_mod->cells())
 	{
 		// SILIMATE: set output port to either Y or Q depending on the cell's ports and apply src attribute to the driver cell
+		log("Processing cell %s\n", c->name.c_str());
 		pool<string> src_pool;
 		if (c->hasPort(ID::Y) || c->hasPort(ID::Q)) {
 			Wire *out_wire = c->getPort((c->hasPort(ID::Y)) ? ID::Y : ID::Q).as_wire();
@@ -1523,6 +1525,8 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 				for (auto src : src_pool) {
 					log("The source for cell %s is %s\n", c->name.c_str(), src.c_str());
 				}
+			} else {
+				log("Remapped cell output wire is nullptr for %s\n", c->name);
 			}
 		}
 
