@@ -1474,6 +1474,19 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			}
 		}
 
+		// Add node retention sources to source attribute pool
+		IdString node_retention_id = RTLIL::IdString("\\node_retention_sources");
+		if (w->attributes.count(node_retention_id)) {
+			std::string sources_str = w->attributes.at(node_retention_id).decode_string();
+			pool<string> src_pool;
+			std::istringstream src_stream(sources_str);
+			std::string src_node;
+			while (src_stream >> src_node) {
+				src_pool.insert(remap_name(RTLIL::IdString(src_node)));
+			}
+			wire->add_strpool_attribute(ID::src, src_pool);
+		}
+
 		if (markgroups) wire->attributes[ID::abcgroup] = map_autoidx;
 		design->select(module, wire);
 	}
