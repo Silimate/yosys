@@ -1463,6 +1463,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			wire->attributes[ID::src] = orig_wire->attributes[ID::src];
 
 		// SILIMATE: Apply src attribute to the wire from the original wire
+		// TODO: remove
 		if (orig_wire != nullptr) {
 			if (sig2src.count(orig_sigmap(orig_wire))) {
 				wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
@@ -1473,11 +1474,13 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 				log("ABC REINTEGRATION: No driver attributes found for wire %s\n", orig_wire->name.c_str());
 			}
 		}
+		// END TODO
 
 		// Add node retention sources to source attribute pool
 		IdString node_retention_id = RTLIL::IdString("\\node_retention_sources");
 		if (w->attributes.count(node_retention_id)) {
 			std::string sources_str = w->attributes.at(node_retention_id).decode_string();
+			log("ABC REINTEGRATION: Node retention sources for wire %s = %s\n", w->name.c_str(), sources_str.c_str());
 			pool<string> src_pool;
 			std::istringstream src_stream(sources_str);
 			std::string src_node;
