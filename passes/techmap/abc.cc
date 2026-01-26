@@ -1471,10 +1471,10 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			if (sig2src.count(orig_sigmap(orig_wire))) {
 				wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
 				sig2src[mapped_sigmap(wire)] = wire->get_src_attribute();
-				log("ABC REINTEGRATION: Matched wire %s to driver attributes\n", orig_wire->name.c_str());
-				log("ABC REINTEGRATION: Source attribute = %s\n", wire->get_src_attribute().c_str());
+				// log("ABC REINTEGRATION: Matched wire %s to driver attributes\n", orig_wire->name.c_str());
+				// log("ABC REINTEGRATION: Source attribute = %s\n", wire->get_src_attribute().c_str());
 			} else {
-				log("ABC REINTEGRATION: No driver attributes found for wire %s\n", orig_wire->name.c_str());
+				// log("ABC REINTEGRATION: No driver attributes found for wire %s\n", orig_wire->name.c_str());
 			}
 		}
 		// END TODO
@@ -1482,19 +1482,19 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 		// Add node retention sources to source attribute pool
 		if (w->attributes.count(node_retention_id)) {
 			std::string sources_str = w->attributes.at(node_retention_id).decode_string();
-			log("ABC REINTEGRATION: Node retention sources for wire %s = %s\n", w->name.c_str(), sources_str.c_str());
+			// log("ABC REINTEGRATION: Node retention sources for wire %s = %s\n", w->name.c_str(), sources_str.c_str());
 			pool<string> src_pool;
 			std::istringstream src_stream(sources_str);
 			std::string src_node;
-			log("About to check sources\n");
+			// log("About to check sources\n");
 			while (src_stream >> src_node) {
-				log("Getting the original source attribute for wire %s\n", src_node.c_str());
+				// log("Getting the original source attribute for wire %s\n", src_node.c_str());
 				IdString src_id = RTLIL::escape_id(src_node);
 				src_node = remap_name(src_id, &orig_wire);
-				log("Printing the original name %s\n", src_node.c_str());
+				// log("Printing the original name %s\n", src_node.c_str());
 				if (orig_wire != nullptr) {
-						log("Printing the original source attribute %s\n", orig_wire->get_src_attribute().c_str());
-						log("Printing the original source attribute 2 %s\n", sig2src[orig_sigmap(orig_wire)]);
+						// log("Printing the original source attribute %s\n", orig_wire->get_src_attribute().c_str());
+						// log("Printing the original source attribute 2 %s\n", sig2src[orig_sigmap(orig_wire)]);
 						src_pool.insert(sig2src[orig_sigmap(orig_wire)]);
 						src_pool.insert(orig_wire->get_src_attribute().c_str());
 				} else {
