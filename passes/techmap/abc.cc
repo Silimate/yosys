@@ -1460,8 +1460,8 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 	for (auto w : mapped_mod->wires()) {
 		RTLIL::Wire *orig_wire = nullptr;
 		RTLIL::Wire *wire = module->addWire(remap_name(w->name, &orig_wire));
-		log("ABC REINTEGRATION: Processing wire: mapped_name=%s, orig_name=%s\n", 
-		    w->name.c_str(), orig_wire ? orig_wire->name.c_str() : "<null>");
+		// log("ABC REINTEGRATION: Processing wire: mapped_name=%s, orig_name=%s\n", 
+		//     w->name.c_str(), orig_wire ? orig_wire->name.c_str() : "<null>");
 		if (orig_wire != nullptr && orig_wire->attributes.count(ID::src))
 			wire->attributes[ID::src] = orig_wire->attributes[ID::src];
 
@@ -1499,6 +1499,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 						src_pool.insert(orig_wire->get_src_attribute().c_str());
 				} else {
 						log("WARNING: Source wire not found");
+						// log("WARNING: Source wire not found 2 %s\n", w->name.c_str());
 				}
 			}
 			wire->add_strpool_attribute(ID::src, src_pool);
@@ -1818,7 +1819,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 				if (!pool_str.empty()) pool_str += " ";
 				pool_str += s;
 			}
-			log("ABC REINTEGRATION: Wire %s src pool: %s\n", wire->name.c_str(), pool_str.c_str());
+			// log("ABC REINTEGRATION: Wire %s src pool: %s\n", wire->name.c_str(), pool_str.c_str());
 		}
 	}
 	for (auto cell : module->cells()) {
@@ -1829,7 +1830,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 				if (!pool_str.empty()) pool_str += " ";
 				pool_str += s;
 			}
-			log("ABC REINTEGRATION: Cell %s src pool: %s\n", cell->name.c_str(), pool_str.c_str());
+			// log("ABC REINTEGRATION: Cell %s src pool: %s\n", cell->name.c_str(), pool_str.c_str());
 		}
 	}
 
