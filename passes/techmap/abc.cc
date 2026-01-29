@@ -1462,21 +1462,21 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 		RTLIL::Wire *wire = module->addWire(remap_name(w->name, &orig_wire));
 		// log("ABC REINTEGRATION: Processing wire: mapped_name=%s, orig_name=%s\n", 
 		//     w->name.c_str(), orig_wire ? orig_wire->name.c_str() : "<null>");
-		if (orig_wire != nullptr && orig_wire->attributes.count(ID::src))
-			wire->attributes[ID::src] = orig_wire->attributes[ID::src];
+		// if (orig_wire != nullptr && orig_wire->attributes.count(ID::src))
+		// 	wire->attributes[ID::src] = orig_wire->attributes[ID::src];
 
 		// SILIMATE: Apply src attribute to the wire from the original wire
 		// TODO: remove
-		if (orig_wire != nullptr) {
-			if (sig2src.count(orig_sigmap(orig_wire))) {
-				wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
-				sig2src[mapped_sigmap(wire)] = wire->get_src_attribute();
-				// log("ABC REINTEGRATION: Matched wire %s to driver attributes\n", orig_wire->name.c_str());
-				// log("ABC REINTEGRATION: Source attribute = %s\n", wire->get_src_attribute().c_str());
-			} else {
-				// log("ABC REINTEGRATION: No driver attributes found for wire %s\n", orig_wire->name.c_str());
-			}
-		}
+		// if (orig_wire != nullptr) {
+		// 	if (sig2src.count(orig_sigmap(orig_wire))) {
+		// 		wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
+		// 		sig2src[mapped_sigmap(wire)] = wire->get_src_attribute();
+		// 		// log("ABC REINTEGRATION: Matched wire %s to driver attributes\n", orig_wire->name.c_str());
+		// 		// log("ABC REINTEGRATION: Source attribute = %s\n", wire->get_src_attribute().c_str());
+		// 	} else {
+		// 		// log("ABC REINTEGRATION: No driver attributes found for wire %s\n", orig_wire->name.c_str());
+		// 	}
+		// }
 		// END TODO
 
 		// Add node retention sources to source attribute pool
