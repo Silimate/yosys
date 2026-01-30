@@ -1459,50 +1459,27 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 	bool markgroups = run_abc.config.markgroups;
 	for (auto w : mapped_mod->wires()) {
 		RTLIL::Wire *orig_wire = nullptr;
-		RTLIL::Wire *wire = module->addWire(remap_name(w->name, &orig_wire));
-		// log("ABC REINTEGRATION: Processing wire: mapped_name=%s, orig_name=%s\n", 
-		//     w->name.c_str(), orig_wire ? orig_wire->name.c_str() : "<null>");
-		// if (orig_wire != nullptr && orig_wire->attributes.count(ID::src))
-		// 	wire->attributes[ID::src] = orig_wire->attributes[ID::src];
-
-		// SILIMATE: Apply src attribute to the wire from the original wire
-		// TODO: remove
-		// if (orig_wire != nullptr) {
-		// 	if (sig2src.count(orig_sigmap(orig_wire))) {
-		// 		wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
-		// 		sig2src[mapped_sigmap(wire)] = wire->get_src_attribute();
-		// 		// log("ABC REINTEGRATION: Matched wire %s to driver attributes\n", orig_wire->name.c_str());
-		// 		// log("ABC REINTEGRATION: Source attribute = %s\n", wire->get_src_attribute().c_str());
-		// 	} else {
-		// 		// log("ABC REINTEGRATION: No driver attributes found for wire %s\n", orig_wire->name.c_str());
-		// 	}
-		// }
-		// END TODO
+		RTLIL::Wire *wire = module->addWire(remap_name(w->name));
 
 		// Add node retention sources to source attribute pool
 		if (w->attributes.count(node_retention_id)) {
 			std::string sources_str = w->attributes.at(node_retention_id).decode_string();
-			// log("ABC REINTEGRATION: Node retention sources for wire %s = %s\n", w->name.c_str(), sources_str.c_str());
 			pool<string> src_pool;
 			std::istringstream src_stream(sources_str);
 			std::string src_node;
-			// log("About to check sources\n");
 			while (src_stream >> src_node) {
-				// log("Getting the original source attribute for wire %s\n", src_node.c_str());
 				IdString src_id = RTLIL::escape_id(src_node);
 				src_node = remap_name(src_id, &orig_wire);
-				// log("Printing the original name %s\n", src_node.c_str());
 				if (orig_wire != nullptr) {
-						// log("Printing the original source attribute %s\n", orig_wire->get_src_attribute().c_str());
-						// log("Printing the original source attribute 2 %s\n", sig2src[orig_sigmap(orig_wire)]);
 						src_pool.insert(sig2src[orig_sigmap(orig_wire)]);
 						src_pool.insert(orig_wire->get_src_attribute().c_str());
 				} else {
 						log("WARNING: Source wire not found");
-						// log("WARNING: Source wire not found 2 %s\n", w->name.c_str());
 				}
 			}
 			wire->add_strpool_attribute(ID::src, src_pool);
+		} else {
+			log("No node retention sources found for wire %s\n", w->name.c_str());
 		}
 
 		if (markgroups) wire->attributes[ID::abcgroup] = map_autoidx;
@@ -1522,10 +1499,6 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			Wire *remapped_out_wire = module->wire(remap_name(out_wire->name));
 			if (remapped_out_wire != nullptr) {
 				src_pool = remapped_out_wire->get_strpool_attribute(ID::src);
-				log("For cell %s the output wire is %s\n", c->name.c_str(), remapped_out_wire->name.c_str());
-				for (auto src : src_pool) {
-					log("The source for cell %s is %s\n", c->name.c_str(), src.c_str());
-				}
 			} else {
 				log("Remapped cell output wire is nullptr for %s\n", c->name);
 			}
@@ -1809,30 +1782,6 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 	log("ABC RESULTS:        internal signals: %8d\n", int(run_abc.signal_list.size()) - in_wires - out_wires);
 	log("ABC RESULTS:           input signals: %8d\n", in_wires);
 	log("ABC RESULTS:          output signals: %8d\n", out_wires);
-
-	// Print source pool attributes for wires and cells
-	for (auto wire : module->wires()) {
-		pool<string> src_pool = wire->get_strpool_attribute(ID::src);
-		if (!src_pool.empty()) {
-			std::string pool_str;
-			for (auto &s : src_pool) {
-				if (!pool_str.empty()) pool_str += " ";
-				pool_str += s;
-			}
-			// log("ABC REINTEGRATION: Wire %s src pool: %s\n", wire->name.c_str(), pool_str.c_str());
-		}
-	}
-	for (auto cell : module->cells()) {
-		pool<string> src_pool = cell->get_strpool_attribute(ID::src);
-		if (!src_pool.empty()) {
-			std::string pool_str;
-			for (auto &s : src_pool) {
-				if (!pool_str.empty()) pool_str += " ";
-				pool_str += s;
-			}
-			// log("ABC REINTEGRATION: Cell %s src pool: %s\n", cell->name.c_str(), pool_str.c_str());
-		}
-	}
 
 	delete mapped_design;
 	finish();
