@@ -1490,7 +1490,6 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 	for (auto c : mapped_mod->cells())
 	{
 		// SILIMATE: set output port to either Y or Q depending on the cell's ports and apply src attribute to the driver cell
-		log("Processing cell %s\n", c->name.c_str());
 		pool<string> src_pool;
 		if (c->hasPort(ID::Y) || c->hasPort(ID::Q)) {
 			Wire *out_wire = c->getPort((c->hasPort(ID::Y)) ? ID::Y : ID::Q).as_wire();
