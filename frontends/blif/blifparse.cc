@@ -249,6 +249,50 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 					blif_maxnum = 0;
 				}
 
+				// Check for .node_retention_begin after .end
+				if (read_next_line(buffer, buffer_size, line_count, f)) {
+					char *next_cmd = strtok(buffer, " \t\r\n");
+					if (next_cmd != nullptr && !strcmp(next_cmd, ".node_retention_begin")) {
+						// Parse node retention information
+						while (read_next_line(buffer, buffer_size, line_count, f)) {
+							char *line_cmd = strtok(buffer, " \t\r\n");
+							if (line_cmd == nullptr)
+								continue;
+							
+							// Check for end marker
+							if (!strcmp(line_cmd, ".node_retention_end"))
+								break;
+							
+							// Parse: node_name SRC source1 source2 ...
+							std::string node_name = line_cmd;
+							char *src_token = strtok(NULL, " \t\r\n");
+							if (src_token == nullptr || strcmp(src_token, "SRC"))
+								continue;
+							
+							// Collect all source nodes
+							std::string sources;
+							char *source_token;
+							bool first = true;
+							while ((source_token = strtok(NULL, " \t\r\n")) != NULL) {
+								if (!first)
+									sources += " ";
+								sources += source_token;
+								first = false;
+							}
+							
+							// Find wire and set attribute
+							IdString wire_id = RTLIL::escape_id(node_name);
+							Wire *wire = module->wire(wire_id);
+							if (wire != nullptr && !sources.empty()) {
+								wire->attributes[RTLIL::IdString("\\node_retention_sources")] = Const(sources);
+							}
+						}
+					} else {
+						// Not .node_retention_begin, process this line normally
+						goto continue_without_read;
+					}
+				}
+
 				module = nullptr;
 				lastcell = nullptr;
 				obj_attributes = nullptr;
@@ -467,27 +511,6 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 					goto error;
 
 				module->connect(blif_wire(q), blif_wire(p));
-				continue;
-			}
-
-			if (!strcmp(cmd, ".gateinit"))
-			{
-				char *p = strtok(NULL, " \t\r\n");
-				if (p == NULL)
-					goto error;
-
-				char *n = strtok(p, "=");
-				char *init = strtok(NULL, "=");
-				if (n == NULL || init == NULL)
-					goto error;
-				if (init[0] != '0' && init[0] != '1')
-					goto error;
-
-				if (blif_wire(n)->attributes.find(ID::init) == blif_wire(n)->attributes.end())
-					blif_wire(n)->attributes.emplace(ID::init, Const(init[0] == '1' ? 1 : 0, 1));
-				else
-					blif_wire(n)->attributes[ID::init] = Const(init[0] == '1' ? 1 : 0, 1);
-
 				continue;
 			}
 

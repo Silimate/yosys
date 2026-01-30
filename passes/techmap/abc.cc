@@ -29,6 +29,7 @@
 // Kahn, Arthur B. (1962), "Topological sorting of large networks", Communications of the ACM 5 (11): 558-562, doi:10.1145/368996.369025
 // http://en.wikipedia.org/wiki/Topological_sorting
 
+#include <cmath>
 #define ABC_COMMAND_LIB "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; &get -n; &dch -f; &nf {D}; &put"
 #define ABC_COMMAND_CTR "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; &get -n; &dch -f; &nf {D}; &put; buffer; upsize {D}; dnsize {D}; stime -p"
 #define ABC_COMMAND_LUT "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; dch -f; if; mfs2"
@@ -142,6 +143,7 @@ struct AbcConfig
 	bool map_mux8 = false;
 	bool map_mux16 = false;
 	bool markgroups = false;
+	bool read_blif_m = false;  // Add -m flag to read_blif command
 	pool<std::string> enabled_gates;
 	bool cmos_cost = false;
 	int max_threads = -1;    // -1 means auto (use number of modules)
@@ -991,7 +993,8 @@ void AbcModuleState::prepare_module(RTLIL::Design *design, RTLIL::Module *module
 	log_header(design, "Extracting gate netlist of module `%s' to `%s/input.blif'..\n",
 			module->name.c_str(), replace_tempdir(run_abc.tempdir_name, run_abc.tempdir_name, config.show_tempdir).c_str());
 
-	std::string abc_script = stringf("read_blif \"%s/input.blif\"; ", run_abc.tempdir_name);
+	std::string abc_script = stringf("read_blif%s \"%s/input.blif\"; ", 
+			config.read_blif_m ? " -m" : "", run_abc.tempdir_name);
 
 	if (!config.liberty_files.empty() || !config.genlib_files.empty()) {
 		std::string dont_use_args;
@@ -1148,12 +1151,6 @@ bool read_until_abc_done(abc_output_filter &filt, int fd, DeferredLogs &logs) {
 			if (line.substr(0, 14) == "YOSYS_ABC_DONE") {
 				// Ignore any leftover output, there should only be a prompt perhaps
 				return true;
-			}
-			// If ABC aborted the sourced script, it returns to the prompt and will
-			// never print YOSYS_ABC_DONE. Treat this as a failed run, not a hang.
-			if (line.substr(0, 7) == "Error: ") {
-				logs.log_error("ABC: %s", line.c_str());
-				return false;
 			}
 			filt.next_line(line);
 			line.clear();
@@ -1452,6 +1449,8 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 
 	ifs.close();
 
+	IdString node_retention_id = RTLIL::IdString("\\node_retention_sources");
+
 	log_header(design, "Re-integrating ABC results.\n");
 	RTLIL::Module *mapped_mod = mapped_design->module(ID(netlist));
 	if (mapped_mod == nullptr)
@@ -1461,18 +1460,49 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 	for (auto w : mapped_mod->wires()) {
 		RTLIL::Wire *orig_wire = nullptr;
 		RTLIL::Wire *wire = module->addWire(remap_name(w->name, &orig_wire));
-		if (orig_wire != nullptr && orig_wire->attributes.count(ID::src))
-			wire->attributes[ID::src] = orig_wire->attributes[ID::src];
+		// log("ABC REINTEGRATION: Processing wire: mapped_name=%s, orig_name=%s\n", 
+		//     w->name.c_str(), orig_wire ? orig_wire->name.c_str() : "<null>");
+		// if (orig_wire != nullptr && orig_wire->attributes.count(ID::src))
+		// 	wire->attributes[ID::src] = orig_wire->attributes[ID::src];
 
 		// SILIMATE: Apply src attribute to the wire from the original wire
-		if (orig_wire != nullptr) {
-			if (sig2src.count(orig_sigmap(orig_wire))) {
-				wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
-				sig2src[mapped_sigmap(wire)] = wire->get_src_attribute();
-				log_debug("Matched wire %s to driver attributes:\n", orig_wire->name.c_str());
-			} else {
-				log_debug("No driver attributes found for wire %s\n", orig_wire->name.c_str());
+		// TODO: remove
+		// if (orig_wire != nullptr) {
+		// 	if (sig2src.count(orig_sigmap(orig_wire))) {
+		// 		wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
+		// 		sig2src[mapped_sigmap(wire)] = wire->get_src_attribute();
+		// 		// log("ABC REINTEGRATION: Matched wire %s to driver attributes\n", orig_wire->name.c_str());
+		// 		// log("ABC REINTEGRATION: Source attribute = %s\n", wire->get_src_attribute().c_str());
+		// 	} else {
+		// 		// log("ABC REINTEGRATION: No driver attributes found for wire %s\n", orig_wire->name.c_str());
+		// 	}
+		// }
+		// END TODO
+
+		// Add node retention sources to source attribute pool
+		if (w->attributes.count(node_retention_id)) {
+			std::string sources_str = w->attributes.at(node_retention_id).decode_string();
+			// log("ABC REINTEGRATION: Node retention sources for wire %s = %s\n", w->name.c_str(), sources_str.c_str());
+			pool<string> src_pool;
+			std::istringstream src_stream(sources_str);
+			std::string src_node;
+			// log("About to check sources\n");
+			while (src_stream >> src_node) {
+				// log("Getting the original source attribute for wire %s\n", src_node.c_str());
+				IdString src_id = RTLIL::escape_id(src_node);
+				src_node = remap_name(src_id, &orig_wire);
+				// log("Printing the original name %s\n", src_node.c_str());
+				if (orig_wire != nullptr) {
+						// log("Printing the original source attribute %s\n", orig_wire->get_src_attribute().c_str());
+						// log("Printing the original source attribute 2 %s\n", sig2src[orig_sigmap(orig_wire)]);
+						src_pool.insert(sig2src[orig_sigmap(orig_wire)]);
+						src_pool.insert(orig_wire->get_src_attribute().c_str());
+				} else {
+						log("WARNING: Source wire not found");
+						// log("WARNING: Source wire not found 2 %s\n", w->name.c_str());
+				}
 			}
+			wire->add_strpool_attribute(ID::src, src_pool);
 		}
 
 		if (markgroups) wire->attributes[ID::abcgroup] = map_autoidx;
@@ -1485,9 +1515,21 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 	for (auto c : mapped_mod->cells())
 	{
 		// SILIMATE: set output port to either Y or Q depending on the cell's ports and apply src attribute to the driver cell
-		Wire *out_wire = c->getPort((c->hasPort(ID::Y)) ? ID::Y : ID::Q).as_wire();
-		Wire *remapped_out_wire = module->wire(remap_name(out_wire->name));
-		std::string src_attribute = sig2src[remapped_out_wire];
+		log("Processing cell %s\n", c->name.c_str());
+		pool<string> src_pool;
+		if (c->hasPort(ID::Y) || c->hasPort(ID::Q)) {
+			Wire *out_wire = c->getPort((c->hasPort(ID::Y)) ? ID::Y : ID::Q).as_wire();
+			Wire *remapped_out_wire = module->wire(remap_name(out_wire->name));
+			if (remapped_out_wire != nullptr) {
+				src_pool = remapped_out_wire->get_strpool_attribute(ID::src);
+				log("For cell %s the output wire is %s\n", c->name.c_str(), remapped_out_wire->name.c_str());
+				for (auto src : src_pool) {
+					log("The source for cell %s is %s\n", c->name.c_str(), src.c_str());
+				}
+			} else {
+				log("Remapped cell output wire is nullptr for %s\n", c->name);
+			}
+		}
 
 		if (builtin_lib)
 		{
@@ -1517,7 +1559,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
-				cell->set_src_attribute(src_attribute); // SILIMATE: set src attribute from wire
+				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 				cell->fixup_parameters(); // SILIMATE: fix up parameters
 				design->select(module, cell);
 				continue;
@@ -1540,7 +1582,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
-				cell->set_src_attribute(src_attribute); // SILIMATE: set src attribute from wire
+				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 				cell->fixup_parameters(); // SILIMATE: fix up parameters
 				design->select(module, cell);
 				continue;
@@ -1559,7 +1601,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
-				cell->set_src_attribute(src_attribute); // SILIMATE: set src attribute from wire
+				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 				cell->fixup_parameters(); // SILIMATE: fix up parameters
 				design->select(module, cell);
 				continue;
@@ -1571,6 +1613,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
+				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 				design->select(module, cell);
 				continue;
 			}
@@ -1581,6 +1624,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
+				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 				design->select(module, cell);
 				continue;
 			}
@@ -1592,6 +1636,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
+				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 				design->select(module, cell);
 				continue;
 			}
@@ -1602,6 +1647,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
+				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 				design->select(module, cell);
 				continue;
 			}
@@ -1612,6 +1658,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
+				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 				design->select(module, cell);
 				continue;
 			}
@@ -1652,6 +1699,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 				ff.sig_q = module->wire(remap_name(c->getPort(ID::Q).as_wire()->name));
 				RTLIL::Cell *cell = ff.emit();
 				if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
+				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 				design->select(module, cell);
 				continue;
 			}
@@ -1701,6 +1749,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			ff.sig_q = module->wire(remap_name(c->getPort(ID::Q).as_wire()->name));
 			RTLIL::Cell *cell = ff.emit();
 			if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
+			cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
 			design->select(module, cell);
 			continue;
 		}
@@ -1725,7 +1774,8 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			}
 			cell->setPort(conn.first, newsig);
 		}
-		design->select(module, cell);
+		cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
+
 	}
 
 	for (auto conn : mapped_mod->connections()) {
@@ -1759,6 +1809,30 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 	log("ABC RESULTS:        internal signals: %8d\n", int(run_abc.signal_list.size()) - in_wires - out_wires);
 	log("ABC RESULTS:           input signals: %8d\n", in_wires);
 	log("ABC RESULTS:          output signals: %8d\n", out_wires);
+
+	// Print source pool attributes for wires and cells
+	for (auto wire : module->wires()) {
+		pool<string> src_pool = wire->get_strpool_attribute(ID::src);
+		if (!src_pool.empty()) {
+			std::string pool_str;
+			for (auto &s : src_pool) {
+				if (!pool_str.empty()) pool_str += " ";
+				pool_str += s;
+			}
+			// log("ABC REINTEGRATION: Wire %s src pool: %s\n", wire->name.c_str(), pool_str.c_str());
+		}
+	}
+	for (auto cell : module->cells()) {
+		pool<string> src_pool = cell->get_strpool_attribute(ID::src);
+		if (!src_pool.empty()) {
+			std::string pool_str;
+			for (auto &s : src_pool) {
+				if (!pool_str.empty()) pool_str += " ";
+				pool_str += s;
+			}
+			// log("ABC REINTEGRATION: Cell %s src pool: %s\n", cell->name.c_str(), pool_str.c_str());
+		}
+	}
 
 	delete mapped_design;
 	finish();
@@ -2069,6 +2143,7 @@ struct AbcPass : public Pass {
 		config.cleanup = !design->scratchpad_get_bool("abc.nocleanup", false);
 		config.show_tempdir = design->scratchpad_get_bool("abc.showtmp", false);
 		config.markgroups = design->scratchpad_get_bool("abc.markgroups", false);
+		config.read_blif_m = design->scratchpad_get_bool("abc.readblifm", false);
 		config.max_threads = design->scratchpad_get_int("abc.max_threads", -1);
 		config.reserved_cores = design->scratchpad_get_int("abc.reserved_cores", 4);
 
