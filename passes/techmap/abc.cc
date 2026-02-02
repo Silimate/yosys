@@ -992,7 +992,7 @@ void AbcModuleState::prepare_module(RTLIL::Design *design, RTLIL::Module *module
 	log_header(design, "Extracting gate netlist of module `%s' to `%s/input.blif'..\n",
 			module->name.c_str(), replace_tempdir(run_abc.tempdir_name, run_abc.tempdir_name, config.show_tempdir).c_str());
 
-	std::string abc_script = stringf("read_blif " + (config.abc_node_retention ? " -r" : "") + " \"%s/input.blif\"; ", run_abc.tempdir_name);
+	std::string abc_script = stringf((std::string("read_blif") + (config.abc_node_retention ? " -r" : "") + " \"%s/input.blif\"; ").c_str(), run_abc.tempdir_name);
 
 	if (!config.liberty_files.empty() || !config.genlib_files.empty()) {
 		std::string dont_use_args;
