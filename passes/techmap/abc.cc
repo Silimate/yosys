@@ -1466,6 +1466,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			std::string src_node;
 			while (src_stream >> src_node) {
 				IdString src_id = RTLIL::escape_id(src_node);
+				orig_wire = nullptr;
 				src_node = remap_name(src_id, &orig_wire);
 				if (orig_wire != nullptr) {
 						src_pool.insert(sig2src[orig_sigmap(orig_wire)]);
