@@ -249,8 +249,12 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 					blif_maxnum = 0;
 				}
 
-				// Check for .node_retention_begin after .end
-				if (read_next_line(buffer, buffer_size, line_count, f)) {
+			// Parse optional node retention section that tracks signal source origins for ABC reintegration.
+			// Expected format:
+			//   .node_retention_begin
+			//   <node_name> SRC <source1> [source2] ...
+			//   .node_retention_end
+			if (read_next_line(buffer, buffer_size, line_count, f)) {
 					char *next_cmd = strtok(buffer, " \t\r\n");
 					if (next_cmd != nullptr && !strcmp(next_cmd, ".node_retention_begin")) {
 						// Parse node retention information
@@ -267,7 +271,7 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 							std::string node_name = line_cmd;
 							char *src_token = strtok(NULL, " \t\r\n");
 							if (src_token == nullptr || strcmp(src_token, "SRC"))
-								continue;
+								continue; // Skip malformed lines missing "SRC" keyword
 							
 							// Collect all source nodes
 							std::string sources;
@@ -284,6 +288,7 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 							IdString wire_id = RTLIL::escape_id(node_name);
 							Wire *wire = module->wire(wire_id);
 							if (wire != nullptr && !sources.empty()) {
+								// Store sources as attribute for abc.cc to propagate src annotations
 								wire->attributes[RTLIL::IdString("\\node_retention_sources")] = Const(sources);
 							}
 						}
