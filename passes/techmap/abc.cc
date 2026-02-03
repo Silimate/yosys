@@ -1753,7 +1753,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			cell->setPort(conn.first, newsig);
 		}
 		cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
-
+		design->select(module, cell);
 	}
 
 	for (auto conn : mapped_mod->connections()) {
