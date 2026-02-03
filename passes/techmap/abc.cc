@@ -1485,7 +1485,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 			}
 			wire->add_strpool_attribute(ID::src, src_pool);
 		} else {
-			log("No node retention sources found for wire %s\n", w->name.c_str());
+			log_error("No node retention sources found for wire %s\n", w->name.c_str());
 		}
 
 		if (markgroups) wire->attributes[ID::abcgroup] = map_autoidx;
