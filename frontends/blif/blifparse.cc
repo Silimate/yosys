@@ -249,12 +249,12 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 					blif_maxnum = 0;
 				}
 
-			// Parse optional node retention section that tracks signal source origins for ABC reintegration.
-			// Expected format:
-			//   .node_retention_begin
-			//   <node_name> SRC <source1> [source2] ...
-			//   .node_retention_end
-			if (read_next_line(buffer, buffer_size, line_count, f)) {
+				// Parse optional node retention section that tracks signal source origins for ABC reintegration.
+				// Expected format:
+				//   .node_retention_begin
+				//   <node_name> SRC <source1> [source2] ...
+				//   .node_retention_end
+				if (read_next_line(buffer, buffer_size, line_count, f)) {
 					char *next_cmd = strtok(buffer, " \t\r\n");
 					if (next_cmd != nullptr && !strcmp(next_cmd, ".node_retention_begin")) {
 						// Parse node retention information
