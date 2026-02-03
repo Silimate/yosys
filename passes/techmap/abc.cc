@@ -1480,7 +1480,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 						src_pool.insert(sig2src[orig_sigmap(orig_wire)]);
 						src_pool.insert(orig_wire->get_src_attribute().c_str());
 				} else {
-						log("WARNING: Source wire not found");
+					log("WARNING: Source wire not found for %s\n", src_node.c_str());
 				}
 			}
 			wire->add_strpool_attribute(ID::src, src_pool);
