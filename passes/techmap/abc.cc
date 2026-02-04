@@ -147,6 +147,7 @@ struct AbcConfig
 	int max_threads = -1;    // -1 means auto (use number of modules)
 	int reserved_cores = 4;  // cores reserved for main thread and other work
 	bool abc_node_retention = false; // retain nodes in ABC (off by default)
+	int abc_max_node_retention_origins = 5; // number of node retention origins (default 5)
 };
 
 struct AbcSigVal {
@@ -992,7 +993,7 @@ void AbcModuleState::prepare_module(RTLIL::Design *design, RTLIL::Module *module
 	log_header(design, "Extracting gate netlist of module `%s' to `%s/input.blif'..\n",
 			module->name.c_str(), replace_tempdir(run_abc.tempdir_name, run_abc.tempdir_name, config.show_tempdir).c_str());
 
-	std::string abc_script = stringf((std::string("read_blif") + (config.abc_node_retention ? " -r" : "") + " \"%s/input.blif\"; ").c_str(), run_abc.tempdir_name);
+	std::string abc_script = stringf((std::string("read_blif") + (config.abc_node_retention ? stringf(" -M %d -r", config.abc_max_node_retention_origins) : "") + " \"%s/input.blif\"; ").c_str(), run_abc.tempdir_name);
 
 	if (!config.liberty_files.empty() || !config.genlib_files.empty()) {
 		std::string dont_use_args;
@@ -2085,6 +2086,7 @@ struct AbcPass : public Pass {
 		config.abc_dress = design->scratchpad_get_bool("abc.dress", false);
 		g_arg = design->scratchpad_get_string("abc.g", g_arg);
 		config.abc_node_retention = design->scratchpad_get_bool("abc.node_retention", false);
+		config.abc_max_node_retention_origins = design->scratchpad_get_int("abc.max_node_retention_origins", 5);
 		config.fast_mode = design->scratchpad_get_bool("abc.fast", false);
 		bool dff_mode = design->scratchpad_get_bool("abc.dff", false);
 		std::string clk_str;
