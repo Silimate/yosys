@@ -1164,7 +1164,6 @@ bool read_until_abc_done(abc_output_filter &filt, int fd, DeferredLogs &logs) {
 	}
 }
 
-
 void RunAbcState::run(ConcurrentStack<AbcProcess> &process_pool)
 {
 	std::string buffer = stringf("%s/input.blif", tempdir_name);
