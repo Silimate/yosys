@@ -249,6 +249,55 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 					blif_maxnum = 0;
 				}
 
+				// Parse optional node retention section that tracks signal source origins for ABC reintegration.
+				// Expected format:
+				//   .node_retention_begin
+				//   <node_name> SRC <source1> [source2] ...
+				//   .node_retention_end
+				if (read_next_line(buffer, buffer_size, line_count, f)) {
+					char *next_cmd = strtok(buffer, " \t\r\n");
+					if (next_cmd != nullptr && !strcmp(next_cmd, ".node_retention_begin")) {
+						// Parse node retention information
+						while (read_next_line(buffer, buffer_size, line_count, f)) {
+							char *line_cmd = strtok(buffer, " \t\r\n");
+							if (line_cmd == nullptr)
+								continue;
+							
+							// Check for end marker
+							if (!strcmp(line_cmd, ".node_retention_end"))
+								break;
+							
+							// Parse: node_name SRC source1 source2 ...
+							std::string node_name = line_cmd;
+							char *src_token = strtok(NULL, " \t\r\n");
+							if (src_token == nullptr || strcmp(src_token, "SRC"))
+								continue; // Skip malformed lines missing "SRC" keyword
+							
+							// Collect all source nodes
+							std::string sources;
+							char *source_token;
+							bool first = true;
+							while ((source_token = strtok(NULL, " \t\r\n")) != NULL) {
+								if (!first)
+									sources += " ";
+								sources += source_token;
+								first = false;
+							}
+							
+							// Find wire and set attribute
+							IdString wire_id = RTLIL::escape_id(node_name);
+							Wire *wire = module->wire(wire_id);
+							if (wire != nullptr && !sources.empty()) {
+								// Store sources as attribute for abc.cc to propagate src annotations
+								wire->attributes[RTLIL::IdString("\\node_retention_sources")] = Const(sources);
+							}
+						}
+					} else {
+						// Not .node_retention_begin, process this line normally
+						goto continue_without_read;
+					}
+				}
+
 				module = nullptr;
 				lastcell = nullptr;
 				obj_attributes = nullptr;
