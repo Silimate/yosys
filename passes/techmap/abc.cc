@@ -136,6 +136,7 @@ struct AbcConfig
 	bool fast_mode = false;
 	bool show_tempdir = false;
 	bool sop_mode = false;
+	bool word_mode = false;
 	bool abc_dress = false;
 	bool map_mux4 = false;
 	bool map_mux8 = false;
@@ -143,6 +144,8 @@ struct AbcConfig
 	bool markgroups = false;
 	pool<std::string> enabled_gates;
 	bool cmos_cost = false;
+	int max_threads = -1;    // -1 means auto (use number of modules)
+	int reserved_cores = 4;  // cores reserved for main thread and other work
 };
 
 struct AbcSigVal {
@@ -313,7 +316,7 @@ struct AbcModuleState {
 	void handle_loops(AbcSigMap &assign_map, RTLIL::Module *module);
 	void prepare_module(RTLIL::Design *design, RTLIL::Module *module, AbcSigMap &assign_map, const std::vector<RTLIL::Cell*> &cells,
 		bool dff_mode, std::string clk_str);
-	void extract(AbcSigMap &assign_map, RTLIL::Design *design, RTLIL::Module *module);
+	void extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &sig2src, SigMap &orig_sigmap, RTLIL::Design *design, RTLIL::Module *module);
 	void finish();
 };
 
@@ -578,12 +581,8 @@ bool AbcModuleState::extract_cell(const AbcSigMap &assign_map, RTLIL::Module *mo
 std::string AbcModuleState::remap_name(RTLIL::IdString abc_name, RTLIL::Wire **orig_wire)
 {
 	std::string abc_sname = abc_name.substr(1);
-	bool isnew = false;
-	if (abc_sname.compare(0, 4, "new_") == 0)
-	{
+	if (abc_sname.compare(0, 9, "new_ys__n") == 0)
 		abc_sname.erase(0, 4);
-		isnew = true;
-	}
 	if (abc_sname.compare(0, 5, "ys__n") == 0)
 	{
 		abc_sname.erase(0, 5);
@@ -598,11 +597,9 @@ std::string AbcModuleState::remap_name(RTLIL::IdString abc_name, RTLIL::Wire **o
 				const auto &bit = signal_bits.at(sid);
 				if (bit.wire != nullptr)
 				{
-					std::string s = stringf("$abc$%d$%s", map_autoidx, bit.wire->name.c_str()+1);
+					std::string s = stringf("\\%s_ix%d", bit.wire->name.c_str()+1, map_autoidx); // SILIMATE: Improve the naming
 					if (bit.wire->width != 1)
 						s += stringf("[%d]", bit.offset);
-					if (isnew)
-						s += "_new";
 					s += postfix;
 					if (orig_wire != nullptr)
 						*orig_wire = bit.wire;
@@ -611,7 +608,7 @@ std::string AbcModuleState::remap_name(RTLIL::IdString abc_name, RTLIL::Wire **o
 			}
 		}
 	}
-	return stringf("$abc$%d$%s", map_autoidx, abc_name.substr(1));
+	return stringf("\\%s_ix%d", abc_sname.c_str(), map_autoidx); // SILIMATE: Improve the naming
 }
 
 void AbcModuleState::dump_loop_graph(FILE *f, int &nr, dict<int, pool<int>> &edges, pool<int> &workpool, std::vector<int> &in_counts)
@@ -1371,7 +1368,7 @@ void RunAbcState::run(ConcurrentStack<AbcProcess> &process_pool)
 		did_run = true;
 		return;
 	}
-	log("Don't call ABC as there is nothing to map.\n");
+	logs.log("Don't call ABC as there is nothing to map.\n");
 }
 
 void emit_global_input_files(const AbcConfig &config)
@@ -1433,7 +1430,7 @@ void emit_global_input_files(const AbcConfig &config)
 	}
 }
 
-void AbcModuleState::extract(AbcSigMap &assign_map, RTLIL::Design *design, RTLIL::Module *module)
+void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &sig2src, SigMap &orig_sigmap, RTLIL::Design *design, RTLIL::Module *module)
 {
 	log_push();
 	log_header(design, "Executed ABC.\n");
@@ -1459,22 +1456,39 @@ void AbcModuleState::extract(AbcSigMap &assign_map, RTLIL::Design *design, RTLIL
 	RTLIL::Module *mapped_mod = mapped_design->module(ID(netlist));
 	if (mapped_mod == nullptr)
 		log_error("ABC output file does not contain a module `netlist'.\n");
+	SigMap mapped_sigmap(mapped_mod); // SILIMATE: Move mapped sigmap definition here
 	bool markgroups = run_abc.config.markgroups;
 	for (auto w : mapped_mod->wires()) {
 		RTLIL::Wire *orig_wire = nullptr;
 		RTLIL::Wire *wire = module->addWire(remap_name(w->name, &orig_wire));
 		if (orig_wire != nullptr && orig_wire->attributes.count(ID::src))
 			wire->attributes[ID::src] = orig_wire->attributes[ID::src];
+
+		// SILIMATE: Apply src attribute to the wire from the original wire
+		if (orig_wire != nullptr) {
+			if (sig2src.count(orig_sigmap(orig_wire))) {
+				wire->set_src_attribute(sig2src[orig_sigmap(orig_wire)]);
+				sig2src[mapped_sigmap(wire)] = wire->get_src_attribute();
+				log_debug("Matched wire %s to driver attributes:\n", orig_wire->name.c_str());
+			} else {
+				log_debug("No driver attributes found for wire %s\n", orig_wire->name.c_str());
+			}
+		}
+
 		if (markgroups) wire->attributes[ID::abcgroup] = map_autoidx;
 		design->select(module, wire);
 	}
 
-	SigMap mapped_sigmap(mapped_mod);
 	FfInitVals mapped_initvals(&mapped_sigmap, mapped_mod);
 
 	dict<std::string, int> cell_stats;
 	for (auto c : mapped_mod->cells())
 	{
+		// SILIMATE: set output port to either Y or Q depending on the cell's ports and apply src attribute to the driver cell
+		Wire *out_wire = c->getPort((c->hasPort(ID::Y)) ? ID::Y : ID::Q).as_wire();
+		Wire *remapped_out_wire = module->wire(remap_name(out_wire->name));
+		std::string src_attribute = sig2src[remapped_out_wire];
+
 		if (builtin_lib)
 		{
 			cell_stats[RTLIL::unescape_id(c->type)]++;
@@ -1496,32 +1510,57 @@ void AbcModuleState::extract(AbcSigMap &assign_map, RTLIL::Design *design, RTLIL
 				continue;
 			}
 			if (c->type == ID(NOT)) {
-				RTLIL::Cell *cell = module->addCell(remap_name(c->name), ID($_NOT_));
+				// SILIMATE: use word-level primitives
+				RTLIL::Cell *cell = module->addCell(remap_name(c->name), run_abc.config.word_mode ? ID($not) : ID($_NOT_));
 				if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 				for (auto name : {ID::A, ID::Y}) {
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
+				cell->set_src_attribute(src_attribute); // SILIMATE: set src attribute from wire
+				cell->fixup_parameters(); // SILIMATE: fix up parameters
 				design->select(module, cell);
 				continue;
 			}
 			if (c->type.in(ID(AND), ID(OR), ID(XOR), ID(NAND), ID(NOR), ID(XNOR), ID(ANDNOT), ID(ORNOT))) {
-				RTLIL::Cell *cell = module->addCell(remap_name(c->name), stringf("$_%s_", c->type.c_str()+1));
+				// SILIMATE: use word-level primitives
+				std::string cell_type;
+				if (c->type == ID(AND) && run_abc.config.word_mode)
+					cell_type = "$and";
+				else if (c->type == ID(OR) && run_abc.config.word_mode)
+					cell_type = "$or";
+				else if (c->type == ID(XOR) && run_abc.config.word_mode)
+					cell_type = "$xor";
+				else
+					cell_type = stringf("$_%s_", c->type.c_str()+1);
+
+				RTLIL::Cell *cell = module->addCell(remap_name(c->name), cell_type);
 				if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 				for (auto name : {ID::A, ID::B, ID::Y}) {
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
+				cell->set_src_attribute(src_attribute); // SILIMATE: set src attribute from wire
+				cell->fixup_parameters(); // SILIMATE: fix up parameters
 				design->select(module, cell);
 				continue;
 			}
 			if (c->type.in(ID(MUX), ID(NMUX))) {
-				RTLIL::Cell *cell = module->addCell(remap_name(c->name), stringf("$_%s_", c->type.c_str()+1));
+				// SILIMATE: use word-level primitives
+				std::string cell_type;
+				if (c->type == ID(MUX) && run_abc.config.word_mode)
+					cell_type = "$mux";
+				else
+					cell_type = stringf("$_%s_", c->type.c_str()+1);
+
+				RTLIL::Cell *cell = module->addCell(remap_name(c->name), cell_type);
 				if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
 				for (auto name : {ID::A, ID::B, ID::S, ID::Y}) {
 					RTLIL::IdString remapped_name = remap_name(c->getPort(name).as_wire()->name);
 					cell->setPort(name, module->wire(remapped_name));
 				}
+				cell->set_src_attribute(src_attribute); // SILIMATE: set src attribute from wire
+				cell->fixup_parameters(); // SILIMATE: fix up parameters
 				design->select(module, cell);
 				continue;
 			}
@@ -1959,6 +1998,16 @@ struct AbcPass : public Pass {
 		log("        preserve naming by an equivalence check between the original and\n");
 		log("        post-ABC netlists (experimental).\n");
 		log("\n");
+		log("    -max_threads <num>\n");
+		log("        maximum number of worker threads for parallel ABC runs. Default is -1,\n");
+		log("        which means auto (use number of modules). Set to 0 to disable parallel\n");
+		log("        execution and run everything on the main thread.\n");
+		log("\n");
+		log("    -reserved_cores <num>\n");
+		log("        number of CPU cores to reserve for the main thread and other work.\n");
+		log("        Default is 4. The actual number of worker threads used is:\n");
+		log("        min(hardware_threads - reserved_cores, max_threads)\n");
+		log("\n");
 		log("When no target cell library is specified the Yosys standard cell library is\n");
 		log("loaded into ABC before the ABC script is executed.\n");
 		log("\n");
@@ -2002,6 +2051,7 @@ struct AbcPass : public Pass {
 		lut_arg = design->scratchpad_get_string("abc.lut", lut_arg);
 		luts_arg = design->scratchpad_get_string("abc.luts", luts_arg);
 		config.sop_mode = design->scratchpad_get_bool("abc.sop", false);
+		config.word_mode = design->scratchpad_get_bool("abc.word", false);
 		config.map_mux4 = design->scratchpad_get_bool("abc.mux4", false);
 		config.map_mux8 = design->scratchpad_get_bool("abc.mux8", false);
 		config.map_mux16 = design->scratchpad_get_bool("abc.mux16", false);
@@ -2019,6 +2069,8 @@ struct AbcPass : public Pass {
 		config.cleanup = !design->scratchpad_get_bool("abc.nocleanup", false);
 		config.show_tempdir = design->scratchpad_get_bool("abc.showtmp", false);
 		config.markgroups = design->scratchpad_get_bool("abc.markgroups", false);
+		config.max_threads = design->scratchpad_get_int("abc.max_threads", -1);
+		config.reserved_cores = design->scratchpad_get_int("abc.reserved_cores", 4);
 
 		if (config.cleanup)
 			config.global_tempdir_name = get_base_tmpdir() + "/";
@@ -2097,6 +2149,10 @@ struct AbcPass : public Pass {
 				config.sop_mode = true;
 				continue;
 			}
+			if (arg == "-word") {
+				config.word_mode = true;
+				continue;
+			}
 			if (arg == "-mux4") {
 				config.map_mux4 = true;
 				continue;
@@ -2148,6 +2204,14 @@ struct AbcPass : public Pass {
 			}
 			if (arg == "-markgroups") {
 				config.markgroups = true;
+				continue;
+			}
+			if (arg == "-max_threads" && argidx+1 < args.size()) {
+				config.max_threads = atoi(args[++argidx].c_str());
+				continue;
+			}
+			if (arg == "-reserved_cores" && argidx+1 < args.size()) {
+				config.reserved_cores = atoi(args[++argidx].c_str());
 				continue;
 			}
 			break;
@@ -2357,6 +2421,156 @@ struct AbcPass : public Pass {
 
 		emit_global_input_files(config);
 
+		// Process non-DFF/non-clock-domain mode in stages
+		if (!dff_mode || !clk_str.empty()) {
+			// Maps for collateral storage across stages
+			dict<RTLIL::Module*, AbcSigMap> module_assign_maps;
+			dict<RTLIL::Module*, SigMap> module_sigmaps;
+			dict<RTLIL::Module*, dict<SigSpec, std::string>> module_sig2srcs;
+			dict<RTLIL::Module*, FfInitVals> module_initvals;
+			dict<RTLIL::Module*, AbcModuleState*> module_states;
+
+			// STAGE 1: Compute assign_maps, sig2src maps, and initvals for all modules
+			// Then prepare for ABC runs (sequential)
+			for (auto mod : design->selected_modules())
+			{
+				// Do not allow modules with processes
+				if (mod->processes.size() > 0) {
+					log("Skipping module %s as it contains processes.\n", log_id(mod));
+					continue;
+				}
+
+				// Create an assign_map for the module
+				AbcSigMap assign_map;
+				assign_map.set(mod);
+
+				// Create an FfInitVals and use it for all ABC runs. FfInitVals only cares about
+				// wires with the ID::init attribute and we don't add or remove any such wires
+				// in this pass.
+				FfInitVals initvals;
+				initvals.set(&assign_map, mod);
+
+				// Populate assign_map
+				for (auto wire : mod->wires())
+					if (wire->port_id > 0 || wire->get_bool_attribute(ID::keep))
+						assign_map.addVal(SigSpec(wire), AbcSigVal(true));
+
+				// Populate assign_map with cell connections
+				std::vector<RTLIL::Cell*> cells = mod->selected_cells();
+				assign_cell_connection_ports(mod, {&cells}, assign_map);
+
+				// Create a map of all signals and their corresponding src attrs
+				SigMap sigmap(mod);
+				dict<SigSpec, std::string> sig2src;
+				for (auto wire : mod->wires())
+					if (wire->port_input)
+						for (auto bit : sigmap(wire))
+							sig2src[bit] = wire->get_src_attribute();
+				for (auto cell : mod->cells())
+					for (auto &conn : cell->connections())
+						if (cell->output(conn.first))
+							for (auto bit : sigmap(conn.second)) {
+								if (GetSize(cell->attributes) > 0)
+									sig2src[bit] = cell->get_src_attribute();
+								else
+									sig2src[bit] = bit.wire->get_src_attribute();
+							}
+
+				// Prepare modules for ABC runs and set up process pool
+				AbcModuleState *state = new AbcModuleState(config, initvals, 0);
+				state->prepare_module(design, mod, assign_map, cells, dff_mode, clk_str);
+
+				// Store collateral for use in later stages
+				module_assign_maps[mod] = assign_map;
+				module_sigmaps[mod] = sigmap;
+				module_sig2srcs[mod] = sig2src;
+				module_initvals[mod] = initvals;
+				module_states[mod] = state;
+			}
+
+			// STAGE 2: Run ABC in parallel
+			// Reserve cores for main thread and other work, and don't create more worker
+			// threads than ABC runs (unless explicitly configured).
+			int num_modules = GetSize(design->selected_modules());
+			int max_threads = config.max_threads;
+			if (max_threads < 0) {
+				// Auto mode: use number of modules as max threads
+				max_threads = num_modules;
+			}
+			if (max_threads <= 1) {
+				// Just do everything on the main thread.
+				max_threads = 0;
+			}
+#ifdef YOSYS_LINK_ABC
+			// ABC doesn't support multithreaded calls so don't call it off the main thread.
+			max_threads = 0;
+#endif
+			int num_worker_threads = ThreadPool::pool_size(config.reserved_cores, max_threads);
+			ConcurrentQueue<AbcModuleState*> work_queue(num_worker_threads);
+			ConcurrentQueue<AbcModuleState*> work_finished_queue;
+			ConcurrentStack<AbcProcess> process_pool;
+			ThreadPool worker_threads(num_worker_threads, [&](int){
+					while (std::optional<AbcModuleState*> work = work_queue.pop_front()) {
+						// Only the `run_abc` component is safe to touch here!
+						(*work)->run_abc.run(process_pool);
+						work_finished_queue.push_back(*work);
+					}
+				});
+			int work_finished_count = 0;
+			for (auto mod : design->selected_modules()) {
+				// Do not allow modules with processes
+				if (mod->processes.size() > 0) continue;
+
+				// Log
+				log("Sending module %s to abc...\n", log_id(mod));
+				log_flush();
+
+				// Get the state for the module
+				AbcModuleState *state = module_states.at(mod);
+
+				// Make sure we process the results in the order we expect. When we can
+				// process results before the next ABC run, do so, to keep memory usage low(er).
+				while (std::optional<AbcModuleState*> work = work_finished_queue.try_pop_front()) {
+					++work_finished_count;
+				}
+				if (num_worker_threads > 0) {
+					work_queue.push_back(state);
+				} else {
+					// Just run everything on the main thread.
+					state->run_abc.run(process_pool);
+					work_finished_queue.push_back(state);
+				}
+			}
+			work_queue.close();
+			while (work_finished_count < num_modules) {
+				std::optional<AbcModuleState*> work = work_finished_queue.pop_front();
+				(*work)->run_abc.logs.flush();
+				log_flush();
+				++work_finished_count;
+				log("Completed abc on module %d/%d\n", work_finished_count, num_modules);
+				log_flush();
+			}
+
+			// STAGE 3: Extract results and replace original netlist (sequential)
+			for (auto mod : design->selected_modules())
+			{
+				// Do not allow modules with processes
+				if (mod->processes.size() > 0) continue;
+
+				// Extraction
+				AbcModuleState *state = module_states.at(mod);
+				SigMap sigmap = module_sigmaps.at(mod);
+				dict<SigSpec, std::string> sig2src = module_sig2srcs.at(mod);
+				AbcSigMap assign_map = module_assign_maps.at(mod);
+				state->extract(assign_map, sig2src, sigmap, design, mod);
+				delete state;
+			}
+
+			// STAGE 4: Cleanup
+			goto cleanup;
+		}
+
+		// DFF/clock-domain mode
 		for (auto mod : design->selected_modules())
 		{
 			if (mod->processes.size() > 0) {
@@ -2376,17 +2590,22 @@ struct AbcPass : public Pass {
 				if (wire->port_id > 0 || wire->get_bool_attribute(ID::keep))
 					assign_map.addVal(SigSpec(wire), AbcSigVal(true));
 
-			if (!dff_mode || !clk_str.empty()) {
-				std::vector<RTLIL::Cell*> cells = mod->selected_cells();
-				assign_cell_connection_ports(mod, {&cells}, assign_map);
-
-				AbcModuleState state(config, initvals, 0);
-				state.prepare_module(design, mod, assign_map, cells, dff_mode, clk_str);
-				ConcurrentStack<AbcProcess> process_pool;
-				state.run_abc.run(process_pool);
-				state.extract(assign_map, design, mod);
-				continue;
-			}
+			// SILIMATE: Create a map of all signals and their corresponding src attr
+			SigMap sigmap(mod);
+			dict<SigSpec, std::string> sig2src;
+			for (auto wire : mod->wires())
+				if (wire->port_input)
+					for (auto bit : sigmap(wire))
+						sig2src[bit] = wire->get_src_attribute();
+			for (auto cell : mod->cells())
+				for (auto &conn : cell->connections())
+					if (cell->output(conn.first))
+						for (auto bit : sigmap(conn.second)) {
+							if (GetSize(cell->attributes) > 0)
+								sig2src[bit] = cell->get_src_attribute();
+							else
+								sig2src[bit] = bit.wire->get_src_attribute();
+						}
 
 			CellTypes ct(design);
 
@@ -2579,7 +2798,7 @@ struct AbcPass : public Pass {
 					++work_finished_count;
 				}
 				while (work_finished_by_index[next_state_index_to_process] != nullptr) {
-					work_finished_by_index[next_state_index_to_process]->extract(assign_map, design, mod);
+					work_finished_by_index[next_state_index_to_process]->extract(assign_map, sig2src, sigmap, design, mod);
 					work_finished_by_index[next_state_index_to_process] = nullptr;
 					++next_state_index_to_process;
 				}
@@ -2609,12 +2828,13 @@ struct AbcPass : public Pass {
 				++work_finished_count;
 			}
 			while (next_state_index_to_process < GetSize(work_finished_by_index)) {
-				work_finished_by_index[next_state_index_to_process]->extract(assign_map, design, mod);
+				work_finished_by_index[next_state_index_to_process]->extract(assign_map, sig2src, sigmap, design, mod);
 				work_finished_by_index[next_state_index_to_process] = nullptr;
 				++next_state_index_to_process;
 			}
 		}
 
+		cleanup:
 		if (config.cleanup) {
 			log("Removing global temp directory.\n");
 			remove_directory(config.global_tempdir_name);
