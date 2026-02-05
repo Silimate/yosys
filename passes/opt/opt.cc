@@ -193,6 +193,7 @@ struct OptPass : public Pass {
 		}
 
 		design->optimize();
+		design->sort();
 		design->check();
 
 		log_header(design, "Finished fast OPT passes.%s\n", fast_mode ? "" : " (There is nothing left to do.)");

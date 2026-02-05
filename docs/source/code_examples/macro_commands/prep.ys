@@ -17,7 +17,6 @@ coarse:
     opt_clean
     memory_collect
     opt -noff -keepdc -fast
-    sort
 
 check:
     stat
