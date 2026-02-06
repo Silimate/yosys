@@ -1,0 +1,116 @@
+log -header "Interleaved mux/add chain pushes muxes to the end"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire s1,
+  input wire s2,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  output wire [7:0] y
+);
+  wire [7:0] m0;
+  wire [7:0] a0;
+  wire [7:0] m1;
+  wire [7:0] a1;
+
+  assign m0 = s0 ? b : a;
+  assign a0 = m0 + c;
+  assign m1 = s1 ? a0 : d;
+  assign a1 = m1 + e;
+  assign y  = s2 ? a1 : a;
+endmodule
+EOF
+proc
+check -assert
+
+# Check equivalence after mux push
+equiv_opt -assert muxpush -limit 1 -types $add
+
+# After the pass, no $add should have a $mux driving its inputs
+design -load postopt
+select -set add_fanin t:$add %ci*
+select -set mux_cells t:$mux t:$ternary
+select -assert-count 0 @add_fanin @mux_cells %i
+
+design -reset
+log -pop
+
+
+
+log -header "Negative case: fanout limit blocks push"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  output wire [7:0] y0,
+  output wire [7:0] y1
+);
+  wire [7:0] m0;
+  assign m0 = s0 ? b : a;
+  assign y0 = m0 + c;
+  assign y1 = m0 + d;
+endmodule
+EOF
+proc
+check -assert
+
+# Check equivalence after mux push (should not apply due to fanout>1)
+equiv_opt -assert muxpush -limit 1 -types $add
+
+# Mux still drives add inputs due to fanout limit
+design -load postopt
+select -set add_fanin t:$add %ci*
+select -set mux_cells t:$mux t:$ternary
+select -assert-count 1 @add_fanin @mux_cells %i
+
+design -reset
+log -pop
+
+
+
+log -header "Push with fanout limit > 1"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  output wire [7:0] y0,
+  output wire [7:0] y1
+);
+  wire [7:0] m0;
+  wire [7:0] a0;
+
+  assign m0 = s0 ? b : a;
+  assign a0 = m0 + c;
+  assign y0 = a0;
+  assign y1 = m0 + d;
+endmodule
+EOF
+proc
+check -assert
+
+# Check equivalence after mux push (allowed due to fanout limit)
+equiv_opt -assert muxpush -limit 2 -types $add
+
+# Both adders should be pushed with fanout limit > 1
+design -load postopt
+select -set add_fanin t:$add %ci*
+select -set mux_cells t:$mux t:$ternary
+select -assert-count 0 @add_fanin @mux_cells %i
+
+design -reset
+log -pop
