@@ -23,6 +23,10 @@ match neg2
 endmatch
 
 code neg1_a neg1_y neg2_a
+	// Reject if inner negation truncates
+	if (GetSize(neg1_a) > GetSize(neg2_a))
+		reject;
+
 	module->connect(neg1_y, neg2_a);
 
 	log("negneg pattern in %s: neg1=%s, neg2=%s\n",

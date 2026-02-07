@@ -21,6 +21,28 @@ select -assert-none t:$sub
 design -reset
 log -pop
 
+log -header "Unsigned positive case"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire [7:0] a;
+	input wire [7:0] b;
+	output wire [7:0] y;
+	assign y = (a + ~b) + 1;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$neg
+select -assert-none t:$not
+select -assert-none t:$sub
+design -reset
+log -pop
+
 log -header "Positive case B: 1 + (a + ~b) => a - b => a + (-b)"
 log -push
 design -reset
@@ -40,6 +62,26 @@ design -load postopt
 select -assert-count 1 t:$add
 select -assert-count 1 t:$neg
 select -assert-none t:$not
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Anchor case: output wider than operands"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire [7:0] a;
+	input wire [7:0] b;
+	output wire [11:0] y;
+	assign y = (a + ~b) + 1;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$neg
 select -assert-none t:$sub
 design -reset
 log -pop
@@ -71,3 +113,42 @@ select -assert-none t:$neg
 design -reset
 log -pop
 
+log -header "Negative case: mixed signedness on inner add"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [7:0] a;
+	input wire [7:0] b;
+	output wire signed [7:0] y;
+	assign y = (a + ~b) + 1;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Negative case: ~b not directly on inner add input"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire [7:0] a;
+	input wire [7:0] b;
+	output wire [7:0] y;
+	wire [7:0] nb;
+	assign nb = ~b;
+	assign y = (a + (nb ^ 8'h00)) + 1;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-none t:$sub
+design -reset
+log -pop

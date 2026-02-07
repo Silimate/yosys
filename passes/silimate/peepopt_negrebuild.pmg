@@ -7,7 +7,7 @@ pattern negrebuild
 // (-a) + (-b)  ===>  -(a + b)
 //
 
-state <SigSpec> add_a add_b add_y neg1_a neg2_a
+state <SigSpec> add_a add_b add_y neg1_a neg1_y neg2_a neg2_y
 state <bool> add_signed add_b_signed neg1_signed neg2_signed
 
 match add
@@ -22,32 +22,81 @@ endmatch
 match neg1
 	select neg1->type == $neg
 	select nusers(port(neg1, \Y)) == 2
-	index <SigSpec> port(neg1, \Y) === add_a
 	set neg1_a port(neg1, \A)
+	set neg1_y port(neg1, \Y)
 	set neg1_signed neg1->getParam(\A_SIGNED).as_bool()
 endmatch
 
 match neg2
 	select neg2->type == $neg
 	select nusers(port(neg2, \Y)) == 2
-	index <SigSpec> port(neg2, \Y) === add_b
 	set neg2_a port(neg2, \A)
+	set neg2_y port(neg2, \Y)
 	set neg2_signed neg2->getParam(\A_SIGNED).as_bool()
 endmatch
 
-code add_a add_b add_y neg1_a neg2_a add_signed add_b_signed neg1_signed neg2_signed
+code add_a add_b add_y neg1_a neg1_y neg2_a neg2_y add_signed add_b_signed neg1_signed neg2_signed
 	if (add_signed != add_b_signed)
 		reject;
 
+	// Require negations to share the add signedness
 	if (neg1_signed != add_signed || neg2_signed != add_signed)
 		reject;
 
 	{
-		int width = GetSize(add_y);
+		// Avoid matching the same neg cell twice
+		if (neg1 == neg2)
+			reject;
 
-		SigSpec sum = module->addWire(NEW_ID, width);
-		Cell *new_add = module->addAdd(NEW_ID, neg1_a, neg2_a, sum, add_signed);
-		Cell *new_neg = module->addNeg(NEW_ID, sum, add_y, add_signed);
+		// Require a single wrap boundary for both negations and the sum
+		if (GetSize(neg1_y) != GetSize(neg2_y))
+			reject;
+		if (GetSize(add_y) != GetSize(neg1_y))
+			reject;
+
+		// These guards prevent wrap boundary shifts that break formal equivalence
+
+		SigSpec neg_a = neg1_a;
+		SigSpec neg_b = neg2_a;
+		SigSpec neg_a_y = neg1_y;
+		SigSpec neg_b_y = neg2_y;
+
+		SigSpec neg_a_y_ext = neg_a_y;
+		SigSpec neg_b_y_ext = neg_b_y;
+		// Allow add inputs to see sign or zero extensions of neg outputs
+		neg_a_y_ext.extend_u0(GetSize(add_a), add_signed);
+		neg_b_y_ext.extend_u0(GetSize(add_b), add_signed);
+
+		bool direct_match = (add_a == neg_a_y || add_a == neg_a_y_ext) &&
+				(add_b == neg_b_y || add_b == neg_b_y_ext);
+		bool swapped_match = (add_a == neg_b_y || add_a == neg_b_y_ext) &&
+				(add_b == neg_a_y || add_b == neg_a_y_ext);
+
+		if (!direct_match && !swapped_match)
+			reject;
+
+		if (swapped_match) {
+			std::swap(neg_a, neg_b);
+			std::swap(neg_a_y, neg_b_y);
+		}
+
+		// Anchored width matches the common negation boundary
+		int width = std::min(GetSize(neg_a_y), GetSize(neg_b_y));
+		Cell *cell = add;
+
+		SigSpec neg1_a_rs = neg_a;
+		SigSpec neg2_a_rs = neg_b;
+		neg1_a_rs.extend_u0(width, add_signed);
+		neg2_a_rs.extend_u0(width, add_signed);
+
+		SigSpec sum = module->addWire(NEW_ID2_SUFFIX("sum"), width);
+		Cell *new_add = module->addAdd(NEW_ID2_SUFFIX("add"), neg1_a_rs, neg2_a_rs, sum, add_signed);
+		SigSpec neg_out = module->addWire(NEW_ID2_SUFFIX("neg_y"), width);
+		Cell *new_neg = module->addNeg(NEW_ID2_SUFFIX("neg"), sum, neg_out, add_signed);
+
+		SigSpec neg_out_rs = neg_out;
+		neg_out_rs.extend_u0(GetSize(add_y), add_signed);
+		module->connect(add_y, neg_out_rs);
 
 		log("negrebuild pattern in %s: add=%s, neg1=%s, neg2=%s\n",
 			log_id(module), log_id(add), log_id(neg1), log_id(neg2));
