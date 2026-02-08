@@ -7,7 +7,7 @@ pattern muxneg
 // s ? (-a) : (-b)  ===>  -(s ? a : b)
 //
 
-state <SigSpec> mux_a mux_b mux_s mux_y neg_a_in neg_b_in
+state <SigSpec> mux_a mux_b mux_s mux_y neg_a_in neg_a_y neg_b_in neg_b_y
 state <bool> neg_a_signed neg_b_signed
 
 match mux
@@ -23,6 +23,7 @@ match neg_a
 	select nusers(port(neg_a, \Y)) == 2
 	index <SigSpec> port(neg_a, \Y) === mux_a
 	set neg_a_in port(neg_a, \A)
+	set neg_a_y port(neg_a, \Y)
 	set neg_a_signed neg_a->getParam(\A_SIGNED).as_bool()
 endmatch
 
@@ -31,19 +32,33 @@ match neg_b
 	select nusers(port(neg_b, \Y)) == 2
 	index <SigSpec> port(neg_b, \Y) === mux_b
 	set neg_b_in port(neg_b, \A)
+	set neg_b_y port(neg_b, \Y)
 	set neg_b_signed neg_b->getParam(\A_SIGNED).as_bool()
 endmatch
 
-code mux_a mux_b mux_s mux_y neg_a_in neg_b_in neg_a_signed neg_b_signed
+code mux_a mux_b mux_s mux_y neg_a_in neg_a_y neg_b_in neg_b_y neg_a_signed neg_b_signed
 	if (neg_a_signed != neg_b_signed)
 		reject;
 
 	{
-		int width = GetSize(mux_y);
+		// Anchor to the narrower negation width to preserve wrap behavior
+		int width = std::min(GetSize(neg_a_y), GetSize(neg_b_y));
 
-		SigSpec mux_out = module->addWire(NEW_ID, width);
-		Cell *new_mux = module->addMux(NEW_ID, neg_a_in, neg_b_in, mux_s, mux_out);
-		Cell *new_neg = module->addNeg(NEW_ID, mux_out, mux_y, neg_a_signed);
+		Cell *cell = mux;
+		SigSpec neg_a_rs = neg_a_in;
+		SigSpec neg_b_rs = neg_b_in;
+		neg_a_rs.extend_u0(width, neg_a_signed);
+		neg_b_rs.extend_u0(width, neg_a_signed);
+
+		SigSpec mux_out = module->addWire(NEW_ID2_SUFFIX("y"), width);
+		Cell *new_mux = module->addMux(NEW_ID2_SUFFIX("mux"), neg_a_rs, neg_b_rs, mux_s, mux_out);
+		SigSpec neg_out = module->addWire(NEW_ID2_SUFFIX("neg_y"), width);
+		Cell *new_neg = module->addNeg(NEW_ID2_SUFFIX("neg"), mux_out, neg_out, neg_a_signed);
+
+		// Extend back to mux output width when needed
+		SigSpec neg_out_rs = neg_out;
+		neg_out_rs.extend_u0(GetSize(mux_y), neg_a_signed);
+		module->connect(mux_y, neg_out_rs);
 
 		log("muxneg pattern in %s: mux=%s, neg_a=%s, neg_b=%s\n",
 			log_id(module), log_id(mux), log_id(neg_a), log_id(neg_b));

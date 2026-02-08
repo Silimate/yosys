@@ -15,5 +15,96 @@ equiv_opt -assert negopt -post
 design -load postopt
 select -assert-count 1 t:$add
 select -assert-count 1 t:$neg
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Unsigned positive case"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire [7:0] a;
+	input wire [7:0] b;
+	output wire [7:0] y;
+	assign y = (-a) + (-b);
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$neg
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Anchor case: neg branches with different widths"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [7:0] a;
+	input wire signed [9:0] b;
+	output wire signed [11:0] y;
+	wire signed [5:0] n1;
+	wire signed [7:0] n2;
+	assign n1 = -a[5:0];
+	assign n2 = -b[7:0];
+	assign y = n1 + n2;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Negative case: signedness mismatch on negations"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [7:0] a;
+	input wire [7:0] b;
+	output wire signed [7:0] y;
+	assign y = (-a) + (-b);
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Negative case: add input not direct neg output"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [7:0] a;
+	input wire signed [7:0] b;
+	output wire signed [7:0] y;
+	wire signed [7:0] na;
+	wire signed [7:0] nb;
+	assign na = -a;
+	assign nb = -b;
+	assign y = (na ^ 8'h00) + nb;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 2 t:$neg
+select -assert-none t:$sub
 design -reset
 log -pop

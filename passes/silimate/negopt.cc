@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2025 Silimate, Inc.
+ * Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
+ *                     Abhinav Tondapu <abhinav@silimate.com>
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,10 +15,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *
  */
-
-//
-// Authored by Abhinav Tondapu of Silimate, Inc.
-//
 
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"

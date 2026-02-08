@@ -26,16 +26,28 @@ code sub_a sub_b sub_y a_signed b_signed
 
 	{
 		int width = GetSize(sub_y);
-		SigSpec neg_y = module->addWire(NEW_ID, width);
-		Cell *neg = module->addNeg(NEW_ID, sub_b, neg_y, b_signed);
-		Cell *add = module->addAdd(NEW_ID, sub_a, neg_y, sub_y, a_signed);
+
+		Cell *cell = sub;
+		SigSpec sub_a_rs = sub_a;
+		SigSpec sub_b_rs = sub_b;
+		// Anchor operands to the original subtract width to preserve wrap behavior
+		sub_a_rs.extend_u0(width, a_signed);
+		sub_b_rs.extend_u0(width, b_signed);
+
+		// Negate within the anchored width, then reuse the original cell as $add
+		SigSpec neg_y = module->addWire(NEW_ID2_SUFFIX("neg_y"), width);
+		Cell *neg = module->addNeg(NEW_ID2_SUFFIX("neg"), sub_b_rs, neg_y, b_signed);
+
+		sub->setPort(\A, sub_a_rs);
+		sub->setPort(\B, neg_y);
+		sub->setPort(\Y, sub_y);
+		sub->type = $add;
 
 		log("sub2neg pattern in %s: sub=%s -> neg=%s, add=%s\n",
-			log_id(module), log_id(sub), log_id(neg), log_id(add));
+			log_id(module), log_id(sub), log_id(neg), log_id(sub));
 
+		sub->fixup_parameters();
 		neg->fixup_parameters();
-		add->fixup_parameters();
-		autoremove(sub);
 		did_something = true;
 	}
 	accept;

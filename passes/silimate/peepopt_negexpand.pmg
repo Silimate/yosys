@@ -32,15 +32,22 @@ code neg_a neg_y add_a add_b a_signed
 		reject;
 
 	{
-		// Use output width for negations to handle overflow correctly
+		// Anchor negations to the original negation width to preserve wrap behavior
 		int width = GetSize(neg_y);
-		SigSpec neg_add_a = module->addWire(NEW_ID, width);
-		Cell *neg_a_cell = module->addNeg(NEW_ID, add_a, neg_add_a, a_signed);
+		Cell *cell = neg;
+		SigSpec add_a_rs = add_a;
+		SigSpec add_b_rs = add_b;
+		// Signedness is consistent for A and B here
+		add_a_rs.extend_u0(width, a_signed);
+		add_b_rs.extend_u0(width, a_signed);
 
-		SigSpec neg_add_b = module->addWire(NEW_ID, width);
-		Cell *neg_b_cell = module->addNeg(NEW_ID, add_b, neg_add_b, a_signed);
+		SigSpec neg_add_a = module->addWire(NEW_ID2_SUFFIX("na"), width);
+		Cell *neg_a_cell = module->addNeg(NEW_ID2_SUFFIX("nega"), add_a_rs, neg_add_a, a_signed);
 
-		Cell *new_add = module->addAdd(NEW_ID, neg_add_a, neg_add_b, neg_y, a_signed);
+		SigSpec neg_add_b = module->addWire(NEW_ID2_SUFFIX("nb"), width);
+		Cell *neg_b_cell = module->addNeg(NEW_ID2_SUFFIX("negb"), add_b_rs, neg_add_b, a_signed);
+
+		Cell *new_add = module->addAdd(NEW_ID2_SUFFIX("add"), neg_add_a, neg_add_b, neg_y, a_signed);
 
 		log("negexpand pattern in %s: neg=%s, add=%s\n",
 			log_id(module), log_id(neg), log_id(add));

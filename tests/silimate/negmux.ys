@@ -67,3 +67,72 @@ select -assert-count 1 t:$mux
 select -assert-count 1 t:$neg
 design -reset
 log -pop
+
+log -header "Anchor case: mux inputs narrower than neg output"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, s, y);
+	input wire signed [3:0] a;
+	input wire signed [3:0] b;
+	input wire s;
+	output wire signed [7:0] y;
+	wire signed [3:0] m;
+	assign m = s ? a : b;
+	assign y = -m;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$mux
+select -assert-count 2 t:$neg
+design -reset
+log -pop
+
+log -header "Negative case: signedness mismatch on mux output"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, s, y);
+	input wire signed [7:0] a;
+	input wire [7:0] b;
+	input wire s;
+	output wire signed [7:0] y;
+	wire [7:0] m;
+	assign m = s ? a : b;
+	assign y = -m;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$mux
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Negative case: neg input not from mux output"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, s, y);
+	input wire signed [7:0] a;
+	input wire signed [7:0] b;
+	input wire s;
+	output wire signed [7:0] y;
+	wire signed [7:0] m;
+	assign m = s ? a : b;
+	assign y = -(m ^ 8'h00);
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$mux
+select -assert-none t:$sub
+design -reset
+log -pop

@@ -7,7 +7,7 @@ pattern negmux
 // -(s ? a : b)  ===>  s ? (-a) : (-b)
 //
 
-state <SigSpec> neg_a neg_y mux_a mux_b mux_s
+state <SigSpec> neg_a neg_y mux_a mux_b mux_s mux_y
 state <bool> a_signed
 
 match neg
@@ -18,25 +18,47 @@ match neg
 endmatch
 
 match mux
-	select mux->type == $mux
-	index <SigSpec> port(mux, \Y) === neg_a
-	select nusers(port(mux, \Y)) == 2
+    select mux->type == $mux
+    select nusers(port(mux, \Y)) == 2
 	set mux_a port(mux, \A)
 	set mux_b port(mux, \B)
 	set mux_s port(mux, \S)
+	set mux_y port(mux, \Y)
 endmatch
 
-code neg_a neg_y mux_a mux_b mux_s a_signed
+code neg_a neg_y mux_a mux_b mux_s mux_y a_signed
+	// Require neg input to be exactly mux_y or a sign/zero extension of it
+	if (GetSize(neg_a) < GetSize(mux_y))
+		reject;
+	for (int i = 0; i < GetSize(mux_y); i++) {
+		if (neg_a[i] != mux_y[i])
+			reject;
+	}
+	if (GetSize(neg_a) > GetSize(mux_y)) {
+		RTLIL::SigBit ext = a_signed ? mux_y[GetSize(mux_y)-1] : RTLIL::SigBit(RTLIL::State::S0);
+		for (int i = GetSize(mux_y); i < GetSize(neg_a); i++) {
+			if (neg_a[i] != ext)
+				reject;
+		}
+	}
+
 	{
+		// Anchor negations to the original negation width
 		int width = GetSize(neg_y);
 
-		SigSpec neg_mux_a = module->addWire(NEW_ID, width);
-		Cell *neg_a_cell = module->addNeg(NEW_ID, mux_a, neg_mux_a, a_signed);
+		Cell *cell = neg;
+		SigSpec mux_a_rs = mux_a;
+		SigSpec mux_b_rs = mux_b;
+		mux_a_rs.extend_u0(width, a_signed);
+		mux_b_rs.extend_u0(width, a_signed);
 
-		SigSpec neg_mux_b = module->addWire(NEW_ID, width);
-		Cell *neg_b_cell = module->addNeg(NEW_ID, mux_b, neg_mux_b, a_signed);
+		SigSpec neg_mux_a = module->addWire(NEW_ID2_SUFFIX("na"), width);
+		Cell *neg_a_cell = module->addNeg(NEW_ID2_SUFFIX("nega"), mux_a_rs, neg_mux_a, a_signed);
 
-		Cell *new_mux = module->addMux(NEW_ID, neg_mux_a, neg_mux_b, mux_s, neg_y);
+		SigSpec neg_mux_b = module->addWire(NEW_ID2_SUFFIX("nb"), width);
+		Cell *neg_b_cell = module->addNeg(NEW_ID2_SUFFIX("negb"), mux_b_rs, neg_mux_b, a_signed);
+
+		Cell *new_mux = module->addMux(NEW_ID2_SUFFIX("mux"), neg_mux_a, neg_mux_b, mux_s, neg_y);
 
 		log("negmux pattern in %s: neg=%s, mux=%s\n",
 			log_id(module), log_id(neg), log_id(mux));

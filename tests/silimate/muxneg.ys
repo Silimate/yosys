@@ -42,3 +42,80 @@ select -assert-count 1 t:$mux
 select -assert-count 1 t:$neg
 design -reset
 log -pop
+
+log -header "Anchor case: neg branches narrower than mux output"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, s, y);
+	input wire signed [7:0] a;
+	input wire signed [7:0] b;
+	input wire s;
+	output wire signed [11:0] y;
+	wire signed [5:0] neg_a;
+	wire signed [7:0] neg_b;
+	assign neg_a = -a[5:0];
+	assign neg_b = -b[7:0];
+	assign y = s ? neg_a : neg_b;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$mux
+select -assert-count 2 t:$neg
+design -reset
+log -pop
+
+log -header "Negative case: signedness mismatch on negations"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, s, y);
+	input wire signed [7:0] a;
+	input wire [7:0] b;
+	input wire s;
+	output wire signed [7:0] y;
+	(* keep *) wire signed [7:0] neg_a;
+	(* keep *) wire [7:0] neg_b;
+	assign neg_a = -a;
+	assign neg_b = -b;
+	assign y = s ? neg_a : neg_b;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$mux
+select -assert-count 2 t:$neg
+design -reset
+log -pop
+
+log -header "Negative case: neg output has extra fanout"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, s, y, z);
+	input wire signed [7:0] a;
+	input wire signed [7:0] b;
+	input wire s;
+	output wire signed [7:0] y;
+	output wire signed [7:0] z;
+	(* keep *) wire signed [7:0] neg_a;
+	(* keep *) wire signed [7:0] neg_b;
+	assign neg_a = -a;
+	assign neg_b = -b;
+	assign y = s ? neg_a : neg_b;
+	assign z = neg_a;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$mux
+select -assert-count 2 t:$neg
+design -reset
+log -pop

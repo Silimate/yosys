@@ -7,7 +7,7 @@ pattern neg2sub
 // a + (-b)  ===>  a - b
 //
 
-state <SigSpec> add_a add_b add_y neg_a
+state <SigSpec> add_a add_b add_y neg_a neg_y
 state <bool> add_a_signed add_b_signed neg_signed
 state <bool> neg_on_a
 
@@ -31,10 +31,11 @@ match neg
 	select nusers(port(neg, \Y)) == 2
 	index <SigSpec> port(neg, \Y) === (neg_on_a ? add_a : add_b)
 	set neg_a port(neg, \A)
+	set neg_y port(neg, \Y)
 	set neg_signed neg->getParam(\A_SIGNED).as_bool()
 endmatch
 
-code add_a add_b add_y neg_a neg_on_a add_a_signed add_b_signed neg_signed
+code add_a add_b add_y neg_a neg_y neg_on_a add_a_signed add_b_signed neg_signed
 	if (add_a_signed != add_b_signed)
 		reject;
 
@@ -42,17 +43,29 @@ code add_a add_b add_y neg_a neg_on_a add_a_signed add_b_signed neg_signed
 		reject;
 
 	{
-		Cell *new_sub;
-		if (neg_on_a)
-			new_sub = module->addSub(NEW_ID, add_b, neg_a, add_y, add_b_signed);
-		else
-			new_sub = module->addSub(NEW_ID, add_a, neg_a, add_y, add_a_signed);
+		int neg_y_width = GetSize(neg_y);
+		int add_y_width = GetSize(add_y);
 
-		log("neg2sub pattern in %s: add=%s, neg=%s\n",
+		// Reject if the negation truncates its input
+		if (GetSize(neg_a) > neg_y_width)
+			reject;
+
+		// Reject if the add result is wider than the negation boundary
+		if (add_y_width > neg_y_width)
+			reject;
+
+		SigSpec pos_op = neg_on_a ? add_b : add_a;
+
+		// Reuse the original add cell for stable naming
+		add->setPort(\A, pos_op);
+		add->setPort(\B, neg_a);
+		add->setPort(\Y, add_y);
+		add->type = $sub;
+
+		log("neg2sub pattern in %s: add=%s, neg=%s (safe sub replacement)\n",
 			log_id(module), log_id(add), log_id(neg));
 
-		new_sub->fixup_parameters();
-		autoremove(add);
+		add->fixup_parameters();
 		autoremove(neg);
 		did_something = true;
 	}
