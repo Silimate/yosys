@@ -58,3 +58,23 @@ design -load postopt
 select -assert-count 2 t:$neg
 design -reset
 log -pop
+
+log -header "Anchor case: inner neg truncates"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, y);
+	input wire signed [7:0] a;
+	output wire signed [6:0] y;
+	wire signed [6:0] neg_a;
+	assign neg_a = -a;
+	assign y = -neg_a;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 2 t:$neg
+design -reset
+log -pop

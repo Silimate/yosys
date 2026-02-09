@@ -10,13 +10,15 @@ pattern manual2sub
 // designs where intermediate results are used by output assignments.
 //
 
-state <SigSpec> minuend subtrahend result_sig
+state <SigSpec> minuend subtrahend result_sig root_a root_b
 state <bool> is_signed
 state <SigSpec> inner_y
 
 // 1. Match the "root" add (the one that produces the final result)
 match root_add
     select root_add->type == $add
+    set root_a port(root_add, \A)
+    set root_b port(root_add, \B)
     set result_sig port(root_add, \Y)
     set is_signed root_add->getParam(ID::A_SIGNED).as_bool()
 endmatch
@@ -25,8 +27,8 @@ endmatch
 // Check if root_add has a constant 1
 code root_add inner_y
 {
-    SigSpec pa = root_add->getPort(ID::A);
-    SigSpec pb = root_add->getPort(ID::B);
+    SigSpec pa = root_a;
+    SigSpec pb = root_b;
 
     auto is_one = [](SigSpec s) {
         if (!s.is_fully_const()) return false;
@@ -50,22 +52,18 @@ code root_add inner_y
 endcode
 
 // Find the inner add
+// inner_y is discovered in code so gating happens in the code block
 match inner_add_A
     select inner_add_A->type == $add
-    index <SigSpec> port(inner_add_A, \Y) === inner_y
-    select nusers(port(inner_add_A, \Y)) == 2
 endmatch
 
 // Find the NOT gate on one of the ports of inner_add_A
 match not_gate_A
     select not_gate_A->type == $not
-    filter not_gate_A->getPort(ID::Y) == inner_add_A->getPort(ID::A) || not_gate_A->getPort(ID::Y) == inner_add_A->getPort(ID::B)
-    set subtrahend port(not_gate_A, \A)
 endmatch
 
 code root_add inner_add_A not_gate_A subtrahend minuend result_sig is_signed
 {
-
     // Require consistent signedness on the root add.
     if (root_add->getParam(ID::B_SIGNED).as_bool() != is_signed)
         reject;
@@ -75,14 +73,49 @@ code root_add inner_add_A not_gate_A subtrahend minuend result_sig is_signed
     if (inner_add_A->getParam(ID::B_SIGNED).as_bool() != is_signed)
         reject;
 
-    if (not_gate_A->getPort(ID::Y) == inner_add_A->getPort(ID::A))
+    if (port(inner_add_A, \Y) != inner_y)
+        reject;
+    if (nusers(port(inner_add_A, \Y)) != 2)
+        reject;
+
+    SigSpec not_y = port(not_gate_A, \Y);
+    SigSpec add_a = port(inner_add_A, \A);
+    SigSpec add_b = port(inner_add_A, \B);
+
+    if (not_y == add_a) {
         minuend = inner_add_A->getPort(ID::B);
-    else
+    } else if (not_y == add_b) {
         minuend = inner_add_A->getPort(ID::A);
+    } else {
+        reject;
+    }
+
+    subtrahend = port(not_gate_A, \A);
 
     // Create the subtraction cell
     log("manual2sub in %s: Found (a + ~b) + 1 pattern, creating $sub for %s\n", log_id(module), log_signal(result_sig));
-    Cell *sub = module->addSub(NEW_ID, minuend, subtrahend, result_sig, is_signed);
+    Cell *cell = root_add;
+    int width = GetSize(result_sig);
+    int inner_width = GetSize(inner_y);
+    // Reject if the +1 wrap boundary is narrower than the final result
+    if (inner_width < width)
+        reject;
+    SigSpec minuend_rs = minuend;
+    SigSpec subtrahend_rs = subtrahend;
+    // Anchor both operands to the inner add width to preserve carry behavior
+    minuend_rs.extend_u0(inner_width, is_signed);
+    subtrahend_rs.extend_u0(inner_width, is_signed);
+    SigSpec sub_y = result_sig;
+    // Extend the sub result back to the root width when needed
+    if (inner_width != width) {
+        sub_y = module->addWire(NEW_ID2_SUFFIX("sub_y"), inner_width);
+    }
+    Cell *sub = module->addSub(NEW_ID2_SUFFIX("sub"), minuend_rs, subtrahend_rs, sub_y, is_signed);
+    if (inner_width != width) {
+        SigSpec sub_y_rs = sub_y;
+        sub_y_rs.extend_u0(width, is_signed);
+        module->connect(result_sig, sub_y_rs);
+    }
 
     // Let fixup_parameters handle width adjustments
     sub->fixup_parameters();
@@ -98,26 +131,21 @@ code root_add inner_add_A not_gate_A subtrahend minuend result_sig is_signed
 endcode
 
 // 3. Case B: a + (~b + 1)
-code root_add
-    // Just fall through to the next match
-endcode
 
 // Find the inner add on either port of root_add
 match inner_add_B
     select inner_add_B->type == $add
-    filter inner_add_B->getPort(ID::Y) == root_add->getPort(ID::A) || inner_add_B->getPort(ID::Y) == root_add->getPort(ID::B)
+    filter port(inner_add_B, \Y) == root_a || port(inner_add_B, \Y) == root_b
     select nusers(port(inner_add_B, \Y)) == 2
 endmatch
 
 // Check if inner_add_B has a constant 1 and a NOT gate
 match not_gate_B
     select not_gate_B->type == $not
-    filter not_gate_B->getPort(ID::Y) == inner_add_B->getPort(ID::A) || not_gate_B->getPort(ID::Y) == inner_add_B->getPort(ID::B)
 endmatch
 
 code root_add inner_add_B not_gate_B minuend subtrahend result_sig is_signed
 {
-
     // Require consistent signedness on the root add.
     if (root_add->getParam(ID::B_SIGNED).as_bool() != is_signed)
         reject;
@@ -129,7 +157,7 @@ code root_add inner_add_B not_gate_B minuend subtrahend result_sig is_signed
 
     SigSpec pa = inner_add_B->getPort(ID::A);
     SigSpec pb = inner_add_B->getPort(ID::B);
-    SigSpec not_y = not_gate_B->getPort(ID::Y);
+    SigSpec not_y = port(not_gate_B, \Y);
 
     auto is_one = [](SigSpec s) {
         if (!s.is_fully_const()) return false;
@@ -147,15 +175,42 @@ code root_add inner_add_B not_gate_B minuend subtrahend result_sig is_signed
 
     if (!valid) reject;
 
-    subtrahend = not_gate_B->getPort(ID::A);
+    subtrahend = port(not_gate_B, \A);
     if (inner_add_B->getPort(ID::Y) == root_add->getPort(ID::A))
-        minuend = root_add->getPort(ID::B);
+        minuend = root_b;
     else
-        minuend = root_add->getPort(ID::A);
+        minuend = root_a;
 
     // Create the subtraction cell
     log("manual2sub in %s: Found a + (~b + 1) pattern, creating $sub for %s\n", log_id(module), log_signal(result_sig));
-    Cell *sub = module->addSub(NEW_ID, minuend, subtrahend, result_sig, is_signed);
+    Cell *cell = root_add;
+    int width = GetSize(result_sig);
+    int inner_width = GetSize(inner_add_B->getPort(ID::Y));
+
+    // Reject if the +1 wrap boundary is narrower than the final result
+    if (inner_width < width)
+        reject;
+        
+    SigSpec minuend_rs = minuend;
+    SigSpec subtrahend_rs = subtrahend;
+
+    // Anchor both operands to the inner add width to preserve carry behavior
+    minuend_rs.extend_u0(inner_width, is_signed);
+    subtrahend_rs.extend_u0(inner_width, is_signed);
+    SigSpec sub_y = result_sig;
+
+    // Extend the sub result back to the root width when needed
+    if (inner_width != width) {
+        sub_y = module->addWire(NEW_ID2_SUFFIX("sub_y"), inner_width);
+    }
+
+    Cell *sub = module->addSub(NEW_ID2_SUFFIX("sub"), minuend_rs, subtrahend_rs, sub_y, is_signed);
+
+    if (inner_width != width) {
+        SigSpec sub_y_rs = sub_y;
+        sub_y_rs.extend_u0(width, is_signed);
+        module->connect(result_sig, sub_y_rs);
+    }
 
     // Let fixup_parameters handle width adjustments
     sub->fixup_parameters();

@@ -9,6 +9,28 @@ module top(a, b, y);
 	assign y = a - b;
 endmodule
 EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$neg
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Unsigned positive case"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire [7:0] a;
+	input wire [7:0] b;
+	output wire [7:0] y;
+	assign y = a - b;
+endmodule
+EOF
+proc; opt
 check -assert
 equiv_opt -assert negopt -pre
 design -load postopt
@@ -28,6 +50,7 @@ module top(a, y);
 	assign y = a - 8'd5;
 endmodule
 EOF
+proc; opt
 check -assert
 equiv_opt -assert negopt -pre
 design -load postopt
@@ -35,5 +58,47 @@ design -load postopt
 select -assert-count 1 t:$sub
 select -assert-none t:$add
 select -assert-none t:$neg
+design -reset
+log -pop
+
+log -header "Anchor case: output wider than inputs"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [7:0] a;
+	input wire signed [7:0] b;
+	output wire signed [11:0] y;
+	assign y = a - b;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$neg
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Signedness case"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [7:0] a;
+	input wire [7:0] b;
+	output wire signed [7:0] y;
+	assign y = a - b;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$neg
+select -assert-none t:$sub
 design -reset
 log -pop

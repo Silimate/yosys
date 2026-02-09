@@ -18,6 +18,26 @@ select -assert-count 2 t:$neg
 design -reset
 log -pop
 
+log -header "Unsigned positive case"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire [7:0] a;
+	input wire [7:0] b;
+	output wire [7:0] y;
+	assign y = -(a + b);
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 2 t:$neg
+design -reset
+log -pop
+
 log -header "Width extension case (output wider than inputs)"
 log -push
 design -reset
@@ -34,6 +54,26 @@ check -assert
 equiv_opt -assert negopt -pre
 design -load postopt
 # Negations should use output width (9 bits) not input width (8 bits)
+select -assert-count 1 t:$add
+select -assert-count 2 t:$neg
+design -reset
+log -pop
+
+log -header "Anchor case: inputs narrower than neg output"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [3:0] a;
+	input wire signed [3:0] b;
+	output wire signed [7:0] y;
+	assign y = -(a + b);
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
 select -assert-count 1 t:$add
 select -assert-count 2 t:$neg
 design -reset
@@ -61,5 +101,25 @@ design -load postopt
 # Should NOT transform due to extra fanout on add output
 select -assert-count 1 t:$add
 select -assert-count 1 t:$neg
+design -reset
+log -pop
+
+log -header "Coerced signedness case"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [7:0] a;
+	input wire [7:0] b;
+	output wire signed [7:0] y;
+	assign y = -(a + b);
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -pre
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 2 t:$neg
 design -reset
 log -pop

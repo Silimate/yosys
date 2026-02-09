@@ -5,7 +5,7 @@ read_verilog <<EOF
 module top(a, b, y);
 	input wire signed [7:0] a;
 	input wire signed [7:0] b;
-	output wire signed [8:0] y;
+	output wire signed [7:0] y;
 	assign y = a + (-b);
 endmodule
 EOF
@@ -26,7 +26,7 @@ read_verilog <<EOF
 module top(a, b, y);
 	input wire signed [7:0] a;
 	input wire signed [7:0] b;
-	output wire signed [8:0] y;
+	output wire signed [7:0] y;
 	assign y = (-a) + b;
 endmodule
 EOF
@@ -37,5 +37,97 @@ design -load postopt
 select -assert-count 1 t:$sub
 select -assert-none t:$add
 select -assert-none t:$neg
+design -reset
+log -pop
+
+log -header "Unsigned positive case"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire [7:0] a;
+	input wire [7:0] b;
+	output wire [7:0] y;
+	assign y = a + (-b);
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$sub
+select -assert-none t:$add
+select -assert-none t:$neg
+design -reset
+log -pop
+
+log -header "Negative case: output wider than negation"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [7:0] a;
+	input wire signed [7:0] b;
+	output wire signed [8:0] y;
+	wire signed [7:0] nb;
+	assign nb = -b;
+	assign y = a + nb;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$neg
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Negative case: negation truncates input"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y);
+	input wire signed [7:0] a;
+	input wire signed [7:0] b;
+	output wire signed [3:0] y;
+	wire signed [3:0] nb;
+	assign nb = -b;
+	assign y = a[3:0] + nb;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$neg
+select -assert-none t:$sub
+design -reset
+log -pop
+
+log -header "Negative case: neg output has extra fanout"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, y, z);
+	input wire signed [7:0] a;
+	input wire signed [7:0] b;
+	output wire signed [7:0] y;
+	output wire signed [7:0] z;
+	(* keep *) wire signed [7:0] nb;
+	assign nb = -b;
+	assign y = a + nb;
+	assign z = nb;
+endmodule
+EOF
+proc; opt
+check -assert
+equiv_opt -assert negopt -post
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$neg
+select -assert-none t:$sub
 design -reset
 log -pop
