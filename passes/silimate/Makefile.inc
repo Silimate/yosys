@@ -10,6 +10,7 @@ OBJS += passes/silimate/mux_push.o
 OBJS += passes/silimate/obs_clean.o
 OBJS += passes/silimate/segv.o
 OBJS += passes/silimate/reg_rename.o
+OBJS += passes/silimate/sat_clockgate.o
 OBJS += passes/silimate/splitfanout.o
 OBJS += passes/silimate/splitlarge.o
 OBJS += passes/silimate/splitnetlist.o
