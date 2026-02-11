@@ -71,34 +71,6 @@ struct SatClockgateWorker
 		return inputs;
 	}
 
-	// BFS to find potential enable signals up to a certain depth
-	pool<SigBit> bfs_find_potential_enable_inputs(SigSpec sig, int max_depth)
-	{
-		pool<SigBit> visited;
-		pool<SigBit> frontier;
-		
-		for (auto bit : sigmap(sig))
-			if (bit.wire != nullptr)
-				frontier.insert(bit);
-		
-		for (int depth = 0; depth < max_depth && !frontier.empty(); depth++) {
-			pool<SigBit> next_frontier;
-			for (auto bit : frontier) {
-				if (visited.count(bit))
-					continue;
-				visited.insert(bit);
-				
-				for (auto input_bit : get_input_signals(bit)) {
-					if (!visited.count(input_bit))
-						next_frontier.insert(input_bit);
-				}
-			}
-			frontier = next_frontier;
-		}
-		
-		return visited;
-	}
-
 	// Check if fixing the input_set to specific values makes D == Q always true
 	// Returns true if input_set can serve as an enable (when all bits are 0, D == Q)
 	bool input_set_is_enable(const pool<SigBit> &input_set, SigSpec sig_d, SigSpec sig_q)
@@ -137,11 +109,32 @@ struct SatClockgateWorker
 	}
 
 	// Recursively determine the enable input set via BFS expansion
+	// Seeds initial input set from sig_d, excludes sig_q bits
 	bool determine_enable_recursive(pool<SigBit> &input_set, SigSpec sig_d, SigSpec sig_q, int depth)
 	{
 		if (depth > MAX_INPUT_DEPTH) {
 			log_debug("  Max depth reached, giving up\n");
 			return false;
+		}
+
+		// Seed initial input set from sig_d on first call
+		if (depth == 1 && input_set.empty()) {
+			for (auto bit : sigmap(sig_d)) {
+				if (bit.wire != nullptr) {
+					for (auto input_bit : get_input_signals(bit)) {
+						input_set.insert(input_bit);
+					}
+				}
+			}
+			// Remove Q bits (feedback, not control)
+			for (auto bit : sigmap(sig_q))
+				input_set.erase(bit);
+
+			if (input_set.empty()) {
+				log_debug("  No inputs to D (besides Q)\n");
+				return false;
+			}
+			log_debug("  Initial input set has %zu signals\n", input_set.size());
 		}
 
 		// Check if current input set works as enable
@@ -227,23 +220,10 @@ struct SatClockgateWorker
 
 		log("Processing FF: %s\n", log_id(cell));
 
-		// Start with direct inputs of D
-		pool<SigBit> input_set = bfs_find_potential_enable_inputs(ff.sig_d, 1);
-		
-		// Remove Q from input set (it's the feedback, not a control signal)
-		for (auto bit : sigmap(ff.sig_q))
-			input_set.erase(bit);
-
-		if (input_set.empty()) {
-			log_debug("  No inputs to D (besides Q)\n");
-			return false;
-		}
-
-		log_debug("  Initial input set has %zu signals\n", input_set.size());
-
-		// Try to find enable
+		// Find enable via recursive BFS + SAT validation
+		pool<SigBit> input_set;
 		if (determine_enable_recursive(input_set, ff.sig_d, ff.sig_q, 1)) {
-			// Remove Q bits again (in case BFS added them back)
+			// Remove Q bits (in case BFS added them back)
 			for (auto bit : sigmap(ff.sig_q))
 				input_set.erase(bit);
 
