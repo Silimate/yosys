@@ -1,0 +1,42 @@
+Clock gating
+
+
+
+need to determine when the D == Q
+
+Make sure that the flip flop has a clock but not ce: !ff.has_ce && ff.has_clk
+check if 
+
+USE sat to determine when the Q is the same as D
+
+Q is the feedback, and then there's also the D which does in and select for the mux
+becomes the enable
+
+
+D = f(Q, other_inputs)
+
+!(D ^ f(Q, other_inputs))
+
+
+Look somewhat like this:
+	Q is always going to be D
+	But D itself has an enable built into it
+
+
+	So what D really is is:
+		Mux (D_r, Q, en) where en is the enable signal
+
+		Our goal is to find en
+
+		Equation:
+		Q_next = (en ∧ D_r) ∨ (¬en ∧ Q)
+
+		Equality question:
+		!((Q_next) ^ ((en ∧ D_r) ∨ (¬en ∧ Q)))
+
+		Universal Quantization
+		FA(Q_next, D_r, Q) !((Q_next) ^ ((en ∧ D_r) ∨ (¬en ∧ Q)))
+
+		SAT Equation
+		FA(Q_next, D_r, Q) !((Q_next) ^ ((en ∧ D_r) ∨ (¬en ∧ Q)))
+
