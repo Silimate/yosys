@@ -189,3 +189,5 @@ Future TODOs:
 3) Add different setting for type of mitter (maybe add just the !COI -> D == Q)
 	 for a weaker clock gate (still consumes power if COI and D == Q but might be faster)
 4) Deal with posede vs negedge of the clocks
+5) Experiment with different logical combinations of the COI set (rather than just
+	 or-ing them all together)
