@@ -29,6 +29,9 @@ PRIVATE_NAMESPACE_BEGIN
 // Maximum depth for BFS exploration of input cone
 static const int MAX_INPUT_DEPTH = 10;
 
+// If true, exclude Q (feedback) bits from enable input set
+static const bool EXCLUDE_Q_FROM_ENABLE = true;
+
 struct SatClockgateWorker
 {
 	Module *module;
@@ -36,6 +39,9 @@ struct SatClockgateWorker
 	
 	// Maps output signal bits to their driver cells
 	dict<SigBit, Cell*> sig_to_driver;
+	
+	// Q bits to exclude from enable input set (set per-FF)
+	pool<SigBit> q_bits;
 	
 	SatClockgateWorker(Module *module) : module(module), sigmap(module)
 	{
@@ -47,6 +53,16 @@ struct SatClockgateWorker
 						sig_to_driver[bit] = cell;
 				}
 			}
+		}
+	}
+
+	// Set Q bits to exclude for current FF
+	void set_excluded_q_bits(SigSpec sig_q)
+	{
+		q_bits.clear();
+		if (EXCLUDE_Q_FROM_ENABLE) {
+			for (auto bit : sigmap(sig_q))
+				q_bits.insert(bit);
 		}
 	}
 
@@ -63,7 +79,7 @@ struct SatClockgateWorker
 		for (auto &conn : driver->connections()) {
 			if (driver->input(conn.first)) {
 				for (auto input_bit : sigmap(conn.second)) {
-					if (input_bit.wire != nullptr)
+					if (input_bit.wire != nullptr && !q_bits.count(input_bit))
 						inputs.insert(input_bit);
 				}
 			}
@@ -109,7 +125,7 @@ struct SatClockgateWorker
 	}
 
 	// Recursively determine the enable input set via BFS expansion
-	// Seeds initial input set from sig_d, excludes sig_q bits
+	// Seeds initial input set from sig_d, Q bits filtered via get_input_signals
 	bool determine_enable_recursive(pool<SigBit> &input_set, SigSpec sig_d, SigSpec sig_q, int depth)
 	{
 		if (depth > MAX_INPUT_DEPTH) {
@@ -121,14 +137,10 @@ struct SatClockgateWorker
 		if (depth == 1 && input_set.empty()) {
 			for (auto bit : sigmap(sig_d)) {
 				if (bit.wire != nullptr) {
-					for (auto input_bit : get_input_signals(bit)) {
+					for (auto input_bit : get_input_signals(bit))
 						input_set.insert(input_bit);
-					}
 				}
 			}
-			// Remove Q bits (feedback, not control)
-			for (auto bit : sigmap(sig_q))
-				input_set.erase(bit);
 
 			if (input_set.empty()) {
 				log_debug("  No inputs to D (besides Q)\n");
@@ -220,13 +232,12 @@ struct SatClockgateWorker
 
 		log("Processing FF: %s\n", log_id(cell));
 
+		// Set Q bits to exclude from enable candidates
+		set_excluded_q_bits(ff.sig_q);
+
 		// Find enable via recursive BFS + SAT validation
 		pool<SigBit> input_set;
 		if (determine_enable_recursive(input_set, ff.sig_d, ff.sig_q, 1)) {
-			// Remove Q bits (in case BFS added them back)
-			for (auto bit : sigmap(ff.sig_q))
-				input_set.erase(bit);
-
 			create_ce_logic(input_set, ff);
 			
 			// Emit the modified FF
