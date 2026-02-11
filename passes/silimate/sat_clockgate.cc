@@ -71,8 +71,8 @@ struct SatClockgateWorker
 		return inputs;
 	}
 
-	// BFS to collect input cone up to a certain depth
-	pool<SigBit> get_input_cone(SigSpec sig, int max_depth)
+	// BFS to find potential enable signals up to a certain depth
+	pool<SigBit> bfs_find_potential_enable_inputs(SigSpec sig, int max_depth)
 	{
 		pool<SigBit> visited;
 		pool<SigBit> frontier;
@@ -228,7 +228,7 @@ struct SatClockgateWorker
 		log("Processing FF: %s\n", log_id(cell));
 
 		// Start with direct inputs of D
-		pool<SigBit> input_set = get_input_cone(ff.sig_d, 1);
+		pool<SigBit> input_set = bfs_find_potential_enable_inputs(ff.sig_d, 1);
 		
 		// Remove Q from input set (it's the feedback, not a control signal)
 		for (auto bit : sigmap(ff.sig_q))
