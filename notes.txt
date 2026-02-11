@@ -109,10 +109,48 @@ set_ff_ces(design):
 
 
 
+(input_set=0) AND (D≠Q) == UNSAT
+ -> if one of them is 1 and D = Q
+Scenario	What happens	OK?
+CE=0, D==Q	Gate clock, hold value Correct (power saved)
+CE=0, D≠Q	Gate clock, lose data BUG
+CE=1, D==Q	Clock passes, write same value Correct (wasted power)
+CE=1, D≠Q	Clock passes, update register Correct
 
 
 
 
 
+(input_set=0) AND (D≠Q) == UNSAT -> 
+Existential Quantization of input_set such that 
+To ensure that if (CE=0) then D==Q:
+	((combination of inputs) AND (D≠Q)) = UNSAT
+	- This is functionally accurate but there might be cases when CE=1 but D==Q which
+		is a waste of power
+To ensure that if (CE=1) then D!=Q:
+	((combination of inputs) AND (D==Q)) = UNSAT
+	- This alone is risky since there might be combinations such that CE=0 but D!=Q 
+		which is incorrect behaviour
+
+Need to ensure CE=1 <-> D!=Q:
+	BOTH conditions must hold:
+	1) ((CE=0) AND (D≠Q)) = UNSAT   // CE=0 → D==Q (safe to gate)
+	2) ((CE=1) AND (D==Q)) = UNSAT  // CE=1 → D≠Q (no wasted power)
+	
+	Combined: CE must be the exact boolean function where CE = (D ≠ Q)
+	For MUX pattern D = sel ? new_val : Q, CE = sel satisfies both.
 
 
+In order words, we need
+Exist a combination of inputs such that UNSAT((combination of inputs) ^ (D==Q))
+Which means
+((!COI) && (D!=Q)) && ((COI) && (D==Q))
+
+Exit a set of inputs such that COI <-> D != Q
+(COI && (D != Q)) && (!COI && (D == Q))
+
+
+
+The final equation for the UNSAT is:
+	((D != Q) != (COI)) -> UNSAT => COI = (D != Q)
+	Exists COI such that ((D ^ Q) ^ (COI)) -> UNSAT
