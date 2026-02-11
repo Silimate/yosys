@@ -161,3 +161,31 @@ The final equation for the UNSAT is:
 
 So in the new pseudo code algorithm, once the pool<SigBit> is populated (the input_set),
 we create this miter with the exestential quantization with the input_set.
+
+The issue is that since the input set isn't a boolean function (is a BFS traversal),
+we need to manually create a boolean function out of the input set. 
+
+Another issue is that we must ensure that these somehow impact the D and/or the Q. This 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Future TODOs:
+1) Recursively minimize the set which is actually needed
+2) Add threshold (how many flops depend on the same enable signal)
+3) Add different setting for type of mitter (maybe add just the !COI -> D == Q)
+	 for a weaker clock gate (still consumes power if COI and D == Q but might be faster)
+4) Deal with posede vs negedge of the clocks
