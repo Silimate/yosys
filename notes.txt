@@ -40,3 +40,65 @@ Look somewhat like this:
 		SAT Equation
 		FA(Q_next, D_r, Q) !((Q_next) ^ ((en ∧ D_r) ∨ (¬en ∧ Q)))
 
+Now the issue is to determine what the en is and what the D_r in. In order
+to continue using this approach, a way of differentiating that would be needed.
+
+Need a simpler approach which just considers all of the inputs and then performs
+SAT. Here's the approach:
+	Consider the flip flops which go into D. Consider all of those inputs and seen
+if D != Q is UNSAT. Meaning for that set of inputs into D, D is going to be Q.
+Then try to minimize this set (optimization phase).
+
+
+1) Find the input's into D and determine if there's any level at which you can
+determine if (Exists(x1, x2, x3, ..., xn) | D != Q) == UNSAT (menaing for that
+combination of inputs of x1, x2, x3, ..., xn, D is always = Q.
+
+Algorithm version one:
+This version doesn't take into accound the threshold (doesn't try and insert)
+the same CE into multiple different clocks, it also doesn't do any pre SAT simulation
+optimization. Fruthermore, it also doesn't try and find the minimal set, just a set.
+
+// determines if the input set serves as an enable
+input_set_is_en(input_set, D, Q):
+	return (Exists(x1, x2, x3, ..., xn) | D != Q) == UNSAT
+
+// determines the input set
+determine_en_rec  (input_set&, D, Q):
+		if (count(input_set) > N):
+			return false:
+		if input_set_is_en(input_set, D, Q):
+			// for now this returns. Later, when optimizing, this will try and find a smaller subset within the set
+			return true
+		else:
+			// Detemine set of inputs
+			input_set_new = Do a BFS on the Data pin in the clock and add those pins to set
+			determine_en_rec(input_set_new, D, Q)
+
+// create the CE based on the input set
+// adds the CE into the clock
+create_ce_logic(input_set, D, Q, ffData):
+	// TODO: fill in this pseudocode please
+
+set_ff_ces(design):
+	for module in design:
+		for cell in module:
+			if cell is_builtin_ff:
+				ffFata ff = cell;
+				if (!ff.has_ce && ff.has_clk && ff.has_d && ff.has_Q):
+					input_set = {}
+					if (determine_en_rec(input_set, D, Q)):
+						create_ce_logic(input_set, D, Q, ffData)
+		
+		// insert the ICG gates based on the new CEs inserted
+		pass::call("clockgate", design);
+
+
+
+
+
+
+
+
+
+
