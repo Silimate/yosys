@@ -78,7 +78,21 @@ determine_en_rec  (input_set&, D, Q):
 // create the CE based on the input set
 // adds the CE into the clock
 create_ce_logic(input_set, D, Q, ffData):
-	// TODO: fill in this pseudocode please
+	// CE = OR(all signals in input_set)
+	// When any input is 1 → CE=1 (update register)
+	// When all inputs are 0 → CE=0 (hold, since SAT proved D==Q)
+	
+	if input_set.size() == 1:
+		ce_signal = input_set[0]
+	else:
+		ce_wire = module.addWire(NEW_ID)
+		module.addReduceOr(NEW_ID, input_set, ce_wire)
+		ce_signal = ce_wire
+	
+	ffData.has_ce = true
+	ffData.sig_ce = ce_signal
+	ffData.pol_ce = true  // active high
+	ffData.emit()  // rebuild the FF with CE
 
 set_ff_ces(design):
 	for module in design:
