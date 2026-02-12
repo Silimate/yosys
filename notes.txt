@@ -191,6 +191,7 @@ Future TODOs:
 4) Deal with posede vs negedge of the clocks
 5) Experiment with different logical combinations of the COI set (rather than just
 	 or-ing them all together)
+6) Consider pruning ezSAT expressions list — accumulates across queries, may cause memory growth
 
 
 === FIXED input_set_is_enable IMPLEMENTATIONS ===
@@ -261,3 +262,11 @@ bool input_set_is_enable_exact(const pool<SigBit> &input_set, SigSpec sig_d, Sig
 	// If UNSAT: COI is exactly when D≠Q → perfect enable
 	return !ez->solve();
 }
+
+
+
+
+Setting up the SAT condition:
+	- Need to have the equation for Q, need to have the equation for D
+	  need to XOR those equations, need to XOR that equation with the new
+		one. Need to make sure that that's never SAT.

@@ -42,8 +42,12 @@ struct SatClockgateWorker
 	
 	// Q bits to exclude from enable input set (set per-FF)
 	pool<SigBit> q_bits;
+
+	// SAT solver and generator - created once per module
+	ezSatPtr ez;
+	SatGen satgen;
 	
-	SatClockgateWorker(Module *module) : module(module), sigmap(module)
+	SatClockgateWorker(Module *module) : module(module), sigmap(module), ez(), satgen(ez.get(), &sigmap)
 	{
 		// Build driver map: for each signal bit, find which cell drives it
 		for (auto cell : module->cells()) {
@@ -54,6 +58,10 @@ struct SatClockgateWorker
 				}
 			}
 		}
+
+		// Import all cells once - circuit constraints are permanent
+		for (auto cell : module->cells())
+			satgen.importCell(cell);
 	}
 
 	// Set Q bits to exclude for current FF
@@ -89,19 +97,16 @@ struct SatClockgateWorker
 
 	// Check if OR(input_set) is exactly equivalent to (D != Q)
 	// Returns true if COI ↔ (D≠Q) for all circuit states (exact clock gating)
+	// TODO: Consider pruning the expressions list — expressions accumulate across
+	//       calls (OR, XOR, NE per query). For large designs with many FFs, this
+	//       could cause memory growth. Options: solver checkpoints, fresh solver
+	//       per FF with COI-only cell import, or periodic expression cleanup.
 	bool input_set_is_enable(const pool<SigBit> &input_set, SigSpec sig_d, SigSpec sig_q)
 	{
 		if (input_set.empty())
 			return false;
 
-		ezSatPtr ez;
-		SatGen satgen(ez.get(), &sigmap);
-		
-		// Import circuit behavior
-		for (auto cell : module->cells())
-			satgen.importCell(cell);
-		
-		// Import D and Q
+		// Import D and Q (uses cached literals if already imported)
 		std::vector<int> d_vec = satgen.importSigSpec(sig_d);
 		std::vector<int> q_vec = satgen.importSigSpec(sig_q);
 		
@@ -114,11 +119,16 @@ struct SatClockgateWorker
 		// Build D != Q (single bit: is any bit different?)
 		int d_ne_q = ez->vec_ne(d_vec, q_vec);
 		
-		// Constraint: COI XOR (D≠Q) — want this UNSAT (meaning COI ↔ D≠Q)
-		ez->assume(ez->XOR(coi, d_ne_q));
+		// Query: COI XOR (D≠Q) — want this UNSAT (meaning COI ↔ D≠Q)
+		// Use solve() with assumption instead of permanent assume()
+		int query = ez->XOR(coi, d_ne_q);
+		
+		std::vector<int> assumptions = {query};
+		std::vector<int> dummy_model_exprs;
+		std::vector<bool> dummy_model_vals;
 		
 		// If UNSAT: COI is exactly when D≠Q → perfect enable
-		return !ez->solve();
+		return !ez->solve(dummy_model_exprs, dummy_model_vals, assumptions);
 	}
 
 	// Recursively determine the enable input set via BFS expansion
