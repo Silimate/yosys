@@ -293,3 +293,14 @@ Where the MUX has (for the select inputs the input values, and then has random v
 SAT returns the combination of the values for d which make this work.
 
 But in this case, how can I go from determining the values of the Ds to determine the gates and converting that to combinational logic? And also, how can I Universially Quantize the other values?
+
+
+
+This is difficult due to QBF (Quantified Boolean Format) engines being very expensive and slow.
+Rather than this, potentially trying CEGAR (not sure if this is practical). Idea is this:
+	1. Start with a CANDIDATE solution (guess/abstraction)
+	2. CHECK: Does candidate work for ALL inputs? (via SAT) (UNSAT for XOR means they are the same)
+		- If YES → Done, return candidate ✓
+		- If NO → SAT gives a COUNTEREXAMPLE (inputs where it fails)
+	3. REFINE: Use counterexample to improve candidate
+	4. GOTO 2
