@@ -191,3 +191,73 @@ Future TODOs:
 4) Deal with posede vs negedge of the clocks
 5) Experiment with different logical combinations of the COI set (rather than just
 	 or-ing them all together)
+
+
+=== FIXED input_set_is_enable IMPLEMENTATIONS ===
+
+// VERSION 1: Safe clock gating (current approach, cleaned up)
+// Checks: (input_set=0) AND (D≠Q) == UNSAT
+// Meaning: when all inputs are 0, D is guaranteed to equal Q
+bool input_set_is_enable_safe(const pool<SigBit> &input_set, SigSpec sig_d, SigSpec sig_q)
+{
+	if (input_set.empty())
+		return false;
+
+	ezSatPtr ez;
+	SatGen satgen(ez.get(), &sigmap);
+	
+	// Import circuit behavior
+	for (auto cell : module->cells())
+		satgen.importCell(cell);
+	
+	// Import D and Q
+	std::vector<int> d_vec = satgen.importSigSpec(sig_d);
+	std::vector<int> q_vec = satgen.importSigSpec(sig_q);
+	
+	// Constraint 1: All input_set bits = 0
+	for (auto bit : input_set) {
+		int bit_var = satgen.importSigSpec(SigSpec(bit))[0];
+		ez->assume(ez->NOT(bit_var));
+	}
+	
+	// Constraint 2: D != Q
+	ez->assume(ez->vec_ne(d_vec, q_vec));
+	
+	// If UNSAT: no way for D≠Q when inputs=0 → valid enable
+	return !ez->solve();
+}
+
+// VERSION 2: Exact clock gating (stronger, no wasted power)
+// Checks: (D≠Q) XOR (OR(input_set)) == UNSAT
+// Meaning: COI is exactly equivalent to D≠Q
+bool input_set_is_enable_exact(const pool<SigBit> &input_set, SigSpec sig_d, SigSpec sig_q)
+{
+	if (input_set.empty())
+		return false;
+
+	ezSatPtr ez;
+	SatGen satgen(ez.get(), &sigmap);
+	
+	// Import circuit behavior
+	for (auto cell : module->cells())
+		satgen.importCell(cell);
+	
+	// Import D and Q
+	std::vector<int> d_vec = satgen.importSigSpec(sig_d);
+	std::vector<int> q_vec = satgen.importSigSpec(sig_q);
+	
+	// Build COI = OR(input_set)
+	std::vector<int> input_vars;
+	for (auto bit : input_set)
+		input_vars.push_back(satgen.importSigSpec(SigSpec(bit))[0]);
+	int coi = ez->expression(ezSAT::OpOr, input_vars);
+	
+	// Build D != Q (single bit: is any bit different?)
+	int d_ne_q = ez->vec_ne(d_vec, q_vec);
+	
+	// Constraint: COI XOR (D≠Q) — want this UNSAT (meaning COI ↔ D≠Q)
+	ez->assume(ez->XOR(coi, d_ne_q));
+	
+	// If UNSAT: COI is exactly when D≠Q → perfect enable
+	return !ez->solve();
+}
