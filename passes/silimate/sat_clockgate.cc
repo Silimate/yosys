@@ -87,8 +87,8 @@ struct SatClockgateWorker
 		return inputs;
 	}
 
-	// Check if fixing the input_set to specific values makes D == Q always true
-	// Returns true if input_set can serve as an enable (when all bits are 0, D == Q)
+	// Check if OR(input_set) is exactly equivalent to (D != Q)
+	// Returns true if COI ↔ (D≠Q) for all circuit states (exact clock gating)
 	bool input_set_is_enable(const pool<SigBit> &input_set, SigSpec sig_d, SigSpec sig_q)
 	{
 		if (input_set.empty())
@@ -97,31 +97,28 @@ struct SatClockgateWorker
 		ezSatPtr ez;
 		SatGen satgen(ez.get(), &sigmap);
 		
-		// Import the logic cone for D
+		// Import circuit behavior
 		for (auto cell : module->cells())
 			satgen.importCell(cell);
 		
-		// Create SAT variables for D and Q
+		// Import D and Q
 		std::vector<int> d_vec = satgen.importSigSpec(sig_d);
 		std::vector<int> q_vec = satgen.importSigSpec(sig_q);
 		
-		// Assert: all signals in input_set are 0
-		for (auto bit : input_set) {
-			std::vector<int> bit_vec = satgen.importSigSpec(SigSpec(bit));
-			if (!bit_vec.empty())
-				ez->assume(ez->NOT(bit_vec[0]));
-		}
+		// Build COI = OR(input_set)
+		std::vector<int> input_vars;
+		for (auto bit : input_set)
+			input_vars.push_back(satgen.importSigSpec(SigSpec(bit))[0]);
+		int coi = ez->expression(ezSAT::OpOr, input_vars);
 		
-		// Assert: D != Q (we want this to be UNSAT)
-		std::vector<int> neq_bits;
-		for (size_t i = 0; i < d_vec.size() && i < q_vec.size(); i++) {
-			neq_bits.push_back(ez->XOR(d_vec[i], q_vec[i]));
-		}
-		ez->assume(ez->expression(ezSAT::OpOr, neq_bits));
+		// Build D != Q (single bit: is any bit different?)
+		int d_ne_q = ez->vec_ne(d_vec, q_vec);
 		
-		// If UNSAT, then input_set=0 guarantees D == Q
-		bool sat = ez->solve();
-		return !sat;
+		// Constraint: COI XOR (D≠Q) — want this UNSAT (meaning COI ↔ D≠Q)
+		ez->assume(ez->XOR(coi, d_ne_q));
+		
+		// If UNSAT: COI is exactly when D≠Q → perfect enable
+		return !ez->solve();
 	}
 
 	// Recursively determine the enable input set via BFS expansion
