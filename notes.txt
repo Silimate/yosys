@@ -270,3 +270,26 @@ Setting up the SAT condition:
 	- Need to have the equation for Q, need to have the equation for D
 	  need to XOR those equations, need to XOR that equation with the new
 		one. Need to make sure that that's never SAT.
+
+
+
+
+
+
+
+
+
+Ok so I have this idea:
+
+
+
+
+I'm doing to take the input variables, universally quantize them and also take D and Q and universilly quantise them
+
+Then I have this formula SAT((D^Q) !^ MUX))
+
+Where the MUX has (for the select inputs the input values, and then has random variables d_0 to D_2^n when there's n inputs.
+
+SAT returns the combination of the values for d which make this work.
+
+But in this case, how can I go from determining the values of the Ds to determine the gates and converting that to combinational logic? And also, how can I Universially Quantize the other values?
