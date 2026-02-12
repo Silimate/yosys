@@ -304,3 +304,42 @@ Rather than this, potentially trying CEGAR (not sure if this is practical). Idea
 		- If NO → SAT gives a COUNTEREXAMPLE (inputs where it fails)
 	3. REFINE: Use counterexample to improve candidate
 	4. GOTO 2
+
+
+
+	The approach by this paper: https://dl.acm.org/doi/epdf/10.1145/1391469.1391637
+
+Try each signal individually → collect ones that work → OR the winners
+Your approach: "OR(all inputs) == enable?"
+Paper's approach: "Which individual signals could BE the enable?"
+Paper's Algorithm in Pseudocode (Yosys-feasible):
+SigBit find_clock_enable(SigSpec sig_d, SigSpec sig_q) {    pool<SigBit> candidates = get_cone_signals(sig_d);  // All signals in fanin    pool<SigBit> valid_enables;        // STEP 1: Prune with simulation (fast)    for (auto sig : candidates) {        if (!simulation_suggests_valid(sig, sig_d, sig_q))            candidates.erase(sig);  // Quick reject    }        // STEP 2: Prove with SAT (slow but conclusive)    for (auto sig : candidates) {        // Check: sig=1 → D==Q (safe to gate)        // SAT query: (sig ∧ (D ⊕ Q)) — want UNSAT        if (sat_proves_valid(sig, sig_d, sig_q))            valid_enables.insert(sig);    }        // STEP 3: Pick best (by estimated power savings)    SigBit best = select_best_coverage(valid_enables);        return best;  // Or OR multiple if needed}bool sat_proves_valid(SigBit candidate, SigSpec sig_d, SigSpec sig_q) {    // "Can candidate=1 while D≠Q?" — if UNSAT, candidate is valid    int cand = satgen.importSigSpec(SigSpec(candidate))[0];    int d_ne_q = ez->vec_ne(d_vec, q_vec);    ez->assume(cand);    ez->assume(d_ne_q);    return !ez->solve();  // UNSAT = valid enable}
+
+
+=== SAFE GATING vs EXACT GATING ===
+
+Safe Gating:
+  SAT check: sig ∧ (D≠Q) = UNSAT
+  Meaning: When sig=1, D is guaranteed to equal Q (safe to gate clock)
+  - sig=1 → gate clock, hold register (D==Q guaranteed)
+  - sig=0 → clock runs freely (D may or may not equal Q)
+  Allows wasted power (clock runs when D==Q but sig=0), but NEVER loses data.
+
+Exact Gating:
+  SAT check: sig ⊕ (D≠Q) = UNSAT
+  Meaning: sig is EXACTLY equivalent to (D≠Q)
+  - sig=1 ↔ D≠Q (perfect bidirectional match)
+  No wasted power, but much harder to find matching signals.
+
+Comparison:
+  | Type   | SAT Check             | Finds more? | Power optimal? |
+  |--------|-----------------------|-------------|----------------|
+  | Safe   | sig ∧ (D≠Q) = UNSAT   | Yes         | No (some waste)|
+  | Exact  | sig ⊕ (D≠Q) = UNSAT   | No          | Yes (perfect)  |
+
+Recommendation:
+  • Use SAFE GATING — faster (weaker SAT query), finds more candidates
+  • Safe gating is industry standard (used in paper, commercial tools)
+  • Exact gating rarely finds matches unless design has explicit MUX-with-Q pattern
+  • Power difference is minor — safe gating still saves most power
+  • Safe gating has better QoR: more FFs get clock-gated
