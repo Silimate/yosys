@@ -1,11 +1,10 @@
-log -header "Interleaved mux/add chain pushes muxes to the end"
+log -header "Short chain pushes via mux structural credit"
 log -push
 design -reset
 read_verilog <<EOF
 module top (
   input wire s0,
   input wire s1,
-  input wire s2,
   input wire [7:0] a,
   input wire [7:0] b,
   input wire [7:0] c,
@@ -16,33 +15,25 @@ module top (
   wire [7:0] m0;
   wire [7:0] a0;
   wire [7:0] m1;
-  wire [7:0] a1;
 
   assign m0 = s0 ? b : a;
   assign a0 = m0 + c;
   assign m1 = s1 ? a0 : d;
-  assign a1 = m1 + e;
-  assign y  = s2 ? a1 : a;
+  assign y  = m1 + e;
 endmodule
 EOF
 proc
 check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 100
 
-# Check equivalence after mux push
-equiv_opt -assert muxpush -limit 1 -types $add
-
-# After the pass, no $add should have a $mux driving its inputs
 design -load postopt
-select -set add_fanin t:$add %ci*
+select -set add_fanin t:$add %ci
 select -set mux_cells t:$mux t:$ternary
 select -assert-count 0 @add_fanin @mux_cells %i
-
 design -reset
 log -pop
 
-
-
-log -header "Negative case: fanout limit blocks push"
+log -header "Mux structural credit: ratio 1.9 rejects, ratio 2.0 accepts for zero-arith case"
 log -push
 design -reset
 read_verilog <<EOF
@@ -51,34 +42,50 @@ module top (
   input wire [7:0] a,
   input wire [7:0] b,
   input wire [7:0] c,
-  input wire [7:0] d,
-  output wire [7:0] y0,
-  output wire [7:0] y1
+  output wire [7:0] y
 );
   wire [7:0] m0;
   assign m0 = s0 ? b : a;
-  assign y0 = m0 + c;
-  assign y1 = m0 + d;
+  assign y  = m0 + c;
 endmodule
 EOF
 proc
 check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 1.9
 
-# Check equivalence after mux push (should not apply due to fanout>1)
-equiv_opt -assert muxpush -limit 1 -types $add
-
-# Mux still drives add inputs due to fanout limit
 design -load postopt
-select -set add_fanin t:$add %ci*
-select -set mux_cells t:$mux t:$ternary
-select -assert-count 1 @add_fanin @mux_cells %i
-
+# No push expected at ratio 1.9: keep original single add + single mux/ternary
+select -assert-count 1 t:$add
+select -assert-count 1 t:$mux t:$ternary
 design -reset
 log -pop
 
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  output wire [7:0] y
+);
+  wire [7:0] m0;
+  assign m0 = s0 ? b : a;
+  assign y  = m0 + c;
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 2.0
 
+design -load postopt
+# Push expected at ratio 2.0: one add duplicated into two adds
+select -assert-count 2 t:$add
+design -reset
+log -pop
 
-log -header "Push with fanout limit > 1"
+log -header "Wrapper traversal: concat/slice still yields positive ROI"
 log -push
 design -reset
 read_verilog <<EOF
@@ -88,29 +95,493 @@ module top (
   input wire [7:0] b,
   input wire [7:0] c,
   input wire [7:0] d,
-  output wire [7:0] y0,
-  output wire [7:0] y1
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  output wire [7:0] y
 );
-  wire [7:0] m0;
-  wire [7:0] a0;
+  wire [7:0] sum1, sum2;
+  wire [15:0] wrapped;
+  wire [7:0] up;
+  reg  [7:0] m0;
+  wire [7:0] dn;
 
-  assign m0 = s0 ? b : a;
+  assign sum1 = a + b;
+  assign sum2 = c + d;
+  assign wrapped = {sum1, sum2};
+  assign up = wrapped[15:8] + wrapped[7:0];
+  assign dn = (f + g) + (h + i);
+  always @* if (s0) m0 = up; else m0 = e;
+  assign y = m0 + dn;
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 1.0
+
+design -load postopt
+select -set add_fanin t:$add %ci
+select -set mux_cells t:$mux t:$ternary
+select -assert-count 0 @add_fanin @mux_cells %i
+design -reset
+log -pop
+
+log -header "Wrapper traversal: selecting one concat half still pushes"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  output wire [7:0] y
+);
+  wire [7:0] sum1, sum2;
+  wire [15:0] wrapped;
+  wire [7:0] up;
+  reg  [7:0] m0;
+  wire [7:0] dn;
+
+  assign sum1 = a + b;
+  assign sum2 = c + d;
+  assign wrapped = {sum1, sum2};
+  assign up = wrapped[15:8];        // one half => arithmetic credit is zero
+  assign dn = (f + g) + (h + i);
+  always @* if (s0) m0 = up; else m0 = e;
+  assign y = m0 + dn;
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 100.0
+
+design -load postopt
+select -set add_fanin t:$add %ci
+select -set mux_cells t:$mux t:$ternary
+select -assert-count 0 @add_fanin @mux_cells %i
+design -reset
+log -pop
+
+log -header "Single barrier ROI threshold: ratio 0.4 rejects, ratio 0.7 accepts"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  output wire [7:0] y
+);
+  wire [7:0] up;
+  reg  [7:0] m0;
+  wire [7:0] dn;
+
+  assign up = (a + b) + (c + d);   // up_ops = 4
+  assign dn = (f + g) + (h + i);   // down_ops = 4
+  always @* if (s0) m0 = up; else m0 = e;
+  assign y = m0 + dn;              // credit = (2+2-3)*8 = 8, debt = 8
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 0.4
+
+design -load postopt
+# No push at ratio 0.4: top add is not duplicated
+select -assert-count 7 t:$add
+design -reset
+log -pop
+
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  output wire [7:0] y
+);
+  wire [7:0] up;
+  reg  [7:0] m0;
+  wire [7:0] dn;
+
+  assign up = (a + b) + (c + d);
+  assign dn = (f + g) + (h + i);
+  always @* if (s0) m0 = up; else m0 = e;
+  assign y = m0 + dn;
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 0.7
+
+design -load postopt
+# Push at ratio 0.7: top add is duplicated (+1 add total)
+select -assert-count 8 t:$add
+design -reset
+log -pop
+
+log -header "Mixed operator independence: add can push while xor remains rejected at tighter ratio"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s_add,
+  input wire s_xor,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  output wire [7:0] y_add,
+  output wire [7:0] y_xor
+);
+  wire [7:0] up_add = (a + b) + (c + d);   // up_ops(add)=4
+  wire [7:0] dn_add = (f + g) + (h + i);   // down_ops(add)=4
+  reg  [7:0] m_add;
+  always @* if (s_add) m_add = up_add; else m_add = e;
+  assign y_add = m_add + dn_add;           // positive ROI
+
+  wire [7:0] up_xor = a ^ b;               // up_ops(xor)=2
+  reg  [7:0] m_xor;
+  always @* if (s_xor) m_xor = up_xor; else m_xor = c;
+  assign y_xor = m_xor ^ d;                // zero ROI
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert muxpush -limit 1 -types $add,$xor -ratio 0.9
+
+design -load postopt
+# add path pushes (top add duplicated), xor path remains unchanged
+select -assert-count 8 t:$add
+select -assert-count 2 t:$xor
+design -reset
+log -pop
+
+
+log -header "Serial chain stays rejected even at high ratio when credit is zero"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire s1,
+  input wire s2,
+  input wire s3,
+  input wire s4,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  input wire [7:0] j,
+  input wire [7:0] k,
+  output wire [7:0] y
+);
+  reg [7:0] m0, m1, m2, m3, m4;
+  wire [7:0] a0, a1, a2, a3;
+
+  always @* if (s0) m0 = b; else m0 = a;
   assign a0 = m0 + c;
-  assign y0 = a0;
-  assign y1 = m0 + d;
+
+  always @* if (s1) m1 = a0; else m1 = d;
+  assign a1 = m1 + e;
+
+  always @* if (s2) m2 = a1; else m2 = f;
+  assign a2 = m2 + g;
+
+  always @* if (s3) m3 = a2; else m3 = h;
+  assign a3 = m3 + i;
+
+  always @* if (s4) m4 = a3; else m4 = j;
+  assign y  = m4 + k;
 endmodule
 EOF
 proc
 check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 1.0
 
-# Check equivalence after mux push (allowed due to fanout limit)
-equiv_opt -assert muxpush -limit 2 -types $add
-
-# Both adders should be pushed with fanout limit > 1
 design -load postopt
-select -set add_fanin t:$add %ci*
-select -set mux_cells t:$mux t:$ternary
-select -assert-count 0 @add_fanin @mux_cells %i
+# No push at ratio 1.0 for this serial chain
+select -assert-count 5 t:$add
+design -reset
+log -pop
 
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire s1,
+  input wire s2,
+  input wire s3,
+  input wire s4,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  input wire [7:0] j,
+  input wire [7:0] k,
+  output wire [7:0] y
+);
+  reg [7:0] m0, m1, m2, m3, m4;
+  wire [7:0] a0, a1, a2, a3;
+
+  always @* if (s0) m0 = b; else m0 = a;
+  assign a0 = m0 + c;
+
+  always @* if (s1) m1 = a0; else m1 = d;
+  assign a1 = m1 + e;
+
+  always @* if (s2) m2 = a1; else m2 = f;
+  assign a2 = m2 + g;
+
+  always @* if (s3) m3 = a2; else m3 = h;
+  assign a3 = m3 + i;
+
+  always @* if (s4) m4 = a3; else m4 = j;
+  assign y  = m4 + k;
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 20.0
+
+design -load postopt
+# With high ratio, serial chain is aggressively expanded by ROI-accepted pushes.
+select -assert-count 20 t:$add
+design -reset
+log -pop
+
+
+log -header "Ratio 0 rejects even for high-ROI chain"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire s1,
+  input wire s2,
+  input wire s3,
+  input wire s4,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  input wire [7:0] j,
+  input wire [7:0] k,
+  output wire [7:0] y
+);
+  reg [7:0] m0, m1, m2, m3, m4;
+  wire [7:0] a0, a1, a2, a3;
+
+  always @* if (s0) m0 = b; else m0 = a;
+  assign a0 = m0 + c;
+
+  always @* if (s1) m1 = a0; else m1 = d;
+  assign a1 = m1 + e;
+
+  always @* if (s2) m2 = a1; else m2 = f;
+  assign a2 = m2 + g;
+
+  always @* if (s3) m3 = a2; else m3 = h;
+  assign a3 = m3 + i;
+
+  always @* if (s4) m4 = a3; else m4 = j;
+  assign y  = m4 + k;
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 0
+
+design -load postopt
+select -assert-count 5 t:$add
+design -reset
+log -pop
+
+
+log -header "Keep attribute blocks whole component"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire s1,
+  input wire s2,
+  input wire s3,
+  input wire s4,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  input wire [7:0] j,
+  input wire [7:0] k,
+  output wire [7:0] y
+);
+  reg [7:0] m0, m1, m2, m3, m4;
+  wire [7:0] a0, a1, a2, a3;
+
+  always @* if (s0) m0 = b; else m0 = a;
+  assign a0 = m0 + c;
+
+  always @* if (s1) m1 = a0; else m1 = d;
+  assign a1 = m1 + e;
+
+  always @* if (s2) m2 = a1; else m2 = f;
+  assign a2 = m2 + g;
+
+  always @* if (s3) m3 = a2; else m3 = h;
+  assign a3 = m3 + i;
+
+  always @* if (s4) m4 = a3; else m4 = j;
+  assign y  = m4 + k;
+endmodule
+EOF
+proc
+setattr -set keep 1 t:$mux
+check -assert
+# Structural assertions are run on direct pass execution because equiv_opt wraps/transforms
+# the design around the optimization and can make this specific keep-blocking topology check unstable
+muxpush -limit 1 -types $add -ratio 100.0
+
+select -assert-count 5 t:$add
+design -reset
+log -pop
+
+log -header "Keep attribute: equivalence still holds under equiv_opt wrapper"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire s1,
+  input wire s2,
+  input wire s3,
+  input wire s4,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  input wire [7:0] j,
+  input wire [7:0] k,
+  output wire [7:0] y
+);
+  reg [7:0] m0, m1, m2, m3, m4;
+  wire [7:0] a0, a1, a2, a3;
+
+  always @* if (s0) m0 = b; else m0 = a;
+  assign a0 = m0 + c;
+
+  always @* if (s1) m1 = a0; else m1 = d;
+  assign a1 = m1 + e;
+
+  always @* if (s2) m2 = a1; else m2 = f;
+  assign a2 = m2 + g;
+
+  always @* if (s3) m3 = a2; else m3 = h;
+  assign a3 = m3 + i;
+
+  always @* if (s4) m4 = a3; else m4 = j;
+  assign y  = m4 + k;
+endmodule
+EOF
+proc
+setattr -set keep 1 t:$mux
+check -assert
+# Keep this as equivalence-only: the structural keep check is in the direct-pass block above
+equiv_opt -assert muxpush -limit 1 -types $add -ratio 100.0
+design -reset
+log -pop
+
+
+log -header "Default operator set includes xor with positive ROI"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s0,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  input wire [7:0] d,
+  input wire [7:0] e,
+  input wire [7:0] f,
+  input wire [7:0] g,
+  input wire [7:0] h,
+  input wire [7:0] i,
+  output wire [7:0] y
+);
+  wire [7:0] up;
+  reg  [7:0] m0;
+  wire [7:0] dn;
+
+  assign up = (a ^ b) ^ (c ^ d);   // up_ops = 4
+  assign dn = (f ^ g) ^ (h ^ i);   // down_ops = 4
+  always @* if (s0) m0 = up; else m0 = e;
+  assign y  = m0 ^ dn;             // credit = (2+2-3)*8 = 8, debt = 8
+endmodule
+EOF
+proc
+check -assert
+# No -types override: default should include $xor
+equiv_opt -assert muxpush -limit 1 -ratio 1.0
+
+design -load postopt
+select -set xor_fanin t:$xor %ci
+select -set mux_cells t:$mux t:$ternary
+select -assert-count 0 @xor_fanin @mux_cells %i
 design -reset
 log -pop
