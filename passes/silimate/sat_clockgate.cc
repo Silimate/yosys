@@ -89,7 +89,6 @@ struct SatClockgateWorker
 	// Get downstream signals from a register (BFS forward through combinational logic)
 	pool<SigBit> getDownstreamSignals(Cell *reg, int limit)
 	{
-		pool<SigBit> result;
 		pool<SigBit> visited;
 		std::queue<SigBit> worklist;
 		
@@ -102,11 +101,9 @@ struct SatClockgateWorker
 			}
 		}
 		
-		while (!worklist.empty() && (int)result.size() < limit) {
+		while (!worklist.empty() && (int)visited.size() < limit) {
 			SigBit bit = worklist.front();
 			worklist.pop();
-			
-			result.insert(bit);
 			
 			// Find cells driven by this signal
 			for (auto sink_cell : sig_to_sinks[bit]) {
@@ -130,13 +127,12 @@ struct SatClockgateWorker
 			}
 		}
 		
-		return result;
+		return visited;
 	}
 	
 	// Get upstream signals feeding into given signals (BFS backward)
 	pool<SigBit> getUpstreamSignals(const pool<SigBit> &start_signals, int limit)
 	{
-		pool<SigBit> result;
 		pool<SigBit> visited;
 		std::queue<SigBit> worklist;
 		
@@ -145,11 +141,9 @@ struct SatClockgateWorker
 			visited.insert(bit);
 		}
 		
-		while (!worklist.empty() && (int)result.size() < limit) {
+		while (!worklist.empty() && (int)visited.size() < limit) {
 			SigBit bit = worklist.front();
 			worklist.pop();
-			
-			result.insert(bit);
 			
 			// Find driver cell
 			if (!sig_to_driver.count(bit))
@@ -176,7 +170,7 @@ struct SatClockgateWorker
 			}
 		}
 		
-		return result;
+		return visited;
 	}
 	
 	// Check if a candidate signal is a valid gating condition using SAT
@@ -543,6 +537,9 @@ struct SatClockgatePass : public Pass {
 		}
 		
 		log("Total clock gates inserted: %d\n", total_gates);
+		
+		// Convert CEs to actual clock gate cells
+		Pass::call(design, "clockgate");
 	}
 } SatClockgatePass;
 
