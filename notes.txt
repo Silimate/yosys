@@ -343,3 +343,31 @@ Recommendation:
   • Exact gating rarely finds matches unless design has explicit MUX-with-Q pattern
   • Power difference is minor — safe gating still saves most power
   • Safe gating has better QoR: more FFs get clock-gated
+
+	There's also clock as_enable and as_disable
+	as_enable = true (clock enable):
+	Signal high → clock runs. Signal low → clock blocked. Check: (!enable ∧ D≠Q) must be UNSAT.
+	as_enable = false (clock disable):
+	Signal high → clock blocked. Signal low → clock runs. Check: (disable ∧ D≠Q) must be UNSAT.
+
+
+
+
+
+TODOs:
+1) Convert from the string hash to an integer hash
+2) Use is_builtin_ff
+3) See why this path is needed:
+	 		if (ff.has_ce) {
+				// Already has CE, AND with new condition
+				Wire *combined_ce = module->addWire(NEW_ID);
+				module->addAnd(NEW_ID, ff.sig_ce, gating_signal, combined_ce);
+				ff.sig_ce = combined_ce;
+			} else {
+4) Print the netlist before and after (checkout ways to determine # of flipflips)
+5) Power analysis
+6) Remove redundant vectors (visited and result) from getDownstreamSignals
+	 and getUpstreamSignals
+7) Check recursion
+8) Check isValidGatingSet and findGatingCondition
+
