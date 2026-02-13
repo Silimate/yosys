@@ -558,7 +558,7 @@ struct MemoryDffWorker
 
 		FfData ff;
 		pool<std::pair<Cell *, int>> bits;
-		if (!merger.find_input_ff(port.addr, ff, bits)) {
+		if (!merger.find_input_ff(port.addr, ff, bits, mem.memid)) {
 			log("no address FF found.\n");
 			return;
 		}

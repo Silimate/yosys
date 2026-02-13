@@ -156,8 +156,8 @@ bool FfMergeHelper::find_output_ff(RTLIL::SigSpec sig, FfData &ff, pool<std::pai
 	return found;
 }
 
-bool FfMergeHelper::find_input_ff(RTLIL::SigSpec sig, FfData &ff, pool<std::pair<Cell *, int>> &bits) {
-	ff = FfData(module, initvals, NEW_ID);
+bool FfMergeHelper::find_input_ff(RTLIL::SigSpec sig, FfData &ff, pool<std::pair<Cell *, int>> &bits, RTLIL::IdString name) {
+	ff = FfData(module, initvals, name);
 	sigmap->apply(sig);
 
 	bool found = false;

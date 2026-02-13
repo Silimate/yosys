@@ -3489,7 +3489,7 @@ DEF_METHOD(Shiftx,      sig_a.size(), ID($shiftx))
 	} \
 	RTLIL::SigSpec RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigSpec &sig_a, const RTLIL::SigSpec &sig_b, const RTLIL::SigSpec &sig_s, const std::string &src) { \
 		Module *module = this; \
-		RTLIL::SigSpec sig_y = addWire(!_pmux ? NEW_ID : NEW_ID4_SUFFIX("y"), sig_a.size());     \
+		RTLIL::SigSpec sig_y = addWire(NEW_ID4_SUFFIX("y"), sig_a.size());     \
 		add ## _func(name, sig_a, sig_b, sig_s, sig_y, src);      \
 		return sig_y;                                             \
 	} // SILIMATE: Improve the naming (NOT IMPROVED FOR MUX!)
@@ -3579,7 +3579,7 @@ DEF_METHOD(Bweqx,    ID($bweqx))
 	} \
 	RTLIL::SigBit RTLIL::Module::_func(RTLIL::IdString name, const RTLIL::SigBit &sig1, const RTLIL::SigBit &sig2, const RTLIL::SigBit &sig3, const std::string &src) { \
 		Module *module = this; \
-		RTLIL::SigBit sig4 = addWire(_mux ? NEW_ID : NEW_ID4_SUFFIX(#_P4));             \
+		RTLIL::SigBit sig4 = addWire(NEW_ID4_SUFFIX(#_P4));             \
 		add ## _func(name, sig1, sig2, sig3, sig4, src);  \
 		return sig4;                                      \
 	} // SILIMATE: Improve the naming (NOT IMPROVED AT ALL!)
