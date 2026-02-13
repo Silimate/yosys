@@ -277,7 +277,7 @@ using AbcSigMap = SigValMap<AbcSigVal>;
 struct RunAbcState {
 	const AbcConfig &config;
 
-	std::string tempdir_name;
+	std::string per_run_tempdir_name;
 	std::vector<gate_t> signal_list;
 	bool did_run = false;
 	bool err = false;
@@ -822,16 +822,23 @@ std::string fold_abc_cmd(std::string str)
 	return new_str;
 }
 
-std::string replace_tempdir(std::string text, std::string tempdir_name, bool show_tempdir)
+std::string replace_tempdir(std::string text, std::string_view global_tempdir_name, std::string_view per_run_tempdir_name, bool show_tempdir)
 {
 	if (show_tempdir)
 		return text;
 
 	while (1) {
-		size_t pos = text.find(tempdir_name);
+		size_t pos = text.find(global_tempdir_name);
 		if (pos == std::string::npos)
 			break;
-		text = text.substr(0, pos) + "<abc-temp-dir>" + text.substr(pos + GetSize(tempdir_name));
+		text = text.substr(0, pos) + "<abc-temp-dir>" + text.substr(pos + GetSize(global_tempdir_name));
+	}
+
+	while (1) {
+		size_t pos = text.find(per_run_tempdir_name);
+		if (pos == std::string::npos)
+			break;
+		text = text.substr(0, pos) + "<abc-temp-dir>" + text.substr(pos + GetSize(per_run_tempdir_name));
 	}
 
 	std::string  selfdir_name = proc_self_dirname();
@@ -853,11 +860,12 @@ struct abc_output_filter
 	bool got_cr;
 	int escape_seq_state;
 	std::string linebuf;
-	std::string tempdir_name;
+	std::string global_tempdir_name;
+	std::string per_run_tempdir_name;
 	bool show_tempdir;
 
-	abc_output_filter(RunAbcState& state, std::string tempdir_name, bool show_tempdir)
-		: state(state), tempdir_name(tempdir_name), show_tempdir(show_tempdir)
+	abc_output_filter(RunAbcState& state, std::string global_tempdir_name, std::string per_run_tempdir_name, bool show_tempdir)
+		: state(state), global_tempdir_name(global_tempdir_name), per_run_tempdir_name(per_run_tempdir_name), show_tempdir(show_tempdir)
 	{
 		got_cr = false;
 		escape_seq_state = 0;
@@ -884,7 +892,7 @@ struct abc_output_filter
 			return;
 		}
 		if (ch == '\n') {
-			state.logs.log("ABC: %s\n", replace_tempdir(linebuf, tempdir_name, show_tempdir));
+			state.logs.log("ABC: %s\n", replace_tempdir(linebuf, global_tempdir_name, per_run_tempdir_name, show_tempdir));
 			got_cr = false, linebuf.clear();
 			return;
 		}
@@ -985,15 +993,19 @@ void AbcModuleState::prepare_module(RTLIL::Design *design, RTLIL::Module *module
 
 	const AbcConfig &config = run_abc.config;
 	if (config.cleanup)
-		run_abc.tempdir_name = get_base_tmpdir() + "/";
+		run_abc.per_run_tempdir_name = get_base_tmpdir() + "/";
 	else
-		run_abc.tempdir_name = "_tmp_";
-	run_abc.tempdir_name += proc_program_prefix() + "yosys-abc-XXXXXX";
-	run_abc.tempdir_name = make_temp_dir(run_abc.tempdir_name);
+		run_abc.per_run_tempdir_name = "_tmp_";
+	run_abc.per_run_tempdir_name += proc_program_prefix() + "yosys-abc-XXXXXX";
+	run_abc.per_run_tempdir_name = make_temp_dir(run_abc.per_run_tempdir_name);
 	log_header(design, "Extracting gate netlist of module `%s' to `%s/input.blif'..\n",
-			module->name.c_str(), replace_tempdir(run_abc.tempdir_name, run_abc.tempdir_name, config.show_tempdir).c_str());
+			module->name.c_str(), replace_tempdir(run_abc.per_run_tempdir_name, config.global_tempdir_name, run_abc.per_run_tempdir_name, config.show_tempdir).c_str());
 
-	std::string abc_script = stringf((std::string("read_blif") + (config.abc_node_retention ? stringf(" -M %d -r", config.abc_max_node_retention_origins) : "") + " \"%s/input.blif\"; ").c_str(), run_abc.tempdir_name);
+	std::string abc_script;
+	if (config.abc_node_retention)
+		abc_script = stringf("read_blif -M %d -r \"%s/input.blif\"; ", config.abc_max_node_retention_origins, run_abc.per_run_tempdir_name);
+	else
+		abc_script = stringf("read_blif \"%s/input.blif\"; ", run_abc.per_run_tempdir_name);
 
 	if (!config.liberty_files.empty() || !config.genlib_files.empty()) {
 		std::string dont_use_args;
@@ -1059,8 +1071,8 @@ void AbcModuleState::prepare_module(RTLIL::Design *design, RTLIL::Module *module
 	for (size_t pos = abc_script.find("{S}"); pos != std::string::npos; pos = abc_script.find("{S}", pos))
 		abc_script = abc_script.substr(0, pos) + config.lutin_shared + abc_script.substr(pos+3);
 	if (config.abc_dress)
-		abc_script += stringf("; dress \"%s/input.blif\"", run_abc.tempdir_name);
-	abc_script += stringf("; write_blif %s/output.blif", run_abc.tempdir_name);
+		abc_script += stringf("; dress \"%s/input.blif\"", run_abc.per_run_tempdir_name);
+	abc_script += stringf("; write_blif %s/output.blif", run_abc.per_run_tempdir_name);
 	abc_script = add_echos_to_abc_cmd(abc_script);
 #if defined(__linux__) && !defined(YOSYS_DISABLE_SPAWN)
 	abc_script += "; echo; echo \"YOSYS_ABC_DONE\"\n";
@@ -1070,7 +1082,7 @@ void AbcModuleState::prepare_module(RTLIL::Design *design, RTLIL::Module *module
 		if (abc_script[i] == ';' && abc_script[i+1] == ' ')
 			abc_script[i+1] = '\n';
 
-	std::string buffer = stringf("%s/abc.script", run_abc.tempdir_name);
+	std::string buffer = stringf("%s/abc.script", run_abc.per_run_tempdir_name);
 	FILE *f = fopen(buffer.c_str(), "wt");
 	if (f == nullptr)
 		log_error("Opening %s for writing failed: %s\n", buffer, strerror(errno));
@@ -1167,7 +1179,7 @@ bool read_until_abc_done(abc_output_filter &filt, int fd, DeferredLogs &logs) {
 
 void RunAbcState::run(ConcurrentStack<AbcProcess> &process_pool)
 {
-	std::string buffer = stringf("%s/input.blif", tempdir_name);
+	std::string buffer = stringf("%s/input.blif", per_run_tempdir_name);
 	FILE *f = fopen(buffer.c_str(), "wt");
 	if (f == nullptr) {
 		logs.log("Opening %s for writing failed: %s\n", buffer, strerror(errno));
@@ -1292,13 +1304,13 @@ void RunAbcState::run(ConcurrentStack<AbcProcess> &process_pool)
 			count_gates, GetSize(signal_list), count_input, count_output);
 	if (count_output > 0)
 	{
-		std::string tmp_script_name = stringf("%s/abc.script", tempdir_name);
-		logs.log("Running ABC script: %s\n", replace_tempdir(tmp_script_name, tempdir_name, config.show_tempdir));
+		std::string tmp_script_name = stringf("%s/abc.script", per_run_tempdir_name);
+		logs.log("Running ABC script: %s\n", replace_tempdir(tmp_script_name, config.global_tempdir_name, per_run_tempdir_name, config.show_tempdir));
 
 		errno = 0;
-		abc_output_filter filt(*this, tempdir_name, config.show_tempdir);
+		abc_output_filter filt(*this, config.global_tempdir_name, per_run_tempdir_name, config.show_tempdir);
 #ifdef YOSYS_LINK_ABC
-		string temp_stdouterr_name = stringf("%s/stdouterr.txt", tempdir_name);
+		string temp_stdouterr_name = stringf("%s/stdouterr.txt", per_run_tempdir_name);
 		FILE *temp_stdouterr_w = fopen(temp_stdouterr_name.c_str(), "w");
 		if (temp_stdouterr_w == NULL)
 			log_error("ABC: cannot open a temporary file for output redirection");
@@ -1360,7 +1372,7 @@ void RunAbcState::run(ConcurrentStack<AbcProcess> &process_pool)
 			process_pool.push_back(std::move(process));
 		}
 #else
-		std::string cmd = stringf("\"%s\" -s -f %s/abc.script 2>&1", config.exe_file.c_str(), tempdir_name.c_str());
+		std::string cmd = stringf("\"%s\" -s -f %s/abc.script 2>&1", config.exe_file.c_str(), per_run_tempdir_name.c_str());
 		int ret = run_command(cmd, std::bind(&abc_output_filter::next_line, filt, std::placeholders::_1));
 #endif
 		if (ret != 0) {
@@ -1442,7 +1454,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, dict<SigSpec, std::string> &
 		return;
 	}
 
-	std::string buffer = stringf("%s/%s", run_abc.tempdir_name, "output.blif");
+	std::string buffer = stringf("%s/%s", run_abc.per_run_tempdir_name, "output.blif");
 	std::ifstream ifs;
 	ifs.open(buffer);
 	if (ifs.fail())
@@ -1797,7 +1809,7 @@ void AbcModuleState::finish()
 	if (run_abc.config.cleanup)
 	{
 		log("Removing temp directory.\n");
-		remove_directory(run_abc.tempdir_name);
+		remove_directory(run_abc.per_run_tempdir_name);
 	}
 	log_pop();
 }
