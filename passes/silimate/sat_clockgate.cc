@@ -200,12 +200,12 @@ struct SatClockgateWorker
 	}
 	
 	// Simple random simulation test to quickly prune candidates
-	bool simulationTest(SigBit candidate, SigSpec sig_d, SigSpec sig_q, bool as_enable)
-	{
-		// For now, skip simulation and go straight to SAT
-		// TODO: Implement random simulation for faster pruning
-		return true;
-	}
+	// bool simulationTest(SigBit candidate, SigSpec sig_d, SigSpec sig_q, bool as_enable)
+	// {
+	// 	// For now, skip simulation and go straight to SAT
+	// 	// TODO: Implement random simulation for faster pruning
+	// 	return true;
+	// }
 	
 	// Binary search to minimize the gating condition set
 	// Tries to remove half of the signals at a time
@@ -440,10 +440,15 @@ struct SatClockgateWorker
 				continue;
 			}
 			
-			// Create signature for this gating condition
-			std::string sig;
+			// Create signature for this gating condition (sorted by SAT literal ID for permutation invariance)
+			std::vector<std::pair<int, SigBit>> sorted;
 			for (auto bit : gating_conds)
-				sig += log_signal(bit) + ",";
+				sorted.push_back({satgen.importSigSpec(SigSpec(bit))[0], bit});
+			std::sort(sorted.begin(), sorted.end());
+			
+			std::string sig;
+			for (auto &[id, bit] : sorted)
+				sig += std::to_string(id) + ",";
 			sig += is_enable ? "E" : "D";
 			
 			// Check if we already have this condition
