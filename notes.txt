@@ -356,7 +356,6 @@ Recommendation:
 
 TODOs:
 1) Convert from the string hash to an integer hash
-2) Use is_builtin_ff
 3) See why this path is needed:
 	 		if (ff.has_ce) {
 				// Already has CE, AND with new condition

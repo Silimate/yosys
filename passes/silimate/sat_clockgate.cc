@@ -419,8 +419,8 @@ struct SatClockgateWorker
 		log("  Found %zu registers without CE\n", registers.size());
 		
 		// Track accepted gating conditions for reuse
-		// Maps condition signature to (condition signals, registers, is_enable)
-		dict<std::string, std::tuple<std::vector<SigBit>, std::vector<Cell*>, bool>> accepted_gates;
+		// Key: (sorted literal IDs, is_enable) -> (condition signals, registers)
+		std::map<std::pair<std::vector<int>, bool>, std::pair<std::vector<SigBit>, std::vector<Cell*>>> accepted_gates;
 		
 		int processed = 0;
 		for (auto reg : registers) {
@@ -437,33 +437,32 @@ struct SatClockgateWorker
 				continue;
 			}
 			
-			// Create signature for this gating condition (sorted by SAT literal ID for permutation invariance)
-			std::vector<std::pair<int, SigBit>> sorted;
+			// Create signature for this gating condition (sorted literal IDs for permutation invariance)
+			std::vector<int> sorted_ids;
+			sorted_ids.reserve(gating_conds.size());
 			for (auto bit : gating_conds)
-				sorted.push_back({satgen.importSigSpec(SigSpec(bit))[0], bit});
-			std::sort(sorted.begin(), sorted.end());
+				sorted_ids.push_back(satgen.importSigSpec(SigSpec(bit))[0]);
+			std::sort(sorted_ids.begin(), sorted_ids.end());
 			
-			std::string sig;
-			for (auto &[id, bit] : sorted)
-				sig += std::to_string(id) + ",";
-			sig += is_enable ? "E" : "D";
+			auto key = std::make_pair(std::move(sorted_ids), is_enable);
 			
 			// Check if we already have this condition
-			if (accepted_gates.count(sig)) {
-				auto &[conds, regs, en] = accepted_gates[sig];
-				regs.push_back(reg);
+			auto it = accepted_gates.find(key);
+			if (it != accepted_gates.end()) {
+				it->second.second.push_back(reg);
 				log_debug("  Reusing existing gating condition for %s\n", log_id(reg));
 			} else {
-				accepted_gates[sig] = {gating_conds, {reg}, is_enable};
-				log("  Found new gating condition for %s: %s (%s)\n",
-				    log_id(reg), sig.c_str(), is_enable ? "enable" : "disable");
+				accepted_gates[key] = {gating_conds, {reg}};
+				log("  Found new gating condition for %s (%s)\n",
+				    log_id(reg), is_enable ? "enable" : "disable");
 			}
 		}
 		
 		// Insert clock gates for groups that meet minimum register threshold
 		int gates_inserted = 0;
-		for (auto &[sig, data] : accepted_gates) {
-			auto &[conds, regs, is_enable] = data;
+		for (auto &[key, data] : accepted_gates) {
+			bool is_enable = key.second;
+			auto &[conds, regs] = data;
 			
 			if ((int)regs.size() >= min_regs) {
 				insertClockGate(regs, conds, is_enable);
