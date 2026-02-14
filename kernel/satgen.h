@@ -101,16 +101,11 @@ struct SatGen
 				else
 					vec.push_back(bit == (undef_mode ? RTLIL::State::Sx : RTLIL::State::S1) ? ez->CONST_TRUE : ez->CONST_FALSE);
 			} else {
-				// Check cache first to avoid creating duplicate literals
-				if (imported_signals[pf].count(bit)) {
-					vec.push_back(imported_signals[pf].at(bit));
-				} else {
-					std::string wire_name = RTLIL::unescape_id(bit.wire->name);
-					std::string name = pf +
-						(bit.wire->width == 1 ? wire_name : stringf("%s [%d]", wire_name, bit.offset));
-					vec.push_back(ez->frozen_literal(name));
-					imported_signals[pf][bit] = vec.back();
-				}
+				std::string wire_name = RTLIL::unescape_id(bit.wire->name);
+				std::string name = pf +
+					(bit.wire->width == 1 ? wire_name : stringf("%s [%d]", wire_name, bit.offset));
+				vec.push_back(ez->frozen_literal(name));
+				imported_signals[pf][bit] = vec.back();
 			}
 		return vec;
 	}
