@@ -28,7 +28,7 @@ PRIVATE_NAMESPACE_BEGIN
 
 // Configuration
 static const int DEFAULT_MAX_COVER = 100;      // Max candidate signals to consider
-static const int DEFAULT_MIN_REGS = 1;         // Min registers per clock gate
+static const int DEFAULT_MIN_REGS = 3;         // Min registers per clock gate
 static const int DEFAULT_SIM_ITERATIONS = 10;  // Random simulation iterations for pruning
 
 struct SatClockgateWorker
@@ -315,7 +315,6 @@ struct SatClockgateWorker
 			minimizeGatingCondition(candidates, candidates.begin(), candidates.end(),
 			                        ff.sig_d, ff.sig_q, true);
 			if (!candidates.empty()) {
-				accepted_count++;
 				return {candidates, true};  // true = clock enable
 			}
 		}
@@ -325,7 +324,6 @@ struct SatClockgateWorker
 			minimizeGatingCondition(candidates, candidates.begin(), candidates.end(),
 			                        ff.sig_d, ff.sig_q, false);
 			if (!candidates.empty()) {
-				accepted_count++;
 				return {candidates, false};  // false = clock disable
 			}
 		}
@@ -385,7 +383,6 @@ struct SatClockgateWorker
 			}
 			
 			ff.emit();
-			log("    Added CE to %s\n", log_id(reg));
 		}
 	}
 	
@@ -471,6 +468,7 @@ struct SatClockgateWorker
 			if ((int)regs.size() >= min_regs) {
 				insertClockGate(regs, conds, is_enable);
 				gates_inserted++;
+				accepted_count += regs.size();
 			} else {
 				log_debug("  Skipping gating condition (only %zu registers, need %d)\n",
 				          regs.size(), min_regs);
@@ -480,6 +478,8 @@ struct SatClockgateWorker
 		log("  Inserted %d clock gates\n", gates_inserted);
 		log("  Statistics: accepted=%d, rejected_sat=%d\n",
 		    accepted_count, rejected_sat_count);
+		log("  SAT stats: literals=%d, expressions=%d\n",
+		    ez->numLiterals(), ez->numExpressions());
 	}
 };
 
