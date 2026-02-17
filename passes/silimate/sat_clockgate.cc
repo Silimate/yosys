@@ -631,6 +631,7 @@ struct SatClockgatePass : public Pass {
 		std::string clockgate_cmd = "clockgate";
 		for (auto &arg : clockgate_args)
 			clockgate_cmd += " " + arg;
+		log("Calling clockgate with args: %s\n", clockgate_cmd);
 		Pass::call(design, clockgate_cmd);
 	}
 } SatClockgatePass;
