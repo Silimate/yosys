@@ -22,9 +22,76 @@
 #include "kernel/satgen.h"
 #include <queue>
 #include <algorithm>
+#include <fstream>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
+
+// Profile all flip-flops and write to file
+void profileFlipFlops(Module *module, const std::string &filename, const std::string &label)
+{
+	std::ofstream out(filename, std::ios::app);
+	out << "\n=== " << label << " ===\n";
+	out << "Module: " << log_id(module) << "\n\n";
+	
+	int total_ffs = 0;
+	int ffs_with_ce = 0;
+	int ffs_with_arst = 0;
+	int ffs_with_srst = 0;
+	int total_bits = 0;
+	int bits_with_ce = 0;
+	
+	for (auto cell : module->cells()) {
+		if (!cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
+		                   ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
+		                   ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
+		                   ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
+			continue;
+		
+		FfData ff(nullptr, cell);
+		total_ffs++;
+		total_bits += ff.width;
+		
+		out << "FF: " << log_id(cell) << "\n";
+		out << "  type:     " << log_id(cell->type) << "\n";
+		out << "  width:    " << ff.width << "\n";
+		out << "  has_clk:  " << (ff.has_clk ? "yes" : "no") << "\n";
+		out << "  has_ce:   " << (ff.has_ce ? "yes" : "no");
+		if (ff.has_ce) {
+			out << " (sig_ce: " << log_signal(ff.sig_ce) << ", pol: " << (ff.pol_ce ? "active-high" : "active-low") << ")";
+			ffs_with_ce++;
+			bits_with_ce += ff.width;
+		}
+		out << "\n";
+		out << "  has_arst: " << (ff.has_arst ? "yes" : "no");
+		if (ff.has_arst) {
+			out << " (sig_arst: " << log_signal(ff.sig_arst) << ")";
+			ffs_with_arst++;
+		}
+		out << "\n";
+		out << "  has_srst: " << (ff.has_srst ? "yes" : "no");
+		if (ff.has_srst) {
+			out << " (sig_srst: " << log_signal(ff.sig_srst) << ")";
+			ffs_with_srst++;
+		}
+		out << "\n";
+		out << "  sig_clk:  " << log_signal(ff.sig_clk) << "\n";
+		out << "  sig_d:    " << log_signal(ff.sig_d) << "\n";
+		out << "  sig_q:    " << log_signal(ff.sig_q) << "\n";
+		out << "\n";
+	}
+	
+	out << "--- Summary ---\n";
+	out << "Total FFs:      " << total_ffs << "\n";
+	out << "Total bits:     " << total_bits << "\n";
+	out << "FFs with CE:    " << ffs_with_ce << " (" << (total_ffs ? 100*ffs_with_ce/total_ffs : 0) << "%)\n";
+	out << "Bits with CE:   " << bits_with_ce << " (" << (total_bits ? 100*bits_with_ce/total_bits : 0) << "%)\n";
+	out << "FFs with ARST:  " << ffs_with_arst << "\n";
+	out << "FFs with SRST:  " << ffs_with_srst << "\n";
+	out << "\n";
+	
+	out.close();
+}
 
 // Configuration
 static const int DEFAULT_MAX_COVER = 100;      // Max candidate signals to consider
@@ -532,12 +599,24 @@ struct SatClockgatePass : public Pass {
 		
 		log("Configuration: max_cover=%d, min_regs=%d\n", max_cover, min_regs);
 		
+		// Clear profile file and write header
+		std::ofstream clear_file("ff_profile.txt", std::ios::trunc);
+		clear_file << "Flip-Flop Profile Report\n";
+		clear_file << "========================\n";
+		clear_file.close();
+		
 		int total_gates = 0;
 		
 		for (auto module : design->selected_modules()) {
+			// Profile BEFORE clock gating
+			profileFlipFlops(module, "ff_profile.txt", "BEFORE sat_clockgate");
+			
 			SatClockgateWorker worker(module, max_cover, min_regs, sim_iterations);
 			worker.run();
 			total_gates += worker.accepted_count;
+			
+			// Profile AFTER clock gating
+			profileFlipFlops(module, "ff_profile.txt", "AFTER sat_clockgate");
 		}
 		
 		log("Total clock gates inserted: %d\n", total_gates);
