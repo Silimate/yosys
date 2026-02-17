@@ -95,7 +95,7 @@ void profileFlipFlops(Module *module, const std::string &filename, const std::st
 
 // Configuration
 static const int DEFAULT_MAX_COVER = 100;      // Max candidate signals to consider
-static const int DEFAULT_MIN_REGS = 3;         // Min registers per clock gate
+static const int DEFAULT_MIN_REGS = 10;         // Min registers per clock gate
 static const int DEFAULT_SIM_ITERATIONS = 10;  // Random simulation iterations for pruning
 
 struct SatClockgateWorker
