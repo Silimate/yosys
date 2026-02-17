@@ -23,6 +23,7 @@
 #include <queue>
 #include <algorithm>
 #include <fstream>
+#include <random>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -118,6 +119,10 @@ struct SatClockgateWorker
 	ezSatPtr ez;
 	SatGen satgen;
 	
+	// Simulation infrastructure
+	std::vector<Cell*> topo_order;  // Cells in topological order for simulation
+	std::mt19937 rng;               // Random number generator
+	
 	// Statistics
 	int accepted_count = 0;
 	int rejected_sim_count = 0;
@@ -126,7 +131,7 @@ struct SatClockgateWorker
 	SatClockgateWorker(Module *module, int max_cover, int min_regs, int sim_iterations)
 		: module(module), sigmap(module), 
 		  max_cover(max_cover), min_regs(min_regs), sim_iterations(sim_iterations),
-		  ez(), satgen(ez.get(), &sigmap)
+		  ez(), satgen(ez.get(), &sigmap), rng(42)
 	{
 		// Build driver and sink maps
 		for (auto cell : module->cells()) {
@@ -151,6 +156,233 @@ struct SatClockgateWorker
 			                   ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
 			                   ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
 				satgen.importCell(cell);
+		
+		// Build topological order for simulation
+		buildTopoOrder();
+	}
+	
+	// Build topological order of combinational cells for simulation
+	void buildTopoOrder()
+	{
+		dict<Cell*, int> cell_deps;  // Number of unresolved input dependencies
+		dict<SigBit, pool<Cell*>> bit_to_cells;  // Which cells need this bit
+		
+		for (auto cell : module->cells()) {
+			// Skip FFs
+			if (cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
+			                  ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
+			                  ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
+			                  ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
+				continue;
+			
+			int deps = 0;
+			for (auto &conn : cell->connections()) {
+				if (cell->input(conn.first)) {
+					for (auto bit : sigmap(conn.second)) {
+						if (bit.wire && sig_to_driver.count(bit)) {
+							Cell *driver = sig_to_driver[bit];
+							if (!driver->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
+							                     ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
+							                     ID($dffsre), ID($_DFF_P_), ID($_DFF_N_))) {
+								deps++;
+								bit_to_cells[bit].insert(cell);
+							}
+						}
+					}
+				}
+			}
+			cell_deps[cell] = deps;
+		}
+		
+		// Kahn's algorithm
+		std::queue<Cell*> ready;
+		for (auto &[cell, deps] : cell_deps) {
+			if (deps == 0)
+				ready.push(cell);
+		}
+		
+		while (!ready.empty()) {
+			Cell *cell = ready.front();
+			ready.pop();
+			topo_order.push_back(cell);
+			
+			// Decrement deps for cells that depend on this cell's outputs
+			for (auto &conn : cell->connections()) {
+				if (cell->output(conn.first)) {
+					for (auto bit : sigmap(conn.second)) {
+						for (auto sink : bit_to_cells[bit]) {
+							if (--cell_deps[sink] == 0)
+								ready.push(sink);
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	// Evaluate a single cell given current simulation values
+	void evaluateCell(Cell *cell, dict<SigBit, bool> &sim_values)
+	{
+		auto getSigVal = [&](SigSpec sig) -> std::vector<bool> {
+			std::vector<bool> vals;
+			for (auto bit : sigmap(sig)) {
+				if (bit.wire) {
+					vals.push_back(sim_values.count(bit) ? sim_values[bit] : false);
+				} else {
+					vals.push_back(bit.data == State::S1);
+				}
+			}
+			return vals;
+		};
+		
+		auto setSigVal = [&](SigSpec sig, const std::vector<bool> &vals) {
+			int i = 0;
+			for (auto bit : sigmap(sig)) {
+				if (bit.wire && i < (int)vals.size())
+					sim_values[bit] = vals[i];
+				i++;
+			}
+		};
+		
+		if (cell->type == ID($not) || cell->type == ID($_NOT_)) {
+			auto a = getSigVal(cell->getPort(ID::A));
+			std::vector<bool> y(a.size());
+			for (size_t i = 0; i < a.size(); i++)
+				y[i] = !a[i];
+			setSigVal(cell->getPort(ID::Y), y);
+		}
+		else if (cell->type == ID($and) || cell->type == ID($_AND_)) {
+			auto a = getSigVal(cell->getPort(ID::A));
+			auto b = getSigVal(cell->getPort(ID::B));
+			std::vector<bool> y(std::max(a.size(), b.size()));
+			for (size_t i = 0; i < y.size(); i++)
+				y[i] = (i < a.size() ? a[i] : false) && (i < b.size() ? b[i] : false);
+			setSigVal(cell->getPort(ID::Y), y);
+		}
+		else if (cell->type == ID($or) || cell->type == ID($_OR_)) {
+			auto a = getSigVal(cell->getPort(ID::A));
+			auto b = getSigVal(cell->getPort(ID::B));
+			std::vector<bool> y(std::max(a.size(), b.size()));
+			for (size_t i = 0; i < y.size(); i++)
+				y[i] = (i < a.size() ? a[i] : false) || (i < b.size() ? b[i] : false);
+			setSigVal(cell->getPort(ID::Y), y);
+		}
+		else if (cell->type == ID($xor) || cell->type == ID($_XOR_)) {
+			auto a = getSigVal(cell->getPort(ID::A));
+			auto b = getSigVal(cell->getPort(ID::B));
+			std::vector<bool> y(std::max(a.size(), b.size()));
+			for (size_t i = 0; i < y.size(); i++)
+				y[i] = (i < a.size() ? a[i] : false) != (i < b.size() ? b[i] : false);
+			setSigVal(cell->getPort(ID::Y), y);
+		}
+		else if (cell->type == ID($mux) || cell->type == ID($_MUX_)) {
+			auto a = getSigVal(cell->getPort(ID::A));
+			auto b = getSigVal(cell->getPort(ID::B));
+			auto s = getSigVal(cell->getPort(ID::S));
+			bool sel = s.empty() ? false : s[0];
+			setSigVal(cell->getPort(ID::Y), sel ? b : a);
+		}
+		else if (cell->type == ID($reduce_and)) {
+			auto a = getSigVal(cell->getPort(ID::A));
+			bool result = true;
+			for (auto v : a) result = result && v;
+			setSigVal(cell->getPort(ID::Y), {result});
+		}
+		else if (cell->type == ID($reduce_or)) {
+			auto a = getSigVal(cell->getPort(ID::A));
+			bool result = false;
+			for (auto v : a) result = result || v;
+			setSigVal(cell->getPort(ID::Y), {result});
+		}
+		else if (cell->type == ID($eq)) {
+			auto a = getSigVal(cell->getPort(ID::A));
+			auto b = getSigVal(cell->getPort(ID::B));
+			bool result = (a == b);
+			setSigVal(cell->getPort(ID::Y), {result});
+		}
+		else if (cell->type == ID($ne)) {
+			auto a = getSigVal(cell->getPort(ID::A));
+			auto b = getSigVal(cell->getPort(ID::B));
+			bool result = (a != b);
+			setSigVal(cell->getPort(ID::Y), {result});
+		}
+		// Add more cell types as needed - for now, unknown cells just pass through
+	}
+	
+	// Run simulation with random inputs, check if gating_active & (D != Q) is ever true
+	// Returns false if counterexample found (candidate is definitely invalid)
+	bool simulationTest(const std::vector<SigBit> &conds, SigSpec sig_d, SigSpec sig_q, bool as_enable)
+	{
+		for (int iter = 0; iter < sim_iterations; iter++) {
+			dict<SigBit, bool> sim_values;
+			
+			// Initialize all input ports and FF outputs with random values
+			for (auto wire : module->wires()) {
+				if (wire->port_input) {
+					for (int i = 0; i < wire->width; i++)
+						sim_values[SigBit(wire, i)] = (rng() & 1);
+				}
+			}
+			
+			// Also randomize FF Q outputs (they're inputs to combinational logic)
+			for (auto cell : module->cells()) {
+				if (cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
+				                  ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
+				                  ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
+				                  ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_))) {
+					FfData ff(nullptr, cell);
+					for (auto bit : sigmap(ff.sig_q))
+						if (bit.wire)
+							sim_values[bit] = (rng() & 1);
+				}
+			}
+			
+			// Propagate through combinational logic in topological order
+			for (auto cell : topo_order)
+				evaluateCell(cell, sim_values);
+			
+			// Evaluate gating condition
+			bool combined_cond;
+			if (as_enable) {
+				// OR of conditions
+				combined_cond = false;
+				for (auto bit : conds) {
+					SigBit mapped = sigmap(bit);
+					if (sim_values.count(mapped) && sim_values[mapped])
+						combined_cond = true;
+				}
+			} else {
+				// AND of conditions
+				combined_cond = true;
+				for (auto bit : conds) {
+					SigBit mapped = sigmap(bit);
+					if (!sim_values.count(mapped) || !sim_values[mapped])
+						combined_cond = false;
+				}
+			}
+			
+			bool gating_active = as_enable ? !combined_cond : combined_cond;
+			
+			// Check D != Q
+			bool d_ne_q = false;
+			for (int i = 0; i < sig_d.size(); i++) {
+				SigBit d_bit = sigmap(sig_d[i]);
+				SigBit q_bit = sigmap(sig_q[i]);
+				bool d_val = sim_values.count(d_bit) ? sim_values[d_bit] : false;
+				bool q_val = sim_values.count(q_bit) ? sim_values[q_bit] : false;
+				if (d_val != q_val) {
+					d_ne_q = true;
+					break;
+				}
+			}
+			
+			// If gating is active and D != Q, this is a counterexample
+			if (gating_active && d_ne_q) {
+				rejected_sim_count++;
+				return false;
+			}
+		}
+		return true;  // No counterexample found
 	}
 	
 	// Get downstream signals from a register (BFS forward through combinational logic)
@@ -266,14 +498,6 @@ struct SatClockgateWorker
 		return !ez->solve(dummy_exprs, dummy_vals, assumptions);
 	}
 	
-	// Simple random simulation test to quickly prune candidates
-	// bool simulationTest(SigBit candidate, SigSpec sig_d, SigSpec sig_q, bool as_enable)
-	// {
-	// 	// For now, skip simulation and go straight to SAT
-	// 	// TODO: Implement random simulation for faster pruning
-	// 	return true;
-	// }
-	
 	// Binary search to minimize the gating condition set
 	// Tries to remove half of the signals at a time
 	void minimizeGatingCondition(
@@ -308,11 +532,19 @@ struct SatClockgateWorker
 	}
 	
 	// Check if OR/AND of signals forms a valid gating condition
+	// Uses simulation first to quickly prune invalid candidates, then SAT to prove
 	bool isValidGatingSet(const std::vector<SigBit> &conds, SigSpec sig_d, SigSpec sig_q, bool as_enable)
 	{
 		if (conds.empty())
 			return false;
 		
+		// Quick simulation filter first - catches most invalid candidates fast
+		if (!simulationTest(conds, sig_d, sig_q, as_enable)) {
+			log_debug("    Rejected by simulation\n");
+			return false;
+		}
+		
+		// SAT only if simulation passes
 		std::vector<int> d_vec = satgen.importSigSpec(sig_d);
 		std::vector<int> q_vec = satgen.importSigSpec(sig_q);
 		
@@ -340,7 +572,10 @@ struct SatClockgateWorker
 		std::vector<int> dummy_exprs;
 		std::vector<bool> dummy_vals;
 		
-		return !ez->solve(dummy_exprs, dummy_vals, assumptions);
+		bool is_valid = !ez->solve(dummy_exprs, dummy_vals, assumptions);
+		if (!is_valid)
+			rejected_sat_count++;
+		return is_valid;
 	}
 	
 	// Find gating condition for a register
@@ -395,7 +630,6 @@ struct SatClockgateWorker
 			}
 		}
 		
-		rejected_sat_count++;
 		return {{}, false};
 	}
 	
@@ -582,8 +816,8 @@ struct SatClockgateWorker
 		}
 		
 		log("  Inserted %d clock gates\n", gates_inserted);
-		log("  Statistics: accepted=%d, rejected_sat=%d\n",
-		    accepted_count, rejected_sat_count);
+		log("  Statistics: accepted=%d, rejected_sim=%d, rejected_sat=%d\n",
+		    accepted_count, rejected_sim_count, rejected_sat_count);
 		log("  SAT stats: literals=%d, expressions=%d\n",
 		    ez->numLiterals(), ez->numExpressions());
 	}
