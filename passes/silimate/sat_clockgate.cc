@@ -453,6 +453,14 @@ struct SatClockgateWorker
 		}
 	}
 	
+	// Check if register can be added to an existing gate (subset/superset matching)
+	// Returns true if the existing gate's condition is a valid gating condition for this register
+	bool canReuseGate(const std::vector<SigBit> &existing_conds, Cell *reg, bool is_enable)
+	{
+		FfData ff(nullptr, reg);
+		return isValidGatingSet(existing_conds, ff.sig_d, ff.sig_q, is_enable);
+	}
+	
 	// Main processing function
 	void run()
 	{
@@ -485,9 +493,16 @@ struct SatClockgateWorker
 		
 		log("  Found %zu registers without CE\n", registers.size());
 		
-		// Track accepted gating conditions for reuse
-		// Key: (sorted literal IDs, is_enable) -> (condition signals, registers)
-		std::map<std::pair<std::vector<int>, bool>, std::pair<std::vector<SigBit>, std::vector<Cell*>>> accepted_gates;
+		// Inverted index approach: net -> list of gate indices containing that net
+		// This allows finding subsets/supersets, not just exact matches
+		struct AcceptedGate {
+			std::vector<SigBit> conds;
+			pool<SigBit> cond_set;  // For fast subset/superset checks
+			std::vector<Cell*> regs;
+			bool is_enable;
+		};
+		std::vector<AcceptedGate> accepted_gates;
+		dict<SigBit, std::vector<size_t>> net_to_accepted;  // Inverted index
 		
 		int processed = 0;
 		for (auto reg : registers) {
@@ -504,22 +519,50 @@ struct SatClockgateWorker
 				continue;
 			}
 			
-			// Create signature for this gating condition (sorted literal IDs for permutation invariance)
-			std::vector<int> sorted_ids;
-			sorted_ids.reserve(gating_conds.size());
+			// Build set of condition signals for this register
+			pool<SigBit> cond_set;
 			for (auto bit : gating_conds)
-				sorted_ids.push_back(satgen.importSigSpec(SigSpec(bit))[0]);
-			std::sort(sorted_ids.begin(), sorted_ids.end());
+				cond_set.insert(bit);
 			
-			auto key = std::make_pair(std::move(sorted_ids), is_enable);
+			// Find all accepted gates sharing any net with this register's condition
+			pool<size_t> candidate_gates;
+			for (auto bit : gating_conds) {
+				if (net_to_accepted.count(bit)) {
+					for (auto idx : net_to_accepted[bit])
+						candidate_gates.insert(idx);
+				}
+			}
 			
-			// Check if we already have this condition
-			auto it = accepted_gates.find(key);
-			if (it != accepted_gates.end()) {
-				it->second.second.push_back(reg);
-				log_debug("  Reusing existing gating condition for %s\n", log_id(reg));
-			} else {
-				accepted_gates[key] = {gating_conds, {reg}};
+			// Try to find a compatible existing gate (SAT-verify each candidate)
+			bool found_match = false;
+			for (auto idx : candidate_gates) {
+				auto &gate = accepted_gates[idx];
+				
+				// Must match enable/disable polarity
+				if (gate.is_enable != is_enable)
+					continue;
+				
+				// Check if existing gate's condition works for this register
+				// This allows: gate condition {x,y} can work for register with {x,y,z}
+				// (existing is subset) or register with {x} (existing is superset)
+				if (canReuseGate(gate.conds, reg, is_enable)) {
+					gate.regs.push_back(reg);
+					log_debug("  Reusing existing gate %zu for %s (flexible match)\n", 
+					          idx, log_id(reg));
+					found_match = true;
+					break;
+				}
+			}
+			
+			if (!found_match) {
+				// Create new accepted gate
+				size_t new_idx = accepted_gates.size();
+				accepted_gates.push_back({gating_conds, cond_set, {reg}, is_enable});
+				
+				// Update inverted index
+				for (auto bit : gating_conds)
+					net_to_accepted[bit].push_back(new_idx);
+				
 				log("  Found new gating condition for %s (%s)\n",
 				    log_id(reg), is_enable ? "enable" : "disable");
 			}
@@ -527,17 +570,14 @@ struct SatClockgateWorker
 		
 		// Insert clock gates for groups that meet minimum register threshold
 		int gates_inserted = 0;
-		for (auto &[key, data] : accepted_gates) {
-			bool is_enable = key.second;
-			auto &[conds, regs] = data;
-			
-			if ((int)regs.size() >= min_regs) {
-				insertClockGate(regs, conds, is_enable);
+		for (auto &gate : accepted_gates) {
+			if ((int)gate.regs.size() >= min_regs) {
+				insertClockGate(gate.regs, gate.conds, gate.is_enable);
 				gates_inserted++;
-				accepted_count += regs.size();
+				accepted_count += gate.regs.size();
 			} else {
 				log_debug("  Skipping gating condition (only %zu registers, need %d)\n",
-				          regs.size(), min_regs);
+				          gate.regs.size(), min_regs);
 			}
 		}
 		
