@@ -20,6 +20,7 @@
 #include "kernel/sigtools.h"
 #include "kernel/ff.h"
 #include "kernel/satgen.h"
+#include "kernel/consteval.h"
 #include <queue>
 #include <algorithm>
 #include <fstream>
@@ -119,9 +120,8 @@ struct SatClockgateWorker
 	ezSatPtr ez;
 	SatGen satgen;
 	
-	// Simulation infrastructure
-	std::vector<Cell*> topo_order;  // Cells in topological order for simulation
-	std::mt19937 rng;               // Random number generator
+	// Random number generator for simulation
+	std::mt19937 rng;
 	
 	// Statistics
 	int accepted_count = 0;
@@ -156,223 +156,78 @@ struct SatClockgateWorker
 			                   ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
 			                   ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
 				satgen.importCell(cell);
-		
-		// Build topological order for simulation
-		buildTopoOrder();
 	}
 	
-	// Build topological order of combinational cells for simulation
-	void buildTopoOrder()
-	{
-		dict<Cell*, int> cell_deps;  // Number of unresolved input dependencies
-		dict<SigBit, pool<Cell*>> bit_to_cells;  // Which cells need this bit
-		
-		for (auto cell : module->cells()) {
-			// Skip FFs
-			if (cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
-			                  ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
-			                  ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
-			                  ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
-				continue;
-			
-			int deps = 0;
-			for (auto &conn : cell->connections()) {
-				if (cell->input(conn.first)) {
-					for (auto bit : sigmap(conn.second)) {
-						if (bit.wire && sig_to_driver.count(bit)) {
-							Cell *driver = sig_to_driver[bit];
-							if (!driver->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
-							                     ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
-							                     ID($dffsre), ID($_DFF_P_), ID($_DFF_N_))) {
-								deps++;
-								bit_to_cells[bit].insert(cell);
-							}
-						}
-					}
-				}
-			}
-			cell_deps[cell] = deps;
-		}
-		
-		// Kahn's algorithm
-		std::queue<Cell*> ready;
-		for (auto &[cell, deps] : cell_deps) {
-			if (deps == 0)
-				ready.push(cell);
-		}
-		
-		while (!ready.empty()) {
-			Cell *cell = ready.front();
-			ready.pop();
-			topo_order.push_back(cell);
-			
-			// Decrement deps for cells that depend on this cell's outputs
-			for (auto &conn : cell->connections()) {
-				if (cell->output(conn.first)) {
-					for (auto bit : sigmap(conn.second)) {
-						for (auto sink : bit_to_cells[bit]) {
-							if (--cell_deps[sink] == 0)
-								ready.push(sink);
-						}
-					}
-				}
-			}
-		}
-	}
-	
-	// Evaluate a single cell given current simulation values
-	void evaluateCell(Cell *cell, dict<SigBit, bool> &sim_values)
-	{
-		auto getSigVal = [&](SigSpec sig) -> std::vector<bool> {
-			std::vector<bool> vals;
-			for (auto bit : sigmap(sig)) {
-				if (bit.wire) {
-					vals.push_back(sim_values.count(bit) ? sim_values[bit] : false);
-				} else {
-					vals.push_back(bit.data == State::S1);
-				}
-			}
-			return vals;
-		};
-		
-		auto setSigVal = [&](SigSpec sig, const std::vector<bool> &vals) {
-			int i = 0;
-			for (auto bit : sigmap(sig)) {
-				if (bit.wire && i < (int)vals.size())
-					sim_values[bit] = vals[i];
-				i++;
-			}
-		};
-		
-		if (cell->type == ID($not) || cell->type == ID($_NOT_)) {
-			auto a = getSigVal(cell->getPort(ID::A));
-			std::vector<bool> y(a.size());
-			for (size_t i = 0; i < a.size(); i++)
-				y[i] = !a[i];
-			setSigVal(cell->getPort(ID::Y), y);
-		}
-		else if (cell->type == ID($and) || cell->type == ID($_AND_)) {
-			auto a = getSigVal(cell->getPort(ID::A));
-			auto b = getSigVal(cell->getPort(ID::B));
-			std::vector<bool> y(std::max(a.size(), b.size()));
-			for (size_t i = 0; i < y.size(); i++)
-				y[i] = (i < a.size() ? a[i] : false) && (i < b.size() ? b[i] : false);
-			setSigVal(cell->getPort(ID::Y), y);
-		}
-		else if (cell->type == ID($or) || cell->type == ID($_OR_)) {
-			auto a = getSigVal(cell->getPort(ID::A));
-			auto b = getSigVal(cell->getPort(ID::B));
-			std::vector<bool> y(std::max(a.size(), b.size()));
-			for (size_t i = 0; i < y.size(); i++)
-				y[i] = (i < a.size() ? a[i] : false) || (i < b.size() ? b[i] : false);
-			setSigVal(cell->getPort(ID::Y), y);
-		}
-		else if (cell->type == ID($xor) || cell->type == ID($_XOR_)) {
-			auto a = getSigVal(cell->getPort(ID::A));
-			auto b = getSigVal(cell->getPort(ID::B));
-			std::vector<bool> y(std::max(a.size(), b.size()));
-			for (size_t i = 0; i < y.size(); i++)
-				y[i] = (i < a.size() ? a[i] : false) != (i < b.size() ? b[i] : false);
-			setSigVal(cell->getPort(ID::Y), y);
-		}
-		else if (cell->type == ID($mux) || cell->type == ID($_MUX_)) {
-			auto a = getSigVal(cell->getPort(ID::A));
-			auto b = getSigVal(cell->getPort(ID::B));
-			auto s = getSigVal(cell->getPort(ID::S));
-			bool sel = s.empty() ? false : s[0];
-			setSigVal(cell->getPort(ID::Y), sel ? b : a);
-		}
-		else if (cell->type == ID($reduce_and)) {
-			auto a = getSigVal(cell->getPort(ID::A));
-			bool result = true;
-			for (auto v : a) result = result && v;
-			setSigVal(cell->getPort(ID::Y), {result});
-		}
-		else if (cell->type == ID($reduce_or)) {
-			auto a = getSigVal(cell->getPort(ID::A));
-			bool result = false;
-			for (auto v : a) result = result || v;
-			setSigVal(cell->getPort(ID::Y), {result});
-		}
-		else if (cell->type == ID($eq)) {
-			auto a = getSigVal(cell->getPort(ID::A));
-			auto b = getSigVal(cell->getPort(ID::B));
-			bool result = (a == b);
-			setSigVal(cell->getPort(ID::Y), {result});
-		}
-		else if (cell->type == ID($ne)) {
-			auto a = getSigVal(cell->getPort(ID::A));
-			auto b = getSigVal(cell->getPort(ID::B));
-			bool result = (a != b);
-			setSigVal(cell->getPort(ID::Y), {result});
-		}
-		// Add more cell types as needed - for now, unknown cells just pass through
-	}
-	
-	// Run simulation with random inputs, check if gating_active & (D != Q) is ever true
+	// Run simulation with random inputs using ConstEval
 	// Returns false if counterexample found (candidate is definitely invalid)
 	bool simulationTest(const std::vector<SigBit> &conds, SigSpec sig_d, SigSpec sig_q, bool as_enable)
 	{
 		for (int iter = 0; iter < sim_iterations; iter++) {
-			dict<SigBit, bool> sim_values;
+			ConstEval ce(module);
 			
-			// Initialize all input ports and FF outputs with random values
+			// Generate random values for all input ports
 			for (auto wire : module->wires()) {
 				if (wire->port_input) {
+					Const rand_val(State::S0, wire->width);
 					for (int i = 0; i < wire->width; i++)
-						sim_values[SigBit(wire, i)] = (rng() & 1);
+						rand_val.bits()[i] = (rng() & 1) ? State::S1 : State::S0;
+					ce.set(SigSpec(wire), rand_val);
 				}
 			}
 			
-			// Also randomize FF Q outputs (they're inputs to combinational logic)
+			// Randomize FF Q outputs (they're inputs to combinational logic)
 			for (auto cell : module->cells()) {
 				if (cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
 				                  ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
 				                  ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
 				                  ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_))) {
 					FfData ff(nullptr, cell);
-					for (auto bit : sigmap(ff.sig_q))
-						if (bit.wire)
-							sim_values[bit] = (rng() & 1);
+					Const rand_val(State::S0, ff.width);
+					for (int i = 0; i < ff.width; i++)
+						rand_val.bits()[i] = (rng() & 1) ? State::S1 : State::S0;
+					ce.set(ff.sig_q, rand_val);
 				}
 			}
 			
-			// Propagate through combinational logic in topological order
-			for (auto cell : topo_order)
-				evaluateCell(cell, sim_values);
-			
-			// Evaluate gating condition
+			// Evaluate gating condition signals
 			bool combined_cond;
 			if (as_enable) {
-				// OR of conditions
 				combined_cond = false;
 				for (auto bit : conds) {
-					SigBit mapped = sigmap(bit);
-					if (sim_values.count(mapped) && sim_values[mapped])
-						combined_cond = true;
+					SigSpec sig(bit);
+					if (ce.eval(sig)) {
+						if (sig[0] == State::S1)
+							combined_cond = true;
+					}
 				}
 			} else {
-				// AND of conditions
 				combined_cond = true;
 				for (auto bit : conds) {
-					SigBit mapped = sigmap(bit);
-					if (!sim_values.count(mapped) || !sim_values[mapped])
+					SigSpec sig(bit);
+					if (ce.eval(sig)) {
+						if (sig[0] != State::S1)
+							combined_cond = false;
+					} else {
 						combined_cond = false;
+					}
 				}
 			}
 			
 			bool gating_active = as_enable ? !combined_cond : combined_cond;
 			
-			// Check D != Q
+			// Evaluate D and Q, check if D != Q
+			SigSpec d_eval = sig_d;
+			SigSpec q_eval = sig_q;
+			bool d_ok = ce.eval(d_eval);
+			bool q_ok = ce.eval(q_eval);
+			
 			bool d_ne_q = false;
-			for (int i = 0; i < sig_d.size(); i++) {
-				SigBit d_bit = sigmap(sig_d[i]);
-				SigBit q_bit = sigmap(sig_q[i]);
-				bool d_val = sim_values.count(d_bit) ? sim_values[d_bit] : false;
-				bool q_val = sim_values.count(q_bit) ? sim_values[q_bit] : false;
-				if (d_val != q_val) {
-					d_ne_q = true;
-					break;
+			if (d_ok && q_ok) {
+				for (int i = 0; i < sig_d.size(); i++) {
+					if (d_eval[i] != q_eval[i]) {
+						d_ne_q = true;
+						break;
+					}
 				}
 			}
 			
