@@ -20,11 +20,9 @@
 #include "kernel/sigtools.h"
 #include "kernel/ff.h"
 #include "kernel/satgen.h"
-#include "kernel/consteval.h"
 #include <queue>
 #include <algorithm>
 #include <fstream>
-#include <random>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -98,9 +96,8 @@ void profileFlipFlops(Module *module, const std::string &filename, const std::st
 // Configuration
 static const int DEFAULT_MAX_COVER = 100;      // Max candidate signals to consider
 static const int DEFAULT_MIN_REGS = 10;         // Min registers per clock gate
-static const int DEFAULT_SIM_ITERATIONS = 1000;  // Random simulation iterations for pruning
 
-struct SatClockgateWorker
+struct InferCeWorker
 {
 	Module *module;
 	SigMap sigmap;
@@ -108,7 +105,6 @@ struct SatClockgateWorker
 	// Configuration
 	int max_cover;
 	int min_regs;
-	int sim_iterations;
 	
 	// Maps output signal bits to their driver cells
 	dict<SigBit, Cell*> sig_to_driver;
@@ -120,17 +116,13 @@ struct SatClockgateWorker
 	ezSatPtr ez;
 	SatGen satgen;
 	
-	// Cached simulation results: [iteration][SigBit] = evaluated State
-	std::vector<dict<SigBit, State>> cached_sim_results;
-	
 	// Statistics
 	int accepted_count = 0;
-	int rejected_sim_count = 0;
 	int rejected_sat_count = 0;
 	
-	SatClockgateWorker(Module *module, int max_cover, int min_regs, int sim_iterations)
+	InferCeWorker(Module *module, int max_cover, int min_regs)
 		: module(module), sigmap(module), 
-		  max_cover(max_cover), min_regs(min_regs), sim_iterations(sim_iterations),
+		  max_cover(max_cover), min_regs(min_regs),
 		  ez(), satgen(ez.get(), &sigmap)
 	{
 		// Build driver and sink maps
@@ -156,95 +148,6 @@ struct SatClockgateWorker
 			                   ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
 			                   ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
 				satgen.importCell(cell);
-		
-		// Pre-run simulations and cache all signal values
-		std::mt19937 rng(42);
-		cached_sim_results.resize(sim_iterations);
-		for (int iter = 0; iter < sim_iterations; iter++) {
-			ConstEval ce(module);
-			
-			// Set random values for input ports
-			for (auto wire : module->wires()) {
-				if (wire->port_input) {
-					Const rand_val(State::S0, wire->width);
-					for (int i = 0; i < wire->width; i++)
-						rand_val.bits()[i] = (rng() & 1) ? State::S1 : State::S0;
-					ce.set(SigSpec(wire), rand_val);
-				}
-			}
-			// Set random values for FF Q outputs
-			for (auto cell : module->cells()) {
-				if (cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
-				                  ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
-				                  ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
-				                  ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_))) {
-					FfData ff(nullptr, cell);
-					Const rand_val(State::S0, ff.width);
-					for (int i = 0; i < ff.width; i++)
-						rand_val.bits()[i] = (rng() & 1) ? State::S1 : State::S0;
-					ce.set(ff.sig_q, rand_val);
-				}
-			}
-			
-			// Evaluate and cache ALL wire signals
-			for (auto wire : module->wires()) {
-				for (int i = 0; i < wire->width; i++) {
-					SigBit bit(wire, i);
-					SigSpec sig(bit);
-					if (ce.eval(sig))
-						cached_sim_results[iter][sigmap(bit)] = sig[0].data;
-				}
-			}
-		}
-	}
-	
-	// Check cached simulation results for counterexamples
-	// Returns false if counterexample found (candidate is definitely invalid)
-	bool simulationTest(const std::vector<SigBit> &conds, SigSpec sig_d, SigSpec sig_q, bool as_enable)
-	{
-		for (int iter = 0; iter < sim_iterations; iter++) {
-			auto &cache = cached_sim_results[iter];
-			
-			// Lookup gating condition from cache
-			bool combined_cond;
-			if (as_enable) {
-				combined_cond = false;
-				for (auto bit : conds) {
-					SigBit mapped = sigmap(bit);
-					if (cache.count(mapped) && cache[mapped] == State::S1)
-						combined_cond = true;
-				}
-			} else {
-				combined_cond = true;
-				for (auto bit : conds) {
-					SigBit mapped = sigmap(bit);
-					if (!cache.count(mapped) || cache[mapped] != State::S1)
-						combined_cond = false;
-				}
-			}
-			
-			bool gating_active = as_enable ? !combined_cond : combined_cond;
-			
-			// Lookup D and Q from cache, check if D != Q
-			bool d_ne_q = false;
-			for (int i = 0; i < sig_d.size(); i++) {
-				SigBit d_bit = sigmap(sig_d[i]);
-				SigBit q_bit = sigmap(sig_q[i]);
-				State d_val = cache.count(d_bit) ? cache[d_bit] : State::S0;
-				State q_val = cache.count(q_bit) ? cache[q_bit] : State::S0;
-				if (d_val != q_val) {
-					d_ne_q = true;
-					break;
-				}
-			}
-			
-			// If gating is active and D != Q, this is a counterexample
-			if (gating_active && d_ne_q) {
-				rejected_sim_count++;
-				return false;
-			}
-		}
-		return true;  // No counterexample found
 	}
 	
 	// Get downstream signals from a register (BFS forward through combinational logic)
@@ -334,32 +237,6 @@ struct SatClockgateWorker
 		return visited;
 	}
 	
-	// Check if a candidate signal is a valid gating condition using SAT
-	// Safe gating check: sig=1 → D==Q (i.e., (sig ∧ (D≠Q)) is UNSAT)
-	bool isValidGatingSignal(SigBit candidate, SigSpec sig_d, SigSpec sig_q, bool as_enable)
-	{
-		std::vector<int> d_vec = satgen.importSigSpec(sig_d);
-		std::vector<int> q_vec = satgen.importSigSpec(sig_q);
-		int cand_var = satgen.importSigSpec(SigSpec(candidate))[0];
-		
-		// D != Q
-		int d_ne_q = ez->vec_ne(d_vec, q_vec);
-		
-		// For clock enable (active high): when enable=0, D must equal Q
-		// Check: (!enable ∧ (D≠Q)) is UNSAT
-		// For clock disable (active low): when disable=1, D must equal Q  
-		// Check: (disable ∧ (D≠Q)) is UNSAT
-		
-		int gating_active = as_enable ? ez->NOT(cand_var) : cand_var;
-		int query = ez->AND(gating_active, d_ne_q);
-		
-		std::vector<int> assumptions = {query};
-		std::vector<int> dummy_exprs;
-		std::vector<bool> dummy_vals;
-		
-		return !ez->solve(dummy_exprs, dummy_vals, assumptions);
-	}
-	
 	// Binary search to minimize the gating condition set
 	// Tries to remove half of the signals at a time
 	void minimizeGatingCondition(
@@ -393,20 +270,12 @@ struct SatClockgateWorker
 		}
 	}
 	
-	// Check if OR/AND of signals forms a valid gating condition
-	// Uses simulation first to quickly prune invalid candidates, then SAT to prove
+	// Check if OR/AND of signals forms a valid gating condition using SAT
 	bool isValidGatingSet(const std::vector<SigBit> &conds, SigSpec sig_d, SigSpec sig_q, bool as_enable)
 	{
 		if (conds.empty())
 			return false;
 		
-		// Quick simulation filter first - catches most invalid candidates fast
-		// if (!simulationTest(conds, sig_d, sig_q, as_enable)) {
-		// 	log_debug("    Rejected by simulation\n");
-		// 	return false;
-		// }
-		
-		// SAT only if simulation passes
 		std::vector<int> d_vec = satgen.importSigSpec(sig_d);
 		std::vector<int> q_vec = satgen.importSigSpec(sig_q);
 		
@@ -447,12 +316,12 @@ struct SatClockgateWorker
 		FfData ff(nullptr, reg);
 		
 		// Get candidate signals downstream of this register
-		pool<SigBit> downstream = getDownstreamSignals(reg, max_cover);
+		// pool<SigBit> downstream = getDownstreamSignals(reg, max_cover);
 		
-		if (downstream.empty()) {
-			log_debug("  No downstream candidates for %s\n", log_id(reg));
-			return {{}, false};
-		}
+		// if (downstream.empty()) {
+		// 	log_debug("  No downstream candidates for %s\n", log_id(reg));
+		// 	return {{}, false};
+		// }
 		
 		// Also include upstream signals that could affect D
 		pool<SigBit> d_inputs;
@@ -463,11 +332,16 @@ struct SatClockgateWorker
 		
 		// Combine and limit candidates
 		std::vector<SigBit> candidates;
-		for (auto bit : downstream)
-			candidates.push_back(bit);
+		// for (auto bit : downstream)
+		// 	candidates.push_back(bit);
+		// for (auto bit : upstream)
+		// 	if (!downstream.count(bit))
+		// 		candidates.push_back(bit);
+
 		for (auto bit : upstream)
-			if (!downstream.count(bit))
-				candidates.push_back(bit);
+			candidates.push_back(bit);
+
+				
 		
 		if ((int)candidates.size() > max_cover)
 			candidates.resize(max_cover);
@@ -678,22 +552,22 @@ struct SatClockgateWorker
 		}
 		
 		log("  Inserted %d clock gates\n", gates_inserted);
-		log("  Statistics: accepted=%d, rejected_sim=%d, rejected_sat=%d\n",
-		    accepted_count, rejected_sim_count, rejected_sat_count);
+		log("  Statistics: accepted=%d, rejected_sat=%d\n",
+		    accepted_count, rejected_sat_count);
 		log("  SAT stats: literals=%d, expressions=%d\n",
 		    ez->numLiterals(), ez->numExpressions());
 	}
 };
 
-struct SatClockgatePass : public Pass {
-	SatClockgatePass() : Pass("sat_clockgate", "SAT-based automatic clock gating") { }
+struct InferCePass : public Pass {
+	InferCePass() : Pass("infer_ce", "Infer clock enable signals from conditional logic") { }
 	
 	void help() override
 	{
 		log("\n");
-		log("    sat_clockgate [options] [selection]\n");
+		log("    infer_ce [options] [selection]\n");
 		log("\n");
-		log("This command performs SAT-based automatic clock gating insertion.\n");
+		log("This command infers clock enable (CE) signals from conditional logic.\n");
 		log("It analyzes registers and uses SAT solving to find signals that can\n");
 		log("serve as clock enable conditions (when the signal is low, D==Q).\n");
 		log("\n");
@@ -713,11 +587,10 @@ struct SatClockgatePass : public Pass {
 	
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
-		log_header(design, "Executing SAT_CLOCKGATE pass.\n");
+		log_header(design, "Executing INFER_CE pass.\n");
 		
 		int max_cover = DEFAULT_MAX_COVER;
 		int min_regs = DEFAULT_MIN_REGS;
-		int sim_iterations = DEFAULT_SIM_ITERATIONS;
 		
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -745,18 +618,18 @@ struct SatClockgatePass : public Pass {
 		
 		for (auto module : design->selected_modules()) {
 			// Profile BEFORE clock gating
-			profileFlipFlops(module, "ff_profile.txt", "BEFORE sat_clockgate");
+			profileFlipFlops(module, "ff_profile.txt", "BEFORE infer_ce");
 			
-			SatClockgateWorker worker(module, max_cover, min_regs, sim_iterations);
+			InferCeWorker worker(module, max_cover, min_regs);
 			worker.run();
 			total_gates += worker.accepted_count;
 			
 			// Profile AFTER clock gating
-			profileFlipFlops(module, "ff_profile.txt", "AFTER sat_clockgate");
+			profileFlipFlops(module, "ff_profile.txt", "AFTER infer_ce");
 		}
 		
 		log("Total clock gates inserted: %d\n", total_gates);
 	}
-} SatClockgatePass;
+} InferCePass;
 
 PRIVATE_NAMESPACE_END
