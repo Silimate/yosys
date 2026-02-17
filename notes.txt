@@ -370,3 +370,4 @@ TODOs:
 7) Check recursion
 8) Check isValidGatingSet and findGatingCondition
 
+Add a new feature to not do simulation or SAT based on the false paths
