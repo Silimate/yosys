@@ -401,10 +401,10 @@ struct SatClockgateWorker
 			return false;
 		
 		// Quick simulation filter first - catches most invalid candidates fast
-		if (!simulationTest(conds, sig_d, sig_q, as_enable)) {
-			log_debug("    Rejected by simulation\n");
-			return false;
-		}
+		// if (!simulationTest(conds, sig_d, sig_q, as_enable)) {
+		// 	log_debug("    Rejected by simulation\n");
+		// 	return false;
+		// }
 		
 		// SAT only if simulation passes
 		std::vector<int> d_vec = satgen.importSigSpec(sig_d);
@@ -718,7 +718,6 @@ struct SatClockgatePass : public Pass {
 		int max_cover = DEFAULT_MAX_COVER;
 		int min_regs = DEFAULT_MIN_REGS;
 		int sim_iterations = DEFAULT_SIM_ITERATIONS;
-		std::vector<std::string> clockgate_args;
 		
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -730,14 +729,9 @@ struct SatClockgatePass : public Pass {
 				min_regs = std::stoi(args[++argidx]);
 				continue;
 			}
-			// Pass remaining args to clockgate
-			if (args[argidx][0] == '-') {
-				clockgate_args.push_back(args[argidx]);
-				continue;
-			}
-			// Non-flag argument (value for previous flag)
-			clockgate_args.push_back(args[argidx]);
+			break;
 		}
+		extra_args(args, argidx, design);
 		
 		log("Configuration: max_cover=%d, min_regs=%d\n", max_cover, min_regs);
 		
@@ -762,13 +756,6 @@ struct SatClockgatePass : public Pass {
 		}
 		
 		log("Total clock gates inserted: %d\n", total_gates);
-		
-		// Convert CEs to actual clock gate cells
-		std::string clockgate_cmd = "clockgate";
-		for (auto &arg : clockgate_args)
-			clockgate_cmd += " " + arg;
-		log("Calling clockgate with args: %s\n", clockgate_cmd);
-		Pass::call(design, clockgate_cmd);
 	}
 } SatClockgatePass;
 
