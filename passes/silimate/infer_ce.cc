@@ -270,44 +270,6 @@ struct InferCeWorker
 		}
 	}
 	
-	// Check if OR/AND of signals forms a valid gating condition using SAT
-	bool isValidGatingSet(const std::vector<SigBit> &conds, SigSpec sig_d, SigSpec sig_q, bool as_enable)
-	{
-		if (conds.empty())
-			return false;
-		
-		std::vector<int> d_vec = satgen.importSigSpec(sig_d);
-		std::vector<int> q_vec = satgen.importSigSpec(sig_q);
-		
-		// Build OR (for enable) or AND (for disable) of condition signals
-		std::vector<int> cond_vars;
-		for (auto bit : conds)
-			cond_vars.push_back(satgen.importSigSpec(SigSpec(bit))[0]);
-		
-		int combined_cond;
-		if (as_enable) {
-			// Clock enable: OR of signals (any signal high = enable)
-			combined_cond = ez->expression(ezSAT::OpOr, cond_vars);
-		} else {
-			// Clock disable: AND of signals (all signals high = disable)
-			combined_cond = ez->expression(ezSAT::OpAnd, cond_vars);
-		}
-		
-		int d_ne_q = ez->vec_ne(d_vec, q_vec);
-		
-		// Safe gating: when gating is active (enable=0 or disable=1), D must equal Q
-		int gating_active = as_enable ? ez->NOT(combined_cond) : combined_cond;
-		int query = ez->AND(gating_active, d_ne_q);
-		
-		std::vector<int> assumptions = {query};
-		std::vector<int> dummy_exprs;
-		std::vector<bool> dummy_vals;
-		
-		bool is_valid = !ez->solve(dummy_exprs, dummy_vals, assumptions);
-		if (!is_valid)
-			rejected_sat_count++;
-		return is_valid;
-	}
 	
 	// Find gating condition for a register
 	// Returns empty vector if no valid condition found
