@@ -582,6 +582,7 @@ struct SatClockgatePass : public Pass {
 		int max_cover = DEFAULT_MAX_COVER;
 		int min_regs = DEFAULT_MIN_REGS;
 		int sim_iterations = DEFAULT_SIM_ITERATIONS;
+		std::vector<std::string> clockgate_args;
 		
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -593,9 +594,14 @@ struct SatClockgatePass : public Pass {
 				min_regs = std::stoi(args[++argidx]);
 				continue;
 			}
-			break;
+			// Pass remaining args to clockgate
+			if (args[argidx][0] == '-') {
+				clockgate_args.push_back(args[argidx]);
+				continue;
+			}
+			// Non-flag argument (value for previous flag)
+			clockgate_args.push_back(args[argidx]);
 		}
-		extra_args(args, argidx, design);
 		
 		log("Configuration: max_cover=%d, min_regs=%d\n", max_cover, min_regs);
 		
@@ -622,7 +628,10 @@ struct SatClockgatePass : public Pass {
 		log("Total clock gates inserted: %d\n", total_gates);
 		
 		// Convert CEs to actual clock gate cells
-		Pass::call(design, "clockgate");
+		std::string clockgate_cmd = "clockgate";
+		for (auto &arg : clockgate_args)
+			clockgate_cmd += " " + arg;
+		Pass::call(design, clockgate_cmd);
 	}
 } SatClockgatePass;
 
