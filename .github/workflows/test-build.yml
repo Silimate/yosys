@@ -73,8 +73,9 @@ jobs:
         run: |
           mkdir build
           cd build
-          make -f ../Makefile config-$CC SMALL=0 ENABLE_PLUGINS=1 ENABLE_PYOSYS=0 ENABLE_CCACHE=0 ENABLE_EDITLINE=0 VERIFIC_DIR=../verific
+          make -f ../Makefile config-$CC ENABLE_LTO=1 SMALL=0 ENABLE_PLUGINS=1 ENABLE_PYOSYS=0 ENABLE_CCACHE=0 ENABLE_EDITLINE=0 VERIFIC_DIR=../verific
           make -f ../Makefile -j$procs ENABLE_LTO=1 SMALL=0 ENABLE_PLUGINS=1 ENABLE_PYOSYS=0 ENABLE_CCACHE=0 ENABLE_EDITLINE=0 VERIFIC_DIR=../verific
+          make -f ../Makefile unit-test -j$procs ENABLE_LTO=1 SMALL=0 ENABLE_PLUGINS=1 ENABLE_PYOSYS=0 ENABLE_CCACHE=0 ENABLE_EDITLINE=0 VERIFIC_DIR=../verific
 
       - name: Log yosys-config output
         run: |
@@ -84,7 +85,7 @@ jobs:
         shell: bash
         run: |
           cd build
-          tar -cvf ../build.tar share/ yosys yosys-*
+          tar -cvf ../build.tar share/ yosys yosys-* libyosys.so
 
       - name: Store build artifact
         uses: actions/upload-artifact@v4
@@ -138,7 +139,7 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          make -j$procs test TARGETS= EXTRA_TARGETS= CONFIG=$CC SMALL=0 ENABLE_PLUGINS=1 ENABLE_PYOSYS=0 ENABLE_CCACHE=0 ENABLE_EDITLINE=0
+          make -j$procs vanilla-test TARGETS= EXTRA_TARGETS= CONFIG=$CC SMALL=0 ENABLE_PLUGINS=1 ENABLE_PYOSYS=0 ENABLE_CCACHE=0 ENABLE_EDITLINE=0
 
       - name: Report errors
         if: ${{ failure() }}
