@@ -82,40 +82,6 @@ struct InferCeWorker
 		}
 	}
 	
-	// Get downstream signals from a register (BFS forward through combinational logic)
-	pool<SigBit> getDownstreamSignals(Cell *reg, int limit)
-	{
-		pool<SigBit> visited;
-		std::queue<SigBit> worklist;
-		
-		FfData ff(nullptr, reg);
-		for (auto bit : sigmap(ff.sig_q))
-			if (bit.wire) {
-				worklist.push(bit);
-				visited.insert(bit);
-			}
-		
-		while (!worklist.empty() && (int)visited.size() < limit) {
-			SigBit bit = worklist.front();
-			worklist.pop();
-			
-			for (auto sink_cell : sig_to_sinks[bit]) {
-				if (sink_cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
-				                        ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
-				                        ID($dffsre), ID($_DFF_P_), ID($_DFF_N_)))
-					continue;
-				
-				for (auto &conn : sink_cell->connections())
-					if (sink_cell->output(conn.first))
-						for (auto out_bit : sigmap(conn.second))
-							if (out_bit.wire && !visited.count(out_bit)) {
-								visited.insert(out_bit);
-								worklist.push(out_bit);
-							}
-			}
-		}
-		return visited;
-	}
 	
 	// Get upstream signals feeding into given signals (BFS backward)
 	pool<SigBit> getUpstreamSignals(const pool<SigBit> &start_signals, int limit)
