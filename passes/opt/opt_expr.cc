@@ -1484,26 +1484,6 @@ skip_identity:
 			goto next_cell;
 		}
 
-		if (consume_x && mux_bool && (cell->type == ID($_MUX_) || (cell->type == ID($mux) && cell->parameters[ID::WIDTH] == 1)) && cell->getPort(ID::A) == State::S1) {
-			log_debug("Replacing %s cell `%s' in module `%s' with or-gate and not-gate.\n", log_id(cell->type), log_id(cell), log_id(module));
-			cell->setPort(ID::A, module->Not(NEW_ID2_SUFFIX("not"), cell->getPort(ID::S), false, cell->get_src_attribute()));
-			cell->unsetPort(ID::S);
-			if (cell->type == ID($mux)) {
-				Const width = cell->parameters[ID::WIDTH];
-				cell->parameters[ID::A_WIDTH] = width;
-				cell->parameters[ID::B_WIDTH] = width;
-				cell->parameters[ID::Y_WIDTH] = width;
-				cell->parameters[ID::A_SIGNED] = 0;
-				cell->parameters[ID::B_SIGNED] = 0;
-				cell->parameters.erase(ID::WIDTH);
-				cell->type = ID($or);
-			} else
-				cell->type = ID($_OR_);
-			module->rename(cell, NEW_ID2_SUFFIX("ornot"));
-			did_something = true;
-			goto next_cell;
-		}
-
 		if (consume_x && mux_bool && cell->type.in(ID($mux), ID($_MUX_)) && cell->getPort(ID::B) == State::S1) {
 			log_debug("Replacing %s cell `%s' in module `%s' with or-gate.\n", log_id(cell->type), log_id(cell), log_id(module));
 			cell->setPort(ID::B, cell->getPort(ID::S));
@@ -1519,26 +1499,6 @@ skip_identity:
 				cell->type = ID($or);
 			} else
 				cell->type = ID($_OR_);
-			did_something = true;
-			goto next_cell;
-		}
-
-		if (consume_x && mux_bool && cell->type.in(ID($mux), ID($_MUX_)) && cell->getPort(ID::B) == State::S0) {
-			log_debug("Replacing %s cell `%s' in module `%s' with and-gate and not-gate.\n", log_id(cell->type), log_id(cell), log_id(module));
-			cell->setPort(ID::B, module->Not(NEW_ID2_SUFFIX("not"), cell->getPort(ID::S), false, cell->get_src_attribute()));
-			cell->unsetPort(ID::S);
-			if (cell->type == ID($mux)) {
-				Const width = cell->parameters[ID::WIDTH];
-				cell->parameters[ID::A_WIDTH] = width;
-				cell->parameters[ID::B_WIDTH] = width;
-				cell->parameters[ID::Y_WIDTH] = width;
-				cell->parameters[ID::A_SIGNED] = 0;
-				cell->parameters[ID::B_SIGNED] = 0;
-				cell->parameters.erase(ID::WIDTH);
-				cell->type = ID($and);
-			} else
-				cell->type = ID($_AND_);
-			module->rename(cell, NEW_ID2_SUFFIX("andnot"));
 			did_something = true;
 			goto next_cell;
 		}
