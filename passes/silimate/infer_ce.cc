@@ -450,17 +450,12 @@ struct InferCeWorker
 					for (auto idx : net_to_accepted[bit])
 						candidate_gates.insert(idx);
 			
-			// HEURISTIC: Only check top 3 gates (by size) for reuse
-			const int MAX_REUSE_CHECKS = 3;
-			
-			std::vector<size_t> sorted_candidates(candidate_gates.begin(), candidate_gates.end());
-			std::sort(sorted_candidates.begin(), sorted_candidates.end(), [&](size_t a, size_t b) {
-				return accepted_gates[a].regs.size() > accepted_gates[b].regs.size();
-			});
+			// HEURISTIC: Only check limited gates for reuse
+			const int MAX_REUSE_CHECKS = 20;
 			
 			bool found_match = false;
 			int checked = 0;
-			for (auto idx : sorted_candidates) {
+			for (auto idx : candidate_gates) {
 				if (checked >= MAX_REUSE_CHECKS)
 					break;
 				
