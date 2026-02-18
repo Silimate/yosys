@@ -16,7 +16,8 @@ else
   RPATH = -Wl,-rpath=$(ROOTPATH)
 endif
 
-EXTRAFLAGS := -lyosys -pthread
+PYTHON_CONFIG := $(shell if python3-config --embed --libs > /dev/null 2>&1; then echo "python3-config --embed"; else echo "python3-config"; fi)
+EXTRAFLAGS := -lyosys -pthread $(shell $(PYTHON_CONFIG) --ldflags --libs)
 
 MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 OBJTEST := $(MAKEFILE_DIR)objtest
