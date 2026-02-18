@@ -346,7 +346,7 @@ struct InferCeWorker
 		int cone_size = (int)cone.size();
 		
 		// Skip registers with trivial cones (not worth gating) or huge cones (too expensive)
-		const int MIN_CONE_SIZE = 5;
+		const int MIN_CONE_SIZE = 2;
 		const int MAX_CONE_SIZE = 500;
 		if (cone_size < MIN_CONE_SIZE || cone_size > MAX_CONE_SIZE)
 			return {{}, false, cone_size};
