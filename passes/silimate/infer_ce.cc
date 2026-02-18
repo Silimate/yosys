@@ -22,76 +22,9 @@
 #include "kernel/satgen.h"
 #include <queue>
 #include <algorithm>
-#include <fstream>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
-
-// Profile all flip-flops and write to file
-void profileFlipFlops(Module *module, const std::string &filename, const std::string &label)
-{
-	std::ofstream out(filename, std::ios::app);
-	out << "\n=== " << label << " ===\n";
-	out << "Module: " << log_id(module) << "\n\n";
-	
-	int total_ffs = 0;
-	int ffs_with_ce = 0;
-	int ffs_with_arst = 0;
-	int ffs_with_srst = 0;
-	int total_bits = 0;
-	int bits_with_ce = 0;
-	
-	for (auto cell : module->cells()) {
-		if (!cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
-		                   ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
-		                   ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
-		                   ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
-			continue;
-		
-		FfData ff(nullptr, cell);
-		total_ffs++;
-		total_bits += ff.width;
-		
-		out << "FF: " << log_id(cell) << "\n";
-		out << "  type:     " << log_id(cell->type) << "\n";
-		out << "  width:    " << ff.width << "\n";
-		out << "  has_clk:  " << (ff.has_clk ? "yes" : "no") << "\n";
-		out << "  has_ce:   " << (ff.has_ce ? "yes" : "no");
-		if (ff.has_ce) {
-			out << " (sig_ce: " << log_signal(ff.sig_ce) << ", pol: " << (ff.pol_ce ? "active-high" : "active-low") << ")";
-			ffs_with_ce++;
-			bits_with_ce += ff.width;
-		}
-		out << "\n";
-		out << "  has_arst: " << (ff.has_arst ? "yes" : "no");
-		if (ff.has_arst) {
-			out << " (sig_arst: " << log_signal(ff.sig_arst) << ")";
-			ffs_with_arst++;
-		}
-		out << "\n";
-		out << "  has_srst: " << (ff.has_srst ? "yes" : "no");
-		if (ff.has_srst) {
-			out << " (sig_srst: " << log_signal(ff.sig_srst) << ")";
-			ffs_with_srst++;
-		}
-		out << "\n";
-		out << "  sig_clk:  " << log_signal(ff.sig_clk) << "\n";
-		out << "  sig_d:    " << log_signal(ff.sig_d) << "\n";
-		out << "  sig_q:    " << log_signal(ff.sig_q) << "\n";
-		out << "\n";
-	}
-	
-	out << "--- Summary ---\n";
-	out << "Total FFs:      " << total_ffs << "\n";
-	out << "Total bits:     " << total_bits << "\n";
-	out << "FFs with CE:    " << ffs_with_ce << " (" << (total_ffs ? 100*ffs_with_ce/total_ffs : 0) << "%)\n";
-	out << "Bits with CE:   " << bits_with_ce << " (" << (total_bits ? 100*bits_with_ce/total_bits : 0) << "%)\n";
-	out << "FFs with ARST:  " << ffs_with_arst << "\n";
-	out << "FFs with SRST:  " << ffs_with_srst << "\n";
-	out << "\n";
-	
-	out.close();
-}
 
 // Configuration
 static const int DEFAULT_MAX_COVER = 100;      // Max candidate signals to consider
@@ -109,21 +42,20 @@ struct InferCeWorker
 	// Maps output signal bits to their driver cells
 	dict<SigBit, Cell*> sig_to_driver;
 	
-	// Maps cell input pins to their source signals
+	// Maps cell input pins to their source signals  
 	dict<SigBit, pool<Cell*>> sig_to_sinks;
 	
-	// SAT solver and generator - created once per module
-	ezSatPtr ez;
-	SatGen satgen;
+	// Pre-computed list of combinational cells (for SAT import)
+	std::vector<Cell*> comb_cells;
 	
 	// Statistics
 	int accepted_count = 0;
 	int rejected_sat_count = 0;
+	int sat_solves = 0;
 	
 	InferCeWorker(Module *module, int max_cover, int min_regs)
 		: module(module), sigmap(module), 
-		  max_cover(max_cover), min_regs(min_regs),
-		  ez(), satgen(ez.get(), &sigmap)
+		  max_cover(max_cover), min_regs(min_regs)
 	{
 		// Build driver and sink maps
 		for (auto cell : module->cells()) {
@@ -139,15 +71,15 @@ struct InferCeWorker
 							sig_to_sinks[bit].insert(cell);
 				}
 			}
-		}
-		
-		// Import all cells once - circuit constraints are permanent
-		for (auto cell : module->cells())
+			
+			// Collect combinational cells for SAT
 			if (!cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
 			                   ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr), 
 			                   ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
-			                   ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
-				satgen.importCell(cell);
+			                   ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_))) {
+				comb_cells.push_back(cell);
+			}
+		}
 	}
 	
 	// Get downstream signals from a register (BFS forward through combinational logic)
@@ -156,41 +88,32 @@ struct InferCeWorker
 		pool<SigBit> visited;
 		std::queue<SigBit> worklist;
 		
-		// Start from register output Q
 		FfData ff(nullptr, reg);
-		for (auto bit : sigmap(ff.sig_q)) {
+		for (auto bit : sigmap(ff.sig_q))
 			if (bit.wire) {
 				worklist.push(bit);
 				visited.insert(bit);
 			}
-		}
 		
 		while (!worklist.empty() && (int)visited.size() < limit) {
 			SigBit bit = worklist.front();
 			worklist.pop();
 			
-			// Find cells driven by this signal
 			for (auto sink_cell : sig_to_sinks[bit]) {
-				// Skip registers - don't traverse through them
 				if (sink_cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
 				                        ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
 				                        ID($dffsre), ID($_DFF_P_), ID($_DFF_N_)))
 					continue;
 				
-				// Add outputs of this cell to worklist
-				for (auto &conn : sink_cell->connections()) {
-					if (sink_cell->output(conn.first)) {
-						for (auto out_bit : sigmap(conn.second)) {
+				for (auto &conn : sink_cell->connections())
+					if (sink_cell->output(conn.first))
+						for (auto out_bit : sigmap(conn.second))
 							if (out_bit.wire && !visited.count(out_bit)) {
 								visited.insert(out_bit);
 								worklist.push(out_bit);
 							}
-						}
-					}
-				}
 			}
 		}
-		
 		return visited;
 	}
 	
@@ -209,7 +132,48 @@ struct InferCeWorker
 			SigBit bit = worklist.front();
 			worklist.pop();
 			
-			// Find driver cell
+			if (!sig_to_driver.count(bit))
+				continue;
+			
+			Cell *driver = sig_to_driver[bit];
+			
+			if (driver->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
+			                    ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
+			                    ID($dffsre), ID($_DFF_P_), ID($_DFF_N_)))
+				continue;
+			
+			for (auto &conn : driver->connections())
+				if (driver->input(conn.first))
+					for (auto in_bit : sigmap(conn.second))
+						if (in_bit.wire && !visited.count(in_bit)) {
+							visited.insert(in_bit);
+							worklist.push(in_bit);
+						}
+		}
+		return visited;
+	}
+	
+	// Get cells in the transitive fanin cone of given signals (for SAT import)
+	// This is much faster than importing ALL cells
+	pool<Cell*> getConeOfLogic(SigSpec sig)
+	{
+		pool<Cell*> cone_cells;
+		pool<SigBit> visited;
+		std::queue<SigBit> worklist;
+		
+		// Start from all bits in sig
+		for (auto bit : sigmap(sig)) {
+			if (bit.wire && !visited.count(bit)) {
+				visited.insert(bit);
+				worklist.push(bit);
+			}
+		}
+		
+		// BFS backward through drivers
+		while (!worklist.empty()) {
+			SigBit bit = worklist.front();
+			worklist.pop();
+			
 			if (!sig_to_driver.count(bit))
 				continue;
 			
@@ -218,8 +182,14 @@ struct InferCeWorker
 			// Skip registers
 			if (driver->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
 			                    ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
-			                    ID($dffsre), ID($_DFF_P_), ID($_DFF_N_)))
+			                    ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
+			                    ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
 				continue;
+			
+			// Add this cell to cone
+			if (cone_cells.count(driver))
+				continue;  // Already processed
+			cone_cells.insert(driver);
 			
 			// Add inputs of driver to worklist
 			for (auto &conn : driver->connections()) {
@@ -234,18 +204,80 @@ struct InferCeWorker
 			}
 		}
 		
-		return visited;
+		return cone_cells;
+	}
+	
+	// Check if OR/AND of signals forms a valid gating condition using SAT
+	// Uses a PRE-CREATED SAT solver (passed in) to avoid recreating for each check
+	bool isValidGatingSetWithSolver(ezSatPtr &ez, SatGen &satgen, 
+	                                 const std::vector<SigBit> &conds, 
+	                                 SigSpec sig_d, SigSpec sig_q, bool as_enable)
+	{
+		if (conds.empty())
+			return false;
+		
+		sat_solves++;
+		
+		std::vector<int> d_vec = satgen.importSigSpec(sig_d);
+		std::vector<int> q_vec = satgen.importSigSpec(sig_q);
+		
+		// Build OR (for enable) or AND (for disable) of condition signals
+		std::vector<int> cond_vars;
+		for (auto bit : conds)
+			cond_vars.push_back(satgen.importSigSpec(SigSpec(bit))[0]);
+		
+		int combined_cond;
+		if (as_enable) {
+			// Clock enable: OR of signals (any signal high = enable)
+			combined_cond = ez->expression(ezSAT::OpOr, cond_vars);
+		} else {
+			// Clock disable: AND of signals (all signals high = disable)
+			combined_cond = ez->expression(ezSAT::OpAnd, cond_vars);
+		}
+		
+		int d_ne_q = ez->vec_ne(d_vec, q_vec);
+		
+		// Safe gating: when gating is active (enable=0 or disable=1), D must equal Q
+		int gating_active = as_enable ? ez->NOT(combined_cond) : combined_cond;
+		int query = ez->AND(gating_active, d_ne_q);
+		
+		std::vector<int> assumptions = {query};
+		std::vector<int> dummy_exprs;
+		std::vector<bool> dummy_vals;
+		
+		bool is_valid = !ez->solve(dummy_exprs, dummy_vals, assumptions);
+		if (!is_valid)
+			rejected_sat_count++;
+		return is_valid;
+	}
+	
+	// Wrapper that creates a fresh SAT solver (used for standalone checks)
+	bool isValidGatingSet(const std::vector<SigBit> &conds, SigSpec sig_d, SigSpec sig_q, bool as_enable)
+	{
+		if (conds.empty())
+			return false;
+		
+		pool<Cell*> cone = getConeOfLogic(sig_d);
+		ezSatPtr ez;
+		SatGen satgen(ez.get(), &sigmap);
+		for (auto cell : cone)
+			satgen.importCell(cell);
+		
+		return isValidGatingSetWithSolver(ez, satgen, conds, sig_d, sig_q, as_enable);
 	}
 	
 	// Binary search to minimize the gating condition set
 	// Tries to remove half of the signals at a time
-	void minimizeGatingCondition(
+	// Uses pre-created SAT solver to avoid recreating for each check
+	void minimizeGatingConditionWithSolver(
+		ezSatPtr &ez, SatGen &satgen,
 		std::vector<SigBit> &good_conds,
 		std::vector<SigBit>::iterator begin,
 		std::vector<SigBit>::iterator end,
 		SigSpec sig_d, SigSpec sig_q, bool as_enable)
 	{
 		int half_len = (end - begin) / 2;
+		
 		if (half_len == 0)
 			return;
 		
@@ -257,78 +289,90 @@ struct InferCeWorker
 		test_conds.insert(test_conds.end(), begin, mid);
 		test_conds.insert(test_conds.end(), end, good_conds.end());
 		
-		if (!test_conds.empty() && isValidGatingSet(test_conds, sig_d, sig_q, as_enable)) {
+		if (!test_conds.empty() && isValidGatingSetWithSolver(ez, satgen, test_conds, sig_d, sig_q, as_enable)) {
 			// Can remove [mid, end)
 			good_conds.erase(mid, end);
 			// Recurse on remaining half
-			minimizeGatingCondition(good_conds, begin, begin + half_len, sig_d, sig_q, as_enable);
+			minimizeGatingConditionWithSolver(ez, satgen, good_conds, begin, begin + half_len, sig_d, sig_q, as_enable);
 		} else {
 			// Cannot remove all of [mid, end), try to minimize each half
 			if (end - mid > 1)
-				minimizeGatingCondition(good_conds, mid, end, sig_d, sig_q, as_enable);
-			minimizeGatingCondition(good_conds, begin, mid, sig_d, sig_q, as_enable);
+				minimizeGatingConditionWithSolver(ez, satgen, good_conds, mid, end, sig_d, sig_q, as_enable);
+			minimizeGatingConditionWithSolver(ez, satgen, good_conds, begin, mid, sig_d, sig_q, as_enable);
 		}
 	}
 	
+	// Wrapper for standalone use (creates fresh solver)
+	void minimizeGatingCondition(
+		std::vector<SigBit> &good_conds,
+		std::vector<SigBit>::iterator begin,
+		std::vector<SigBit>::iterator end,
+		SigSpec sig_d, SigSpec sig_q, bool as_enable)
+	{
+		pool<Cell*> cone = getConeOfLogic(sig_d);
+		ezSatPtr ez;
+		SatGen satgen(ez.get(), &sigmap);
+		for (auto cell : cone)
+			satgen.importCell(cell);
+		
+		minimizeGatingConditionWithSolver(ez, satgen, good_conds, begin, end, sig_d, sig_q, as_enable);
+	}
 	
 	// Find gating condition for a register
-	// Returns empty vector if no valid condition found
-	std::pair<std::vector<SigBit>, bool> findGatingCondition(Cell *reg)
+	// Returns: {gating_conds, is_enable, cone_size}
+	std::tuple<std::vector<SigBit>, bool, int> findGatingCondition(Cell *reg)
 	{
 		FfData ff(nullptr, reg);
 		
-		// Get candidate signals downstream of this register
-		// pool<SigBit> downstream = getDownstreamSignals(reg, max_cover);
-		
-		// if (downstream.empty()) {
-		// 	log_debug("  No downstream candidates for %s\n", log_id(reg));
-		// 	return {{}, false};
-		// }
-		
-		// Also include upstream signals that could affect D
 		pool<SigBit> d_inputs;
 		for (auto bit : sigmap(ff.sig_d))
 			if (bit.wire)
 				d_inputs.insert(bit);
+		
 		pool<SigBit> upstream = getUpstreamSignals(d_inputs, max_cover);
 		
-		// Combine and limit candidates
 		std::vector<SigBit> candidates;
-		// for (auto bit : downstream)
-		// 	candidates.push_back(bit);
-		// for (auto bit : upstream)
-		// 	if (!downstream.count(bit))
-		// 		candidates.push_back(bit);
-
 		for (auto bit : upstream)
 			candidates.push_back(bit);
-
-				
 		
 		if ((int)candidates.size() > max_cover)
 			candidates.resize(max_cover);
 		
-		log_debug("  Found %zu candidate signals\n", candidates.size());
+		if (candidates.empty())
+			return {{}, false, 0};
 		
-		// Try as clock enable first (more common)
-		if (isValidGatingSet(candidates, ff.sig_d, ff.sig_q, true)) {
-			minimizeGatingCondition(candidates, candidates.begin(), candidates.end(),
-			                        ff.sig_d, ff.sig_q, true);
-			if (!candidates.empty()) {
-				return {candidates, true};  // true = clock enable
-			}
+		// Create SAT solver ONCE for this register
+		pool<Cell*> cone = getConeOfLogic(ff.sig_d);
+		int cone_size = (int)cone.size();
+		
+		// Skip registers with trivial cones (not worth gating) or huge cones (too expensive)
+		const int MIN_CONE_SIZE = 5;
+		const int MAX_CONE_SIZE = 500;
+		if (cone_size < MIN_CONE_SIZE || cone_size > MAX_CONE_SIZE)
+			return {{}, false, cone_size};
+		
+		ezSatPtr ez;
+		SatGen satgen(ez.get(), &sigmap);
+		for (auto cell : cone)
+			satgen.importCell(cell);
+		
+		// Try as clock enable first
+		if (isValidGatingSetWithSolver(ez, satgen, candidates, ff.sig_d, ff.sig_q, true)) {
+			minimizeGatingConditionWithSolver(ez, satgen, candidates, candidates.begin(), candidates.end(),
+			                                   ff.sig_d, ff.sig_q, true);
+			if (!candidates.empty())
+				return {candidates, true, cone_size};
 		}
 		
 		// Try as clock disable
-		if (isValidGatingSet(candidates, ff.sig_d, ff.sig_q, false)) {
-			minimizeGatingCondition(candidates, candidates.begin(), candidates.end(),
-			                        ff.sig_d, ff.sig_q, false);
-			if (!candidates.empty()) {
-				return {candidates, false};  // false = clock disable
-			}
+		if (isValidGatingSetWithSolver(ez, satgen, candidates, ff.sig_d, ff.sig_q, false)) {
+			minimizeGatingConditionWithSolver(ez, satgen, candidates, candidates.begin(), candidates.end(),
+			                                   ff.sig_d, ff.sig_q, false);
+			if (!candidates.empty())
+				return {candidates, false, cone_size};
 		}
 		
-		return {{}, false};
+		return {{}, false, cone_size};
 	}
 	
 	// Insert clock gating logic for a group of registers
@@ -338,9 +382,6 @@ struct InferCeWorker
 	{
 		if (regs.empty() || gating_conds.empty())
 			return;
-		
-		log("  Inserting clock gate for %zu registers with %zu condition signals\n",
-		    regs.size(), gating_conds.size());
 		
 		// Build gating condition: OR for enable, AND for disable
 		SigBit gating_signal;
@@ -371,7 +412,6 @@ struct InferCeWorker
 			FfData ff(nullptr, reg);
 			
 			if (ff.has_ce) {
-				// Already has CE, AND with new condition
 				Wire *combined_ce = module->addWire(NEW_ID);
 				module->addAnd(NEW_ID, ff.sig_ce, gating_signal, combined_ce);
 				ff.sig_ce = combined_ce;
@@ -385,8 +425,7 @@ struct InferCeWorker
 		}
 	}
 	
-	// Check if register can be added to an existing gate (subset/superset matching)
-	// Returns true if the existing gate's condition is a valid gating condition for this register
+	// Check if register can be added to an existing gate
 	bool canReuseGate(const std::vector<SigBit> &existing_conds, Cell *reg, bool is_enable)
 	{
 		FfData ff(nullptr, reg);
@@ -396,9 +435,6 @@ struct InferCeWorker
 	// Main processing function
 	void run()
 	{
-		log("Processing module %s\n", log_id(module));
-		
-		// Collect all registers
 		std::vector<Cell*> registers;
 		for (auto cell : module->cells()) {
 			if (!cell->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
@@ -408,116 +444,87 @@ struct InferCeWorker
 				continue;
 			
 			FfData ff(nullptr, cell);
-			
-			// Skip registers that already have CE
-			if (ff.has_ce) {
-				log_debug("  Skipping %s: already has CE\n", log_id(cell));
+			if (ff.has_ce || !ff.has_clk)
 				continue;
-			}
-			
-			if (!ff.has_clk) {
-				log_debug("  Skipping %s: no clock\n", log_id(cell));
-				continue;
-			}
 			
 			registers.push_back(cell);
 		}
 		
-		log("  Found %zu registers without CE\n", registers.size());
+		log("Processing module %s: %zu cells, %zu flip-flops, %zu wires\n",
+		    log_id(module), module->cells().size(), registers.size(), module->wires().size());
 		
-		// Inverted index approach: net -> list of gate indices containing that net
-		// This allows finding subsets/supersets, not just exact matches
+		if (registers.empty())
+			return;
+		
 		struct AcceptedGate {
 			std::vector<SigBit> conds;
-			pool<SigBit> cond_set;  // For fast subset/superset checks
+			pool<SigBit> cond_set;
 			std::vector<Cell*> regs;
 			bool is_enable;
 		};
 		std::vector<AcceptedGate> accepted_gates;
-		dict<SigBit, std::vector<size_t>> net_to_accepted;  // Inverted index
+		dict<SigBit, std::vector<size_t>> net_to_accepted;
 		
-		int processed = 0;
+		int reg_idx = 0;
 		for (auto reg : registers) {
-			if (processed % 100 == 0 && processed > 0)
-				log("  Processed %d/%zu registers\n", processed, registers.size());
-			processed++;
+			auto [gating_conds, is_enable, cone_size] = findGatingCondition(reg);
+			log("Processing register %d/%zu: %s (cone=%d)\n", ++reg_idx, registers.size(), log_id(reg), cone_size);
 			
-			log_debug("Processing register %s\n", log_id(reg));
-			
-			auto [gating_conds, is_enable] = findGatingCondition(reg);
-			
-			if (gating_conds.empty()) {
-				log_debug("  No valid gating condition found\n");
+			if (gating_conds.empty())
 				continue;
-			}
 			
-			// Build set of condition signals for this register
 			pool<SigBit> cond_set;
 			for (auto bit : gating_conds)
 				cond_set.insert(bit);
 			
-			// Find all accepted gates sharing any net with this register's condition
+			// Find candidate gates sharing any net
 			pool<size_t> candidate_gates;
-			for (auto bit : gating_conds) {
-				if (net_to_accepted.count(bit)) {
+			for (auto bit : gating_conds)
+				if (net_to_accepted.count(bit))
 					for (auto idx : net_to_accepted[bit])
 						candidate_gates.insert(idx);
-				}
-			}
 			
-			// Try to find a compatible existing gate (SAT-verify each candidate)
+			// HEURISTIC: Only check top 3 gates (by size) for reuse
+			const int MAX_REUSE_CHECKS = 3;
+			
+			std::vector<size_t> sorted_candidates(candidate_gates.begin(), candidate_gates.end());
+			std::sort(sorted_candidates.begin(), sorted_candidates.end(), [&](size_t a, size_t b) {
+				return accepted_gates[a].regs.size() > accepted_gates[b].regs.size();
+			});
+			
 			bool found_match = false;
-			for (auto idx : candidate_gates) {
-				auto &gate = accepted_gates[idx];
+			int checked = 0;
+			for (auto idx : sorted_candidates) {
+				if (checked >= MAX_REUSE_CHECKS)
+					break;
 				
-				// Must match enable/disable polarity
+				auto &gate = accepted_gates[idx];
 				if (gate.is_enable != is_enable)
 					continue;
 				
-				// Check if existing gate's condition works for this register
-				// This allows: gate condition {x,y} can work for register with {x,y,z}
-				// (existing is subset) or register with {x} (existing is superset)
+				checked++;
 				if (canReuseGate(gate.conds, reg, is_enable)) {
 					gate.regs.push_back(reg);
-					log_debug("  Reusing existing gate %zu for %s (flexible match)\n", 
-					          idx, log_id(reg));
 					found_match = true;
 					break;
 				}
 			}
 			
 			if (!found_match) {
-				// Create new accepted gate
 				size_t new_idx = accepted_gates.size();
 				accepted_gates.push_back({gating_conds, cond_set, {reg}, is_enable});
-				
-				// Update inverted index
 				for (auto bit : gating_conds)
 					net_to_accepted[bit].push_back(new_idx);
-				
-				log("  Found new gating condition for %s (%s)\n",
-				    log_id(reg), is_enable ? "enable" : "disable");
 			}
 		}
 		
-		// Insert clock gates for groups that meet minimum register threshold
-		int gates_inserted = 0;
+		// Insert clock gates for groups meeting threshold
 		for (auto &gate : accepted_gates) {
 			if ((int)gate.regs.size() >= min_regs) {
 				insertClockGate(gate.regs, gate.conds, gate.is_enable);
-				gates_inserted++;
 				accepted_count += gate.regs.size();
-			} else {
-				log_debug("  Skipping gating condition (only %zu registers, need %d)\n",
-				          gate.regs.size(), min_regs);
 			}
 		}
-		
-		log("  Inserted %d clock gates\n", gates_inserted);
-		log("  Statistics: accepted=%d, rejected_sat=%d\n",
-		    accepted_count, rejected_sat_count);
-		log("  SAT stats: literals=%d, expressions=%d\n",
-		    ez->numLiterals(), ez->numExpressions());
 	}
 };
 
@@ -568,29 +575,14 @@ struct InferCePass : public Pass {
 		}
 		extra_args(args, argidx, design);
 		
-		log("Configuration: max_cover=%d, min_regs=%d\n", max_cover, min_regs);
-		
-		// Clear profile file and write header
-		std::ofstream clear_file("ff_profile.txt", std::ios::trunc);
-		clear_file << "Flip-Flop Profile Report\n";
-		clear_file << "========================\n";
-		clear_file.close();
-		
 		int total_gates = 0;
-		
 		for (auto module : design->selected_modules()) {
-			// Profile BEFORE clock gating
-			profileFlipFlops(module, "ff_profile.txt", "BEFORE infer_ce");
-			
 			InferCeWorker worker(module, max_cover, min_regs);
 			worker.run();
 			total_gates += worker.accepted_count;
-			
-			// Profile AFTER clock gating
-			profileFlipFlops(module, "ff_profile.txt", "AFTER infer_ce");
 		}
 		
-		log("Total clock gates inserted: %d\n", total_gates);
+		log("Inserted clock enables for %d registers.\n", total_gates);
 	}
 } InferCePass;
 
