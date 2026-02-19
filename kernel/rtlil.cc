@@ -2083,6 +2083,15 @@ namespace {
 				return;
 			}
 
+			if (cell->type == ID($icg)) {
+				port(ID::CLK, 1);
+				port(ID::EN, 1);
+				port(ID::SE, 1);
+				port(ID::GCLK, 1);
+				check_expected();
+				return;
+			}
+
 			if (cell->type == ID($dffsr)) {
 				param_bool(ID::CLK_POLARITY);
 				param_bool(ID::SET_POLARITY);
