@@ -28,7 +28,7 @@ PRIVATE_NAMESPACE_BEGIN
 
 // Configuration
 static const int DEFAULT_MAX_COVER = 100;      // Max candidate signals to consider
-static const int DEFAULT_MIN_REGS = 10;         // Min registers per clock gate
+static const int DEFAULT_MIN_NET_SIZE = 10;         // Min registers per clock gate
 
 struct InferCeWorker
 {
@@ -37,7 +37,7 @@ struct InferCeWorker
 	
 	// Configuration
 	int max_cover;
-	int min_regs;
+	int min_net_size;
 	
 	// Maps output signal bits to their driver cells
 	dict<SigBit, Cell*> sig_to_driver;
@@ -53,9 +53,9 @@ struct InferCeWorker
 	int rejected_sat_count = 0;
 	int sat_solves = 0;
 	
-	InferCeWorker(Module *module, int max_cover, int min_regs)
+	InferCeWorker(Module *module, int max_cover, int min_net_size)
 		: module(module), sigmap(module), 
-		  max_cover(max_cover), min_regs(min_regs)
+		  max_cover(max_cover), min_net_size(min_net_size)
 	{
 		// Build driver and sink maps
 		for (auto cell : module->cells()) {
@@ -481,7 +481,7 @@ struct InferCeWorker
 		
 		// Insert clock gates for groups meeting threshold
 		for (auto &gate : accepted_gates) {
-			if ((int)gate.regs.size() >= min_regs) {
+			if ((int)gate.regs.size() >= min_net_size) {
 				insertClockGate(gate.regs, gate.conds, gate.is_enable);
 				accepted_count += gate.regs.size();
 			}
@@ -509,9 +509,9 @@ struct InferCePass : public Pass {
 		log("        maximum number of candidate signals to consider per register\n");
 		log("        (default: %d)\n", DEFAULT_MAX_COVER);
 		log("\n");
-		log("    -min_regs <n>\n");
+		log("    -min_net_size <n>\n");
 		log("        minimum number of registers that must share a gating condition\n");
-		log("        for a clock gate to be inserted (default: %d)\n", DEFAULT_MIN_REGS);
+		log("        for a clock gate to be inserted (default: %d)\n", DEFAULT_MIN_NET_SIZE);
 		log("\n");
 	}
 	
@@ -520,7 +520,7 @@ struct InferCePass : public Pass {
 		log_header(design, "Executing INFER_CE pass.\n");
 		
 		int max_cover = DEFAULT_MAX_COVER;
-		int min_regs = DEFAULT_MIN_REGS;
+		int min_net_size = DEFAULT_MIN_NET_SIZE;
 		
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -528,8 +528,8 @@ struct InferCePass : public Pass {
 				max_cover = std::stoi(args[++argidx]);
 				continue;
 			}
-			if (args[argidx] == "-min_regs" && argidx+1 < args.size()) {
-				min_regs = std::stoi(args[++argidx]);
+			if (args[argidx] == "-min_net_size" && argidx+1 < args.size()) {
+				min_net_size = std::stoi(args[++argidx]);
 				continue;
 			}
 			break;
@@ -538,7 +538,7 @@ struct InferCePass : public Pass {
 		
 		int total_gates = 0;
 		for (auto module : design->selected_modules()) {
-			InferCeWorker worker(module, max_cover, min_regs);
+			InferCeWorker worker(module, max_cover, min_net_size);
 			worker.run();
 			total_gates += worker.accepted_count;
 		}
