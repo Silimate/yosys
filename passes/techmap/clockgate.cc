@@ -222,6 +222,8 @@ struct ClockgatePass : public Pass {
 		log("        Intended for DFT scan-enable pins.\n");
 		log("    -min_net_size <n>\n");
 		log("        Only transform sets of at least <n> eligible FFs.\n");
+		log("    -max_src <n>\n");
+		log("        Maximum number of src attributes to copy to ICG cells (default: unlimited).\n");
 		log("        \n");
 	}
 
@@ -252,6 +254,12 @@ struct ClockgatePass : public Pass {
 		int net_size;
 		// After ICG generation, we have new gated CLK signals
 		Wire* new_net;
+		// The ICG cell created for this clock net
+		Cell* icg_cell = nullptr;
+		// The CE inverter cell (if pol_ce is negative)
+		Cell* ce_not_cell = nullptr;
+		// Count of src attributes added
+		int src_count = 0;
 	};
 
 	ClkNetInfo clk_info_from_ff(FfData& ff) {
@@ -270,6 +278,7 @@ struct ClockgatePass : public Pass {
 		std::vector<std::string> liberty_files;
 		std::vector<std::string> dont_use_cells;
 		int min_net_size = 0;
+		int max_src = -1;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -299,6 +308,10 @@ struct ClockgatePass : public Pass {
 			}
 			if (args[argidx] == "-min_net_size" && argidx+1 < args.size()) {
 				min_net_size = atoi(args[++argidx].c_str());
+				continue;
+			}
+			if (args[argidx] == "-max_src" && argidx+1 < args.size()) {
+				max_src = atoi(args[++argidx].c_str());
 				continue;
 			}
 			break;
@@ -381,14 +394,19 @@ struct ClockgatePass : public Pass {
 				icg->setPort(matching_icg_desc->ce_pin, clk.ce_bit);
 				icg->setPort(matching_icg_desc->clk_in_pin, clk.clk_bit);
 				gclk.new_net = module->addWire(NEW_ID2_SUFFIX("gclk"));
+				gclk.icg_cell = icg;
 				icg->setPort(matching_icg_desc->clk_out_pin, gclk.new_net);
 				// Tie low DFT ports like scan chain enable
 				for (auto port : matching_icg_desc->tie_lo_pins)
 					icg->setPort(port, Const(0, 1));
 				// Fix CE polarity if needed
 				if (!clk.pol_ce) {
-					SigBit ce_fixed_pol = module->NotGate(NEW_ID2_SUFFIX("ce_not"), clk.ce_bit);
-					icg->setPort(matching_icg_desc->ce_pin, ce_fixed_pol);
+					Wire *ce_not_wire = module->addWire(NEW_ID2_SUFFIX("ce_not_w"));
+					Cell *ce_not = module->addCell(NEW_ID2_SUFFIX("ce_not"), ID($_NOT_));
+					ce_not->setPort(ID::A, clk.ce_bit);
+					ce_not->setPort(ID::Y, ce_not_wire);
+					gclk.ce_not_cell = ce_not;
+					icg->setPort(matching_icg_desc->ce_pin, ce_not_wire);
 				}
 			}
 
@@ -403,6 +421,14 @@ struct ClockgatePass : public Pass {
 				log("Found new_net for %s\n", cell->name);
 				if (!it->second.new_net)
 					continue;
+
+				// Accumulate src attributes from all FFs sharing this ICG
+				if (max_src < 0 || it->second.src_count < max_src) {
+					it->second.icg_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
+					if (it->second.ce_not_cell)
+						it->second.ce_not_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
+					it->second.src_count++;
+				}
 
 				log("Tryuing to fix up FF %s\n", cell->name);
 
@@ -428,3 +454,4 @@ struct ClockgatePass : public Pass {
 
 
 PRIVATE_NAMESPACE_END
+
