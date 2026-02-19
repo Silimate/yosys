@@ -17,7 +17,7 @@ ENABLE_GHDL := 0
 ENABLE_SLANG := 0
 ENABLE_VERIFIC := 1
 ENABLE_VERIFIC_SYSTEMVERILOG := 1
-ENABLE_VERIFIC_VHDL := 1
+ENABLE_VERIFIC_VHDL := 0
 ENABLE_VERIFIC_HIER_TREE := 1
 ENABLE_VERIFIC_SILIMATE_EXTENSIONS := 1
 ENABLE_VERIFIC_YOSYSHQ_EXTENSIONS := 0
@@ -177,7 +177,7 @@ ifeq ($(OS), Haiku)
 CXXFLAGS += -D_DEFAULT_SOURCE
 endif
 
-YOSYS_VER := 0.62+9
+YOSYS_VER := 0.62+55
 YOSYS_MAJOR := $(shell echo $(YOSYS_VER) | cut -d'.' -f1)
 YOSYS_MINOR := $(shell echo $(YOSYS_VER) | cut -d'.' -f2)
 YOSYS_COMMIT := $(shell echo $(YOSYS_VER) | cut -d'.' -f3)
@@ -669,6 +669,7 @@ $(eval $(call add_include_file,kernel/yosys_common.h))
 $(eval $(call add_include_file,kernel/yw.h))
 $(eval $(call add_include_file,libs/ezsat/ezsat.h))
 $(eval $(call add_include_file,libs/ezsat/ezminisat.h))
+$(eval $(call add_include_file,libs/ezsat/ezcmdline.h))
 ifeq ($(ENABLE_ZLIB),1)
 $(eval $(call add_include_file,libs/fst/fstapi.h))
 endif
@@ -714,6 +715,7 @@ OBJS += libs/json11/json11.o
 
 OBJS += libs/ezsat/ezsat.o
 OBJS += libs/ezsat/ezminisat.o
+OBJS += libs/ezsat/ezcmdline.o
 
 OBJS += libs/minisat/Options.o
 OBJS += libs/minisat/SimpSolver.o
@@ -1032,9 +1034,11 @@ makefile-tests/%: %/run-test.mk $(TARGETS) $(EXTRA_TARGETS)
 	$(MAKE) -C $* -f run-test.mk
 	+@echo "...passed tests in $*"
 
-test: makefile-tests abcopt-tests seed-tests
+test: vanilla-test unit-test
+
+vanilla-test: makefile-tests abcopt-tests seed-tests
 	@echo ""
-	@echo "  Passed \"make test\"."
+	@echo "  Passed \"make vanilla-test\"."
 ifeq ($(ENABLE_VERIFIC),1)
 ifeq ($(YOSYS_NOVERIFIC),1)
 	@echo "  Ran tests without verific support due to YOSYS_NOVERIFIC=1."
@@ -1066,11 +1070,11 @@ ystests: $(TARGETS) $(EXTRA_TARGETS)
 
 # Unit test
 unit-test: libyosys.so
-	@$(MAKE) -C $(UNITESTPATH) CXX="$(CXX)" CC="$(CC)" CPPFLAGS="$(CPPFLAGS)" \
+	@$(MAKE) -f $(UNITESTPATH)/Makefile CXX="$(CXX)" CC="$(CC)" CPPFLAGS="$(CPPFLAGS)" \
 		CXXFLAGS="$(CXXFLAGS)" LINKFLAGS="$(LINKFLAGS)" LIBS="$(LIBS)" ROOTPATH="$(CURDIR)"
 
 clean-unit-test:
-	@$(MAKE) -C $(UNITESTPATH) clean
+	@$(MAKE) -f $(UNITESTPATH)/Makefile clean
 
 install-dev: $(PROGRAM_PREFIX)yosys-config share
 	$(INSTALL_SUDO) mkdir -p $(DESTDIR)$(BINDIR)

@@ -257,12 +257,16 @@ bool is_blackbox(Netlist *nl)
 
 RTLIL::IdString VerificImporter::new_verific_id(Verific::DesignObj *obj)
 {
-	return module->uniquify(RTLIL::escape_id(obj->Name()));
+	RTLIL::IdString base = RTLIL::escape_id(obj->Name());
+	int &idx = uniquify_cache[base];
+	return module->uniquify(base, idx);
 }
 
 RTLIL::IdString VerificImporter::new_verific_id_suffix(RTLIL::IdString id, const char *suffix)
 {
-	return module->uniquify(stringf("%s_%s", id, suffix));
+	RTLIL::IdString base = stringf("%s_%s", id, suffix);
+	int &idx = uniquify_cache[base];
+	return module->uniquify(base, idx);
 }
 
 static const RTLIL::Const extract_vhdl_boolean(std::string &val)
@@ -1548,6 +1552,8 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 	module = new RTLIL::Module;
 	module->name = module_name;
 	design->add(module);
+
+	uniquify_cache.clear();
 
 	if (is_blackbox(nl)) {
 		log("Importing blackbox module %s.\n", RTLIL::id2cstr(module->name));

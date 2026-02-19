@@ -462,7 +462,7 @@ struct WreduceWorker
 		return count;
 	}
 
-	void run_wire(Wire *w, pool<SigSpec> complete_wires)
+	void run_wire(Wire *w, const pool<SigSpec> &complete_wires)
 	{
 		int unused_top_bits = 0;
 
@@ -482,7 +482,7 @@ struct WreduceWorker
 		if (unused_top_bits == 0 || unused_top_bits == GetSize(w))
 			return;
 
-		if (complete_wires[mi.sigmap(w).extract(0, GetSize(w) - unused_top_bits)])
+		if (complete_wires.count(mi.sigmap(w).extract(0, GetSize(w) - unused_top_bits)))
 			return;
 
 		log_debug("Removed top %d bits (of %d) from wire %s.%s.\n", unused_top_bits, GetSize(w), log_id(module), log_id(w));
@@ -512,21 +512,25 @@ struct WreduceWorker
 					keep_bits.insert(bit);
 		}
 
-		while (!work_queue_cells.empty() && !work_queue_wires.empty())
+		while (!work_queue_cells.empty() || !work_queue_wires.empty())
 		{
-			// Initialize complete wires
-			pool<SigSpec> complete_wires;
-			for (auto w : module->wires())
-				complete_wires.insert(mi.sigmap(w));
-
 			// Run cells
 			work_queue_bits.clear();
 			for (auto c : work_queue_cells)
 				run_cell(c);
 
 			// Run wires
-			for (auto w : work_queue_wires)
-				run_wire(w, complete_wires);
+			if (!work_queue_wires.empty()) {
+				pool<SigSpec> complete_wires;
+				for (auto w : module->wires())
+					complete_wires.insert(mi.sigmap(w));
+				for (auto w : work_queue_wires)
+					run_wire(w, complete_wires);
+			}
+
+			// Skip reload if nothing changed
+			if (work_queue_bits.empty())
+				break;
 
 			// Get next batch of cells to process
 			work_queue_cells.clear();
@@ -541,8 +545,9 @@ struct WreduceWorker
 				if (bit.wire != NULL && module->selected(bit.wire))
 					work_queue_wires.insert(bit.wire);
 
-			// Reload module
-			mi.reload_module();
+			// Reload module only if there is more work to do
+			if (!work_queue_cells.empty() || !work_queue_wires.empty())
+				mi.reload_module();
 		}
 	}
 };

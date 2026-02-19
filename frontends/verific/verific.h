@@ -80,6 +80,8 @@ struct VerificImporter
 	bool mode_gates, mode_keep, mode_nosva, mode_sva_continue, mode_names, mode_verific;
 	bool mode_autocover, mode_fullinit;
 
+	dict<RTLIL::IdString, int> uniquify_cache;
+
 	int num_sva_continue = 0;
 
 	VerificImporter(bool mode_gates, bool mode_keep, bool mode_nosva, bool mode_sva_continue, bool mode_names, bool mode_verific, bool mode_autocover, bool mode_fullinit);

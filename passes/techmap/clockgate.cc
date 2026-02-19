@@ -421,6 +421,14 @@ struct ClockgatePass : public Pass {
 				log("Found new_net for %s\n", cell->name);
 				if (!it->second.new_net)
 					continue;
+				
+				// Accumulate src attributes from all FFs sharing this ICG
+				if (max_src < 0 || it->second.src_count < max_src) {
+					it->second.icg_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
+					if (it->second.ce_not_cell)
+						it->second.ce_not_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
+					it->second.src_count++;
+				}
 
 				// Accumulate src attributes from all FFs sharing this ICG
 				if (max_src < 0 || it->second.src_count < max_src) {

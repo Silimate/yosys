@@ -110,7 +110,7 @@ struct FfMergeHelper
 	// a constant-input FF bit (with matching initial value and reset value).
 	// However, this will not work if the input is all-constant — if the caller
 	// cares about this case, it needs to check for it explicitely.
-	bool find_input_ff(RTLIL::SigSpec sig, FfData &ff, pool<std::pair<Cell *, int>> &bits);
+	bool find_input_ff(RTLIL::SigSpec sig, FfData &ff, pool<std::pair<Cell *, int>> &bits, RTLIL::IdString name);
 
 	// To be called on find_output_ff result that will be merged.  This
 	// marks the given FF bits as used up (and not to be considered for
