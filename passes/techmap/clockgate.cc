@@ -428,7 +428,8 @@ struct ClockgatePass : public Pass {
 				ff.sig_clk = (*it).second.new_net;
 
 				// Rebuild the flop
-				(void)ff.emit();
+				Cell *new_ff = ff.emit();
+				new_ff->set_bool_attribute(ID::is_clock_gated);
 
 				gated_flop_count++;
 			}
