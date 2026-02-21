@@ -536,6 +536,18 @@ struct SimInstance
 			return;
 		}
 
+		if (cell->type == ID($icg))
+		{
+			// Integrated clock gate: GCLK = CLK & (EN | SE)
+			Const clk = get_state(cell->getPort(ID::CLK));
+			Const en = get_state(cell->getPort(ID::EN));
+			Const se = cell->hasPort(ID::SE) ? get_state(cell->getPort(ID::SE)) : Const(State::S0);
+			Const en_or_se = const_or(en, se, false, false, 1);
+			Const gclk = const_and(clk, en_or_se, false, false, 1);
+			set_state(cell->getPort(ID::GCLK), gclk);
+			return;
+		}
+
 		if (yosys_celltypes.cell_evaluable(cell->type))
 		{
 			RTLIL::SigSpec sig_a, sig_b, sig_c, sig_d, sig_s, sig_y;
