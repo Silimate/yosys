@@ -114,16 +114,46 @@ void FstData::extractVarNames()
 	struct fstHier *h;
 	std::string fst_scope_name;
 
+	// Track current fork scope
+	std::string current_fork_scope;
+	fstHandle next_virtual_handle = (fstHandle)-1; // forks get negative handle values for better identification
+
 	while ((h = fstReaderIterateHier(ctx))) {
 		switch (h->htyp) {
-			case FST_HT_SCOPE: {
-				fst_scope_name = fstReaderPushScope(ctx, h->u.scope.name, NULL);
-				break;
+		case FST_HT_SCOPE: {
+			fst_scope_name = fstReaderPushScope(ctx, h->u.scope.name, NULL);
+
+			// Fork scopes are identified by FST_ST_VCD_FORK
+			if (h->u.scope.typ == FST_ST_VCD_FORK) {
+				current_fork_scope = fst_scope_name;
+				// Create new vector that contains struct members
+				fork_scopes[current_fork_scope] = std::vector<fstHandle>();
 			}
-			case FST_HT_UPSCOPE: {
-				fst_scope_name = fstReaderPopScope(ctx);
-				break;
+			break;
+		}
+		case FST_HT_UPSCOPE: {
+			if (!current_fork_scope.empty() && current_fork_scope == fst_scope_name) {
+
+				// Create a virtual handle
+				fstHandle virtual_handle = next_virtual_handle--;
+
+				// Map the scope to the virtual handle
+				name_to_handle[current_fork_scope] = virtual_handle;
+				virtual_to_fork[virtual_handle] = current_fork_scope;
+
+				// Calculate total width of the struct and map it to the virtual handle
+				int total_width = 0;
+				for (fstHandle member : fork_scopes[current_fork_scope]) {
+					if (handle_to_var.find(member) != handle_to_var.end()) {
+						total_width += handle_to_var[member].width;
+					}
+				}
+				virtual_handle_widths[virtual_handle] = total_width;
+				current_fork_scope.clear();
 			}
+			fst_scope_name = fstReaderPopScope(ctx);
+			break;
+		}
 			case FST_HT_VAR: {
 				FstVar var;
 				var.id = h->u.var.handle;
@@ -133,10 +163,13 @@ void FstData::extractVarNames()
 				var.scope = fst_scope_name;
 				normalize_brackets(var.scope);
 				var.width = h->u.var.length;
-				vars.push_back(var);
-				if (!var.is_alias)
-					handle_to_var[h->u.var.handle] = var;
-				std::string clean_name;
+			vars.push_back(var);
+			if (!var.is_alias)
+				handle_to_var[h->u.var.handle] = var;
+			if (!current_fork_scope.empty()) {
+				fork_scopes[current_fork_scope].push_back(h->u.var.handle);
+			}
+			std::string clean_name;
 				bool has_space = false;
 				for(size_t i=0;i<strlen(h->u.var.name);i++) 
 				{
@@ -275,8 +308,59 @@ void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t sta
 
 std::string FstData::valueOf(fstHandle signal)
 {
+	// Condition to check if the signal comes from a fork scope
+	if ((int)signal < 0 && virtual_to_fork.find(signal) != virtual_to_fork.end()) {
+		std::string fork_scope = virtual_to_fork[signal];
+		if (fork_scopes.find(fork_scope) != fork_scopes.end()) {
+
+			// Empty string to store the full struct values
+			std::string result;
+
+			// Get the members of the fork scope
+			const std::vector<fstHandle>& members = fork_scopes[fork_scope];
+			for (auto it = members.rbegin(); it != members.rend(); ++it) {
+				fstHandle member = *it;
+				std::string member_val;
+				int expected_width = 0;
+
+				// Get the width of the member
+				if (handle_to_var.find(member) != handle_to_var.end()) {
+					expected_width = handle_to_var[member].width;
+				}
+
+				// Check if the member has a value
+				if (past_data.find(member) != past_data.end()) {
+					member_val = past_data[member];
+
+					// If the member value is shorter than the expected width, pad with zeros
+					if (expected_width > 0 && (int)member_val.length() < expected_width) {
+						member_val = std::string(expected_width - member_val.length(), '0') + member_val;
+					}
+				} else if (expected_width > 0) {
+					// If the member has no value, pad with x's
+					member_val = std::string(expected_width, 'x');
+				} else {
+					member_val = "x";
+				}
+
+				// Add the member value to the result
+				result += member_val;
+			}
+			return result;
+		}
+
+		// If the fork scope is not found, pad with x's based on the width
+		if (virtual_handle_widths.find(signal) != virtual_handle_widths.end()) {
+			return std::string(virtual_handle_widths[signal], 'x');
+		}
+		return "x";
+	}
+	
 	if (past_data.find(signal) == past_data.end()) {
-		return std::string(handle_to_var[signal].width, 'x');
+		if (handle_to_var.find(signal) != handle_to_var.end()) {
+			return std::string(handle_to_var[signal].width, 'x');
+		}
+		return "x";
 	}
 	return past_data[signal];
 }
