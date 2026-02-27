@@ -2524,7 +2524,6 @@ struct AnnotateActivity : public OutputWriter {
 		double real_timescale = worker->fst->getTimescale();
 		if (worker->debug) {
 			log_debug("Timescale %e seconds extracted from converted VCD file", real_timescale);
-			log_flush();
 		}
 
 		// Compute clock period, find the highest toggling signal and compute its average period
@@ -2537,6 +2536,8 @@ struct AnnotateActivity : public OutputWriter {
 			std::vector<double_t> &clktoggleCounts = itr->second.toggleCounts;
 			clk_period = real_timescale * (double)max_time / (clktoggleCounts[0] / 2.0);
 		}
+		log_flush();
+
 		double frequency = 1.0 / clk_period;
 		worker->top->module->set_string_attribute("$FREQUENCY", std::to_string(frequency));
 		worker->top->module->set_string_attribute("$DURATION", std::to_string(max_time));
