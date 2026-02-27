@@ -116,7 +116,9 @@ void FstData::extractVarNames()
 
 	// Track current fork scope
 	std::string current_fork_scope;
-	fstHandle next_fork_handle = 0x80000000;
+
+	// Start fork handles after the maximum real handle from FST file to avoid collisions
+	fstHandle next_fork_handle = fstReaderGetMaxHandle(ctx) + 1;
 	std::map<std::string, std::vector<fstHandle>> fork_scopes;
 
 	while ((h = fstReaderIterateHier(ctx))) {
@@ -134,13 +136,16 @@ void FstData::extractVarNames()
 		}
 		case FST_HT_UPSCOPE: {
 			if (!current_fork_scope.empty() && current_fork_scope == fst_scope_name) {
+				// Assign a unique handle to this fork scope
 				fstHandle fork_handle = next_fork_handle++;
+
+				// Map normalized scope name to the handle for future lookups via getHandle()
 				std::string normalized_fork_scope = current_fork_scope;
 				normalize_brackets(normalized_fork_scope);
-				
 				name_to_handle[normalized_fork_scope] = fork_handle;
 				fork_scope_members[fork_handle] = fork_scopes[current_fork_scope];
-				
+
+				// Clear current fork scope for the next scope
 				current_fork_scope.clear();
 			}
 			fst_scope_name = fstReaderPopScope(ctx);
@@ -158,9 +163,12 @@ void FstData::extractVarNames()
 			vars.push_back(var);
 			if (!var.is_alias)
 				handle_to_var[h->u.var.handle] = var;
+
+			// Add variable to fork scope members if we are currently in a fork scope
 			if (!current_fork_scope.empty()) {
 				fork_scopes[current_fork_scope].push_back(h->u.var.handle);
 			}
+
 			std::string clean_name;
 				bool has_space = false;
 				for(size_t i=0;i<strlen(h->u.var.name);i++) 
