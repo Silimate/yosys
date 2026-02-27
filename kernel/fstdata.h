@@ -69,9 +69,7 @@ private:
 	uint64_t last_time;
 	std::map<fstHandle, std::string> past_data;
 	uint64_t past_time;
-	std::map<std::string, std::vector<fstHandle>> fork_scopes;
-	std::map<fstHandle, std::string> virtual_to_fork;
-	std::map<fstHandle, int> virtual_handle_widths;
+	std::map<fstHandle, std::vector<fstHandle>> fork_scope_members;
 	double timescale;
 	std::string timescale_str;
 	uint64_t start_time;
