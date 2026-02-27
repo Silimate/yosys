@@ -131,6 +131,7 @@ void FstData::extractVarNames()
 				if (h->u.scope.typ == FST_ST_VCD_FORK) {
 					fork_scope_stack.push_back(fst_scope_name);
 					// Create new vector that contains struct members
+					normalize_brackets(fst_scope_name);
 					fork_scopes[fst_scope_name] = std::vector<fstHandle>();
 				}
 				break;
