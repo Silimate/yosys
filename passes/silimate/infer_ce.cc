@@ -103,9 +103,10 @@ struct InferCeWorker
 			
 			Cell *driver = sig_to_driver[bit];
 			
-			if (driver->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
-			                    ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
-			                    ID($dffsre), ID($_DFF_P_), ID($_DFF_N_)))
+		if (driver->type.in(ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
+		                    ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr),
+		                    ID($dffsre), ID($_DFF_P_), ID($_DFF_N_), ID($_DFFE_PP_),
+		                    ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_)))
 				continue;
 			
 			for (auto &conn : driver->connections())
