@@ -325,7 +325,7 @@ std::string FstData::valueOf(fstHandle signal)
 
 		// Iterate over members of the struct to get concatenated value.
 		// The first declared member is MSB in SystemVerilog packed structs
-		for (auto m = members.rbegin(); m != members.rend(); ++m) {
+		for (auto m = members.begin(); m != members.end(); m++) {
 			fstHandle member = *m;
 			std::string member_val;
 			
