@@ -348,7 +348,7 @@ std::string FstData::valueOf(fstHandle signal)
 	}
 	
 	// Normal signal handling
-	if (handle_to_var.find(signal) != handle_to_var.end()) {
+	if (past_data.find(signal) == past_data.end()) {
 		return std::string(handle_to_var[signal].width, 'x');
 	}
 	return past_data[signal];
