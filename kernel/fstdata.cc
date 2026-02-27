@@ -129,7 +129,7 @@ void FstData::extractVarNames()
 			// Fork scopes are identified by FST_ST_VCD_FORK
 			if (h->u.scope.typ == FST_ST_VCD_FORK) {
 				current_fork_scope = fst_scope_name;
-				// Create new vector that contains struct members
+				// Create new vector that contains struct members copied during upscope
 				fork_scopes[current_fork_scope] = std::vector<fstHandle>();
 			}
 			break;
@@ -143,6 +143,9 @@ void FstData::extractVarNames()
 				std::string normalized_fork_scope = current_fork_scope;
 				normalize_brackets(normalized_fork_scope);
 				name_to_handle[normalized_fork_scope] = fork_handle;
+
+				// Copy the extracted members of the fork scope to the fork scope members map
+				// for value lookups in valueOf()
 				fork_scope_members[fork_handle] = fork_scopes[current_fork_scope];
 
 				// Clear current fork scope for the next scope
@@ -313,32 +316,32 @@ std::string FstData::valueOf(fstHandle signal)
 	if (it != fork_scope_members.end()) {
 		std::string result;
 		const std::vector<fstHandle>& members = it->second;
-		
-		// Iterate in REVERSE: first declared member is MSB in SystemVerilog packed structs
+
+		// Iterate over members of the struct to get concatenated value.
+		// The first declared member is MSB in SystemVerilog packed structs
 		for (auto m = members.rbegin(); m != members.rend(); ++m) {
 			fstHandle member = *m;
 			std::string member_val;
 			int expected_width = 0;
-			
+
 			// Get the declared width of this member
 			if (handle_to_var.find(member) != handle_to_var.end()) {
 				expected_width = handle_to_var[member].width;
 			}
-			
-			// Get the current value
+			// Get the current value of the member
 			if (past_data.find(member) != past_data.end()) {
 				member_val = past_data[member];
-				// VCD drops leading zeros - must pad to full width
+				// Pad with zeros to the expected width of the member
 				if (expected_width > 0 && (int)member_val.length() < expected_width) {
 					member_val = std::string(expected_width - member_val.length(), '0') + member_val;
 				}
 			} else if (expected_width > 0) {
-				// No value yet, use x's
+				// No value yet, use X to pad
 				member_val = std::string(expected_width, 'x');
-			} else {
+			} else { // fallback to X
 				member_val = "x";
 			}
-			
+			// Concatenate the member value to the overall struct value
 			result += member_val;
 		}
 		return result;
