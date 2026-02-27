@@ -123,37 +123,37 @@ void FstData::extractVarNames()
 
 	while ((h = fstReaderIterateHier(ctx))) {
 		switch (h->htyp) {
-		case FST_HT_SCOPE: {
-			fst_scope_name = fstReaderPushScope(ctx, h->u.scope.name, NULL);
+			case FST_HT_SCOPE: {
+				fst_scope_name = fstReaderPushScope(ctx, h->u.scope.name, NULL);
 
-			// Fork scopes are identified by FST_ST_VCD_FORK
-			if (h->u.scope.typ == FST_ST_VCD_FORK) {
-				current_fork_scope = fst_scope_name;
-				// Create new vector that contains struct members copied during upscope
-				fork_scopes[current_fork_scope] = std::vector<fstHandle>();
+				// Fork scopes are identified by FST_ST_VCD_FORK
+				if (h->u.scope.typ == FST_ST_VCD_FORK) {
+					current_fork_scope = fst_scope_name;
+					// Create new vector that contains struct members copied during upscope
+					fork_scopes[current_fork_scope] = std::vector<fstHandle>();
+				}
+				break;
 			}
-			break;
-		}
-		case FST_HT_UPSCOPE: {
-			if (!current_fork_scope.empty() && current_fork_scope == fst_scope_name) {
-				// Assign a unique handle to this fork scope
-				fstHandle fork_handle = next_fork_handle++;
+			case FST_HT_UPSCOPE: {
+				if (!current_fork_scope.empty() && current_fork_scope == fst_scope_name) {
+					// Assign a unique handle to this fork scope
+					fstHandle fork_handle = next_fork_handle++;
 
-				// Map normalized scope name to the handle for future lookups via getHandle()
-				std::string normalized_fork_scope = current_fork_scope;
-				normalize_brackets(normalized_fork_scope);
-				name_to_handle[normalized_fork_scope] = fork_handle;
+					// Map normalized scope name to the handle for future lookups via getHandle()
+					std::string normalized_fork_scope = current_fork_scope;
+					normalize_brackets(normalized_fork_scope);
+					name_to_handle[normalized_fork_scope] = fork_handle;
 
-				// Copy the extracted members of the fork scope to the fork scope members map
-				// for value lookups in valueOf()
-				fork_scope_members[fork_handle] = fork_scopes[current_fork_scope];
+					// Copy the extracted members of the fork scope to the fork scope members map
+					// for value lookups in valueOf()
+					fork_scope_members[fork_handle] = fork_scopes[current_fork_scope];
 
-				// Clear current fork scope for the next scope
-				current_fork_scope.clear();
+					// Clear current fork scope for the next scope
+					current_fork_scope.clear();
+				}
+				fst_scope_name = fstReaderPopScope(ctx);
+				break;
 			}
-			fst_scope_name = fstReaderPopScope(ctx);
-			break;
-		}
 			case FST_HT_VAR: {
 				FstVar var;
 				var.id = h->u.var.handle;
@@ -163,14 +163,14 @@ void FstData::extractVarNames()
 				var.scope = fst_scope_name;
 				normalize_brackets(var.scope);
 				var.width = h->u.var.length;
-			vars.push_back(var);
-			if (!var.is_alias)
-				handle_to_var[h->u.var.handle] = var;
+				vars.push_back(var);
+				if (!var.is_alias)
+					handle_to_var[h->u.var.handle] = var;
 
-			// Add variable to fork scope members if we are currently in a fork scope
-			if (!current_fork_scope.empty()) {
-				fork_scopes[current_fork_scope].push_back(h->u.var.handle);
-			}
+				// Add variable to fork scope members if we are currently in a fork scope
+				if (!current_fork_scope.empty()) {
+					fork_scopes[current_fork_scope].push_back(h->u.var.handle);
+				}
 
 			std::string clean_name;
 				bool has_space = false;
@@ -348,11 +348,8 @@ std::string FstData::valueOf(fstHandle signal)
 	}
 	
 	// Normal signal handling
-	if (past_data.find(signal) == past_data.end()) {
-		if (handle_to_var.find(signal) != handle_to_var.end()) {
-			return std::string(handle_to_var[signal].width, 'x');
-		}
-		return "x";
+	if (handle_to_var.find(signal) != handle_to_var.end()) {
+		return std::string(handle_to_var[signal].width, 'x');
 	}
 	return past_data[signal];
 }
