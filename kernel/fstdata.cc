@@ -172,7 +172,7 @@ void FstData::extractVarNames()
 					fork_scopes[current_fork_scope].push_back(h->u.var.handle);
 				}
 
-			std::string clean_name;
+				std::string clean_name;
 				bool has_space = false;
 				for(size_t i=0;i<strlen(h->u.var.name);i++) 
 				{
