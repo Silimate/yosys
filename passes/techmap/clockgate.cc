@@ -341,8 +341,6 @@ struct ClockgatePass : public Pass {
 		pool<Cell*> ce_ffs;
 		dict<ClkNetInfo, GClkNetInfo> clk_nets;
 
-
-		log("Found %zu CE FFs\n", ce_ffs.size());
 		int gated_flop_count = 0;
 		for (auto module : design->selected_unboxed_whole_modules()) {
 			for (auto cell : module->cells()) {
@@ -352,13 +350,10 @@ struct ClockgatePass : public Pass {
 				FfData ff(nullptr, cell);
 				// It would be odd to get constants, but we better handle it
 				if (ff.has_ce) {
-					log("FF %s has CE\n", cell->name);
 					if (!ff.sig_clk.is_bit() || !ff.sig_ce.is_bit())
 						continue;
 					if (!ff.sig_clk[0].is_wire() || !ff.sig_ce[0].is_wire())
 						continue;
-
-					log("FF %s has valid CE and CLK\n", cell->name);
 
 					ce_ffs.insert(cell);
 
@@ -369,8 +364,6 @@ struct ClockgatePass : public Pass {
 					clk_nets[info].net_size++;
 				}
 			}
-
-			log("Found %zu clk_nets\n", clk_nets.size());
 
 			for (auto& clk_net : clk_nets) {
 				auto& clk = clk_net.first;
@@ -410,15 +403,12 @@ struct ClockgatePass : public Pass {
 				}
 			}
 
-			log("Found %zu clk_nets\n", clk_nets.size());
-
 			for (auto cell : ce_ffs) {
 				FfData ff(nullptr, cell);
 				ClkNetInfo info = clk_info_from_ff(ff);
 				auto it = clk_nets.find(info);
 				log_assert(it != clk_nets.end() && "Bug: desync ce_ffs and clk_nets");
 
-				log("Found new_net for %s\n", cell->name);
 				if (!it->second.new_net)
 					continue;
 				
@@ -429,16 +419,6 @@ struct ClockgatePass : public Pass {
 						it->second.ce_not_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
 					it->second.src_count++;
 				}
-
-				// Accumulate src attributes from all FFs sharing this ICG
-				if (max_src < 0 || it->second.src_count < max_src) {
-					it->second.icg_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
-					if (it->second.ce_not_cell)
-						it->second.ce_not_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
-					it->second.src_count++;
-				}
-
-				log("Tryuing to fix up FF %s\n", cell->name);
 
 				log_debug("Fix up FF %s\n", cell->name);
 				// Now we start messing with the design
