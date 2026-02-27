@@ -114,8 +114,9 @@ void FstData::extractVarNames()
 	struct fstHier *h;
 	std::string fst_scope_name;
 
-	// Track current fork scope
-	std::string current_fork_scope;
+	// Track nested fork scopes using a stack to handle nested packed structs
+	// Begins with outmost scope and ends with innermost scope
+	std::vector<std::string> fork_scope_stack;
 
 	// Start fork handles after the maximum real handle from FST file to avoid collisions
 	fstHandle next_fork_handle = fstReaderGetMaxHandle(ctx) + 1;
@@ -126,30 +127,35 @@ void FstData::extractVarNames()
 			case FST_HT_SCOPE: {
 				fst_scope_name = fstReaderPushScope(ctx, h->u.scope.name, NULL);
 
-				// Fork scopes are identified by FST_ST_VCD_FORK
+				// Fork scopes are identified by FST_ST_VCD_FORK and are pushed onto the stack
 				if (h->u.scope.typ == FST_ST_VCD_FORK) {
-					current_fork_scope = fst_scope_name;
-					// Create new vector that contains struct members copied during upscope
-					fork_scopes[current_fork_scope] = std::vector<fstHandle>();
+					fork_scope_stack.push_back(fst_scope_name);
+					// Create new vector that contains struct members
+					fork_scopes[fst_scope_name] = std::vector<fstHandle>();
 				}
 				break;
 			}
 			case FST_HT_UPSCOPE: {
-				if (!current_fork_scope.empty() && current_fork_scope == fst_scope_name) {
-					// Assign a unique handle to this fork scope
+				if (!fork_scope_stack.empty() && fork_scope_stack.back() == fst_scope_name) {
+					// Assign a unique handle to this fork scope and increment for future forks
 					fstHandle fork_handle = next_fork_handle++;
 
 					// Map normalized scope name to the handle for future lookups via getHandle()
-					std::string normalized_fork_scope = current_fork_scope;
-					normalize_brackets(normalized_fork_scope);
-					name_to_handle[normalized_fork_scope] = fork_handle;
+					normalize_brackets(fst_scope_name);
+					name_to_handle[fst_scope_name] = fork_handle;
 
 					// Copy the extracted members of the fork scope to the fork scope members map
 					// for value lookups in valueOf()
-					fork_scope_members[fork_handle] = fork_scopes[current_fork_scope];
+					fork_scope_members[fork_handle] = fork_scopes[fst_scope_name];
 
-					// Clear current fork scope for the next scope
-					current_fork_scope.clear();
+					// If this is a nested fork scope, add its handle to the parent fork scope
+					if (fork_scope_stack.size() > 1) {
+						std::string parent_fork = fork_scope_stack[fork_scope_stack.size() - 2];
+						fork_scopes[parent_fork].push_back(fork_handle);
+					}
+
+					// Pop this fork scope from the stack
+					fork_scope_stack.pop_back();
 				}
 				fst_scope_name = fstReaderPopScope(ctx);
 				break;
@@ -167,9 +173,9 @@ void FstData::extractVarNames()
 				if (!var.is_alias)
 					handle_to_var[h->u.var.handle] = var;
 
-				// Add variable to fork scope members if we are currently in a fork scope
-				if (!current_fork_scope.empty()) {
-					fork_scopes[current_fork_scope].push_back(h->u.var.handle);
+				// Add variable to the innermost fork scope in the fork scope stack
+				if (!fork_scope_stack.empty()) {
+					fork_scopes[fork_scope_stack.back()].push_back(h->u.var.handle);
 				}
 
 				std::string clean_name;
@@ -322,24 +328,32 @@ std::string FstData::valueOf(fstHandle signal)
 		for (auto m = members.rbegin(); m != members.rend(); ++m) {
 			fstHandle member = *m;
 			std::string member_val;
-			int expected_width = 0;
+			
+			// Check if this member is itself a nested fork scope (struct)
+			if (fork_scope_members.find(member) != fork_scope_members.end()) {
+				// Recursively get the value of the nested struct
+				member_val = valueOf(member);
+			} else {
+				// Regular variable - look up in past_data
+				int expected_width = 0;
 
-			// Get the declared width of this member
-			if (handle_to_var.find(member) != handle_to_var.end()) {
-				expected_width = handle_to_var[member].width;
-			}
-			// Get the current value of the member
-			if (past_data.find(member) != past_data.end()) {
-				member_val = past_data[member];
-				// Pad with zeros to the expected width of the member
-				if (expected_width > 0 && (int)member_val.length() < expected_width) {
-					member_val = std::string(expected_width - member_val.length(), '0') + member_val;
+				// Get the declared width of this member
+				if (handle_to_var.find(member) != handle_to_var.end()) {
+					expected_width = handle_to_var[member].width;
 				}
-			} else if (expected_width > 0) {
-				// No value yet, use X to pad
-				member_val = std::string(expected_width, 'x');
-			} else { // fallback to X
-				member_val = "x";
+				// Get the current value of the member
+				if (past_data.find(member) != past_data.end()) {
+					member_val = past_data[member];
+					// Pad with zeros to the expected width of the member
+					if (expected_width > 0 && (int)member_val.length() < expected_width) {
+						member_val = std::string(expected_width - member_val.length(), '0') + member_val;
+					}
+				} else if (expected_width > 0) {
+					// No value yet, use X to pad
+					member_val = std::string(expected_width, 'x');
+				} else { // fallback to X
+					member_val = "x";
+				}
 			}
 			// Concatenate the member value to the overall struct value
 			result += member_val;
