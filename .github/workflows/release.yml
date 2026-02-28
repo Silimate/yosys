@@ -38,6 +38,10 @@ jobs:
               git config --global --add safe.directory /src
               git submodule foreach --recursive git config --global --add safe.directory \$toplevel/\$sm_path
 
+              # Alpine/musl compatibility shims for Verific tclmain link step
+              ln -sf /usr/lib/libtcl8.6.so /usr/lib/libtcl.so
+              echo "void dummy_nsl(void){}" | gcc -shared -o /usr/lib/libnsl.so -x c -
+
               # Build Verific TCL main (needed before Yosys)
               cd /src/verific/tclmain
               make
