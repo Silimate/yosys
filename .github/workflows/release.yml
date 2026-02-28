@@ -55,7 +55,8 @@ jobs:
               ) python3 setup.py bdist_wheel --dist-dir /src/dist
 
               # Also build the yosys binary + install tarball
-              make -j$(nproc) SMALL=1 ENABLE_PLUGINS=0 PREFIX=/usr/local install
+              make clean
+              make -j$(nproc) SMALL=1 ENABLE_PLUGINS=0 ENABLE_TCL=1 ENABLE_READLINE=1 PREFIX=/usr/local
               make DESTDIR=/tmp/install PREFIX=/usr/local install
               cd /tmp/install
               tar czf /src/yosys-anylinux-amd64.tar.gz .
