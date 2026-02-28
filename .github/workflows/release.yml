@@ -19,11 +19,12 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
-          ssh-key: ${{ secrets.VERIFIC_DEPLOY_KEY }}
+          token: ${{ secrets.SUBMODULE_PAT }}
 
       - name: Initialize submodules
         run: |
-          git submodule update --init --recursive
+          git -c url."https://x-access-token:${{ secrets.SUBMODULE_PAT }}@github.com/".insteadOf="git@github.com:" \
+            submodule update --init --recursive
 
       - name: Build wheel in Alpine container
         run: |
