@@ -107,7 +107,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-macos-wheel:
-    runs-on: macos-14
+    runs-on: macos-15
     name: Build macOS arm64 wheel
 
     steps:
@@ -117,10 +117,14 @@ jobs:
           submodules: recursive
           ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       - name: Install dependencies
         run: |
           brew install bison flex gperf tcl-tk@8 readline libffi dwarfutils libelf ccache
-          pip3 install --break-system-packages pybind11 cxxheaderparser setuptools wheel
+          pip3 install pybind11 cxxheaderparser setuptools wheel
 
       - name: Build Verific tclmain
         run: |
