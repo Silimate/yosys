@@ -164,7 +164,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install bison flex gperf tcl-tk@8 readline libffi dwarfutils libelf
+          brew install bison flex gperf tcl-tk@8 readline libffi dwarfutils libelf ccache
+          pip3 install pybind11
 
       - name: Build Verific tclmain
         run: |
@@ -176,8 +177,8 @@ jobs:
         run: |
           set -ex
           export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
-          make -j$(sysctl -n hw.ncpu) SMALL=1 ENABLE_PLUGINS=0 ENABLE_TCL=1 ENABLE_READLINE=1 PREFIX=/usr/local
-          make DESTDIR=/tmp/install PREFIX=/usr/local install
+          make -j$(sysctl -n hw.ncpu) SMALL=1 ENABLE_PLUGINS=0 ENABLE_TCL=1 ENABLE_READLINE=1 ENABLE_PYOSYS=0 PREFIX=/usr/local
+          make DESTDIR=/tmp/install PREFIX=/usr/local ENABLE_PYOSYS=0 install
 
       - name: Package tarball
         run: |
