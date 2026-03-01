@@ -1,4 +1,4 @@
-name: Release (anylinux amd64 + macOS arm64)
+name: Release (pyosys wheels)
 
 on:
   push:
@@ -10,9 +10,9 @@ permissions:
   contents: write
 
 jobs:
-  build-linux:
+  build-linux-wheel:
     runs-on: ubuntu-latest
-    name: Build anylinux amd64 wheel + tarball
+    name: Build Linux amd64 wheel
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +34,7 @@ jobs:
                 tcl-dev readline-dev zlib-dev libffi-dev \
                 libdwarf-dev elfutils-dev \
                 python3 python3-dev py3-pip py3-setuptools py3-wheel \
-                git pkgconf ccache patchelf
+                git pkgconf ccache
 
               git config --global --add safe.directory /src
               git submodule foreach --recursive git config --global --add safe.directory \$toplevel/\$sm_path
@@ -53,40 +53,6 @@ jobs:
               _PYOSYS_OVERRIDE_VER=$(
                 grep "^YOSYS_VER " Makefile | head -1 | sed "s/.*:= *//" | tr "+" "."
               ) python3 setup.py bdist_wheel --dist-dir /src/dist
-
-              # Also build the yosys binary + install tarball
-              make clean
-              make -j$(nproc) SMALL=1 ENABLE_PLUGINS=0 ENABLE_TCL=1 ENABLE_READLINE=1 PREFIX=/usr/local
-              make DESTDIR=/tmp/install PREFIX=/usr/local install
-
-              # Bundle shared library dependencies and set RPATHs
-              STAGE=/tmp/install/usr/local
-              mkdir -p "$STAGE/lib"
-
-              copy_deps() {
-                for f in "$@"; do
-                  [ -f "$f" ] || continue
-                  ldd "$f" 2>/dev/null | awk "/=>/ {print \$3}" | while read -r lib; do
-                    [ -f "$lib" ] || continue
-                    base=$(basename "$lib")
-                    case "$base" in ld-musl-*|libc.musl-*) continue ;; esac
-                    [ -f "$STAGE/lib/$base" ] || cp "$lib" "$STAGE/lib/$base"
-                  done
-                done
-              }
-
-              copy_deps "$STAGE"/bin/*
-              copy_deps "$STAGE"/lib/*.so*
-
-              for f in "$STAGE"/bin/*; do
-                [ -f "$f" ] && patchelf --set-rpath "\$ORIGIN/../lib" "$f" 2>/dev/null || true
-              done
-              for f in "$STAGE"/lib/*.so*; do
-                [ -f "$f" ] && patchelf --set-rpath "\$ORIGIN" "$f" 2>/dev/null || true
-              done
-
-              cd /tmp/install
-              tar czf /src/yosys-anylinux-amd64.tar.gz .
             '
 
       - name: Generate release notes
@@ -98,9 +64,6 @@ jobs:
           echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
           REPO_URL="${{ github.server_url }}/${{ github.repository }}"
-          WHEEL=$(ls dist/*.whl | head -1)
-          WHEEL_NAME=$(basename "$WHEEL")
-          echo "wheel_name=$WHEEL_NAME" >> "$GITHUB_OUTPUT"
           printf '%s\n' \
             "Automated build from \`main\` @ [\`${SHORT_SHA}\`](${REPO_URL}/commit/${FULL_SHA})" \
             "" \
@@ -109,18 +72,12 @@ jobs:
             "### Assets" \
             "| File | Platform |" \
             "|------|----------|" \
-            "| \`yosys-anylinux-amd64.tar.gz\` | Linux x86-64 (Alpine-based, portable) |" \
-            "| \`yosys-macos-arm64.tar.gz\` | macOS Apple Silicon |" \
-            "| \`${WHEEL_NAME}\` | Python wheel (pyosys) |" \
+            "| \`pyosys-*-linux_x86_64.whl\` | Linux x86-64 |" \
+            "| \`pyosys-*-macosx_*_arm64.whl\` | macOS Apple Silicon |" \
             "" \
-            "### Installation (tarball)" \
+            "### Installation" \
             "\`\`\`bash" \
-            "sudo tar xzf yosys-<platform>.tar.gz -C /" \
-            "\`\`\`" \
-            "" \
-            "### Installation (wheel)" \
-            "\`\`\`bash" \
-            "pip install ${WHEEL_NAME}" \
+            "pip install pyosys-*.whl" \
             "\`\`\`" \
             > release_notes.md
 
@@ -128,7 +85,6 @@ jobs:
         run: |
           TAG="build-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.short_sha }}"
           gh release create "$TAG" \
-            yosys-anylinux-amd64.tar.gz \
             dist/*.whl \
             --target "${{ github.sha }}" \
             --title "Build ${{ steps.meta.outputs.date }} (${{ steps.meta.outputs.short_sha }})" \
@@ -142,7 +98,6 @@ jobs:
           git push -f origin latest
           gh release delete latest --yes 2>/dev/null || true
           gh release create latest \
-            yosys-anylinux-amd64.tar.gz \
             dist/*.whl \
             --target "${{ github.sha }}" \
             --title "Latest Build (${{ steps.meta.outputs.date }})" \
@@ -151,9 +106,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-macos:
-    runs-on: macos-15
-    name: Build macOS arm64 tarball
+  build-macos-wheel:
+    runs-on: macos-14
+    name: Build macOS arm64 wheel
 
     steps:
       - uses: actions/checkout@v4
@@ -165,6 +120,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew install bison flex gperf tcl-tk@8 readline libffi dwarfutils libelf ccache
+          pip3 install --break-system-packages pybind11 cxxheaderparser setuptools wheel
 
       - name: Build Verific tclmain
         run: |
@@ -172,50 +128,12 @@ jobs:
           cd verific/tclmain
           make
 
-      - name: Build yosys
+      - name: Build wheel
         run: |
-          set -ex
           export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
-          make -j$(sysctl -n hw.ncpu) SMALL=1 ENABLE_PLUGINS=0 ENABLE_TCL=1 ENABLE_READLINE=1 ENABLE_PYOSYS=0 PREFIX=/usr/local
-          make DESTDIR=/tmp/install PREFIX=/usr/local ENABLE_PYOSYS=0 install
-
-      - name: Package tarball
-        run: |
-          STAGE=/tmp/install/usr/local
-          mkdir -p "$STAGE/lib"
-
-          copy_deps() {
-            for f in "$@"; do
-              [ -f "$f" ] || continue
-              otool -L "$f" 2>/dev/null | awk 'NR>1 {print $1}' | while read -r lib; do
-                [ -f "$lib" ] || continue
-                base=$(basename "$lib")
-                case "$base" in libSystem*|libc++*|libobjc*) continue ;; esac
-                case "$lib" in /usr/lib/*|/System/*) continue ;; esac
-                [ -f "$STAGE/lib/$base" ] || cp "$lib" "$STAGE/lib/$base"
-              done
-            done
-          }
-
-          copy_deps "$STAGE"/bin/*
-          copy_deps "$STAGE"/lib/*.dylib
-
-          for f in "$STAGE"/bin/*; do
-            [ -f "$f" ] || continue
-            install_name_tool -add_rpath "@executable_path/../lib" "$f" 2>/dev/null || true
-            for lib in "$STAGE"/lib/*.dylib; do
-              [ -f "$lib" ] || continue
-              base=$(basename "$lib")
-              install_name_tool -change "$(otool -L "$f" | grep "$base" | awk '{print $1}')" "@rpath/$base" "$f" 2>/dev/null || true
-            done
-          done
-          for f in "$STAGE"/lib/*.dylib; do
-            [ -f "$f" ] || continue
-            install_name_tool -id "@rpath/$(basename "$f")" "$f" 2>/dev/null || true
-          done
-
-          cd /tmp/install
-          tar czf "${{ github.workspace }}/yosys-macos-arm64.tar.gz" .
+          _PYOSYS_OVERRIDE_VER=$(
+            grep "^YOSYS_VER " Makefile | head -1 | sed "s/.*:= *//" | tr "+" "."
+          ) python3 setup.py bdist_wheel --dist-dir dist
 
       - name: Upload to permanent release
         run: |
@@ -223,8 +141,8 @@ jobs:
           DATE=$(date -u +%Y-%m-%d)
           TAG="build-${DATE}-${SHORT_SHA}"
           until gh release view "$TAG" >/dev/null 2>&1; do sleep 5; done
-          gh release upload "$TAG" yosys-macos-arm64.tar.gz --clobber
+          gh release upload "$TAG" dist/*.whl --clobber
           until gh release view latest >/dev/null 2>&1; do sleep 5; done
-          gh release upload latest yosys-macos-arm64.tar.gz --clobber
+          gh release upload latest dist/*.whl --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
