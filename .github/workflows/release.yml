@@ -165,7 +165,6 @@ jobs:
       - name: Install dependencies
         run: |
           brew install bison flex gperf tcl-tk@8 readline libffi dwarfutils libelf ccache
-          pip3 install pybind11
 
       - name: Build Verific tclmain
         run: |
