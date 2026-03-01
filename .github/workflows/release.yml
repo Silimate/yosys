@@ -141,8 +141,16 @@ jobs:
           DATE=$(date -u +%Y-%m-%d)
           TAG="build-${DATE}-${SHORT_SHA}"
           until gh release view "$TAG" >/dev/null 2>&1; do sleep 5; done
-          gh release upload "$TAG" dist/*.whl --clobber
+          for i in 1 2 3 4 5; do
+            gh release upload "$TAG" dist/*.whl --clobber && break
+            echo "Upload attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
           until gh release view latest >/dev/null 2>&1; do sleep 5; done
-          gh release upload latest dist/*.whl --clobber
+          for i in 1 2 3 4 5; do
+            gh release upload latest dist/*.whl --clobber && break
+            echo "Upload attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
