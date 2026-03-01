@@ -129,12 +129,14 @@ jobs:
       - name: Build Verific tclmain
         run: |
           export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
+          export MACOSX_DEPLOYMENT_TARGET=11.0
           cd verific/tclmain
           make
 
       - name: Build wheel
         run: |
           export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
+          export MACOSX_DEPLOYMENT_TARGET=11.0
           _PYOSYS_OVERRIDE_VER=$(
             grep "^YOSYS_VER " Makefile | head -1 | sed "s/.*:= *//" | tr "+" "."
           ) python3 setup.py bdist_wheel --dist-dir dist
