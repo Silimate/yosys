@@ -280,3 +280,77 @@ std::string FstData::valueOf(fstHandle signal)
 	}
 	return past_data[signal];
 }
+
+// Auto-discover scope from FST by finding the top module
+std::string FstData::autoScope(Module *topmod) {	
+
+	log("Auto-discovering scope from file...\n");
+	std::string top = RTLIL::unescape_id(topmod->name);
+
+	// Option 1 - Instance based scope matching
+	// Will fail if the DUT instance name != the top module name
+	log("Trying instance-based scope matching...\n");
+	for (const auto& var : vars) {
+		// Check if this scope ends with our top module
+		log_debug("Checking scope: %s\n", var.scope.c_str());
+		if (var.scope == top || 
+			var.scope.find("." + top) != std::string::npos) {
+			// Extract the full path up to (and including) the top module
+			size_t pos = var.scope.find(top);
+			if (pos != std::string::npos) {
+				return var.scope.substr(0, pos + top.length());
+			}
+		}
+	}
+
+	// Option 2 - Post based scope matching
+	// Matches based on exact port name matching of the top module
+	log("Trying port-based scope matching...\n");
+
+	// Map port name to their bit widths (RTL reference point)
+	dict<std::string, int> ports;
+	for (auto wire : topmod->wires()) {
+		if (wire->port_input || wire->port_output) {
+			ports[RTLIL::unescape_id(wire->name)] = wire->width;
+		}
+	}
+
+	// For each scope, track which ports were found with matching width
+	// (VCD reference point)
+	dict<std::string, std::set<std::string>> scope_found_ports;
+	for (const auto& var : vars) {
+
+		// Strip array '[]' notation from variable name
+		std::string var_name = var.name;
+		size_t bracket = var_name.find('[');
+		if (bracket != std::string::npos) {
+			var_name = var_name.substr(0, bracket);
+		}
+		
+		// Check if this variable name matches one of our port names
+		if (ports.count(var_name)) {
+			// Also check if width matches
+			if (ports[var_name] == var.width) {
+				scope_found_ports[var.scope].insert(var_name);
+			}
+		}
+	}
+	
+	// Compare RTl and VCD references and find an exact match
+	for (const auto& entry : scope_found_ports) {
+		const std::string& scope = entry.first;
+		const std::set<std::string>& found = entry.second;
+		
+		// Check if all port names exist in this scope
+		if (found.size() == ports.size()) {
+			log("Auto-discovered scope: %s (matched all %d ports by name)\n", 
+				scope.c_str(), (int)ports.size());
+			return scope;
+		}
+	}
+
+	// No match found
+	log_warning("Could not auto-discover scope for module '%s'...\n", 
+		RTLIL::unescape_id(topmod->name).c_str());
+	return "";
+}
