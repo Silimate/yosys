@@ -630,35 +630,46 @@ struct SimInstance
 
 	void update_ph1()
 	{
-		pool<Cell*> queue_cells;
-		pool<Wire*> queue_outports;
+		pool<Cell*> queue_cells; // cells to be updated in the current cycle
+		pool<Wire*> queue_outports; // output ports that propagate values to parent
 
-		queue_cells.swap(dirty_cells);
+		// Cells marked as dirty in previous operations, need to be updated.
+		queue_cells.swap(dirty_cells); // swap contents (clearing dirty_cells)
 
+		// Loop until all cells and output ports are processed
 		while (1)
 		{
+			// Loop through all bits that have changed values
 			for (auto bit : dirty_bits)
 			{
+				// If the bit is associated with a cell, add the cell to the queue
 				if (upd_cells.count(bit))
 					for (auto cell : upd_cells.at(bit))
 						queue_cells.insert(cell);
 
+				// If the bit is associated with an output port, add the port to the queue
 				if (upd_outports.count(bit) && parent != nullptr)
 					for (auto wire : upd_outports.at(bit))
 						queue_outports.insert(wire);
 			}
 
+			// Clear the dirty bits set to avoid processing the same bits multiple times
 			dirty_bits.clear();
 
+			// Process all cells in the queue
 			if (!queue_cells.empty())
 			{
 				for (auto cell : queue_cells)
 					update_cell(cell);
 
+				// Clear the queue to avoid processing the same cells multiple times
 				queue_cells.clear();
+
+				// Continue to next iteration to process any new dirty bits
 				continue;
 			}
 
+			// Same process for memories
 			for (auto &memid : dirty_memories)
 				update_memory(memid);
 			dirty_memories.clear();
@@ -671,11 +682,13 @@ struct SimInstance
 
 			queue_outports.clear();
 
+			// Update any child modules with inputs that have changed values
 			for (auto child : dirty_children)
 				child->update_ph1();
 
 			dirty_children.clear();
 
+			// If no dirty bits are left, the stage is finished and all updates are complete
 			if (dirty_bits.empty())
 				break;
 		}
@@ -685,45 +698,48 @@ struct SimInstance
 	{
 		bool did_something = false;
 
+		// Update all flip-flops in the design
 		for (auto &it : ff_database)
 		{
 			ff_state_t &ff = it.second;
 			FfData &ff_data = ff.data;
 
+			// Handle value of Q output port based on other inputs
+			// (Example: reset will override the value of Q)
 			Const current_q = get_state(ff.data.sig_q);
-
 			if (ff_data.has_clk && !stable_past_update) {
-				// flip-flops
+				// Flip-flops
 				State current_clk = get_state(ff_data.sig_clk)[0];
 				if (ff_data.pol_clk ? (ff.past_clk == State::S0 && current_clk != State::S0) :
 							(ff.past_clk == State::S1 && current_clk != State::S1)) {
 					bool ce = ff.past_ce == (ff_data.pol_ce ? State::S1 : State::S0);
-					// set if no ce, or ce is enabled
+					// Set Q to the value of D if no CE is present or if CE is enabled
+					// CE - Clock Enable
 					if (!ff_data.has_ce || (ff_data.has_ce && ce)) {
 						current_q = ff.past_d;
 					}
-					// override if sync reset
+					// Override if sync reset
 					if ((ff_data.has_srst) && (ff.past_srst == (ff_data.pol_srst ? State::S1 : State::S0)) &&
 						((!ff_data.ce_over_srst) || (ff_data.ce_over_srst && ce))) {
 						current_q = ff_data.val_srst;
 					}
 				}
 			}
-			// async load
+			// Async load
 			if (ff_data.has_aload) {
 				State current_aload = get_state(ff_data.sig_aload)[0];
 				if (current_aload == (ff_data.pol_aload ? State::S1 : State::S0)) {
 					current_q = ff_data.has_clk && !stable_past_update ? ff.past_ad : get_state(ff.data.sig_ad);
 				}
 			}
-			// async reset
+			// Async reset
 			if (ff_data.has_arst) {
 				State current_arst = get_state(ff_data.sig_arst)[0];
 				if (current_arst == (ff_data.pol_arst ? State::S1 : State::S0)) {
 					current_q = ff_data.val_arst;
 				}
 			}
-			// handle set/reset
+			// Handle set/reset
 			if (ff.data.has_sr) {
 				Const current_clr = get_state(ff.data.sig_clr);
 				Const current_set = get_state(ff.data.sig_set);
@@ -742,8 +758,9 @@ struct SimInstance
 				if (gclk)
 					current_q = ff.past_d;
 			}
+			// Set the value of Q output port after all processing
 			if (set_state(ff_data.sig_q, current_q))
-				did_something = true;
+				did_something = true; // if value changed, set to true to indicate further processing is needed
 		}
 
 		for (auto &it : mem_database)
@@ -1354,16 +1371,21 @@ struct SimWorker : SimShared
 		if (gclk)
 			step += 1;
 
+		// Loop until there are no more changes in the design after signal
+		// propagation and sequential logic updates.
 		while (1)
 		{
 			if (debug)
 				log("\n-- ph1 --\n");
 
+			// Propagate all signal changes through wires and logic gates
 			top->update_ph1();
 
 			if (debug)
 				log("\n-- ph2 --\n");
 
+			// Update all sequential logic states based on past values
+			// If update returns true, there were changes to the design that must be re-processed
 			if (!top->update_ph2(gclk))
 				break;
 		}
@@ -1371,6 +1393,7 @@ struct SimWorker : SimShared
 		if (debug)
 			log("\n-- ph3 --\n");
 
+		// Take a snapshot of all signals at the timestamp to use in the next cycle
 		top->update_ph3(gclk);
 	}
 
