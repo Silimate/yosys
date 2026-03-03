@@ -18,8 +18,9 @@ match neg
 endmatch
 
 match mux
-    select mux->type == $mux
-    select nusers(port(mux, \Y)) == 2
+	select mux->type == $mux
+	index <SigSpec> port(mux, \Y) === neg_a
+	filter nusers(port(mux, \Y)) == 2
 	set mux_a port(mux, \A)
 	set mux_b port(mux, \B)
 	set mux_s port(mux, \S)
@@ -27,23 +28,8 @@ match mux
 endmatch
 
 code neg_a neg_y mux_a mux_b mux_s mux_y a_signed
-	// Require neg input to be exactly mux_y or a sign/zero extension of it
-	if (GetSize(neg_a) < GetSize(mux_y))
-		reject;
-	for (int i = 0; i < GetSize(mux_y); i++) {
-		if (neg_a[i] != mux_y[i])
-			reject;
-	}
-	if (GetSize(neg_a) > GetSize(mux_y)) {
-		RTLIL::SigBit ext = a_signed ? mux_y[GetSize(mux_y)-1] : RTLIL::SigBit(RTLIL::State::S0);
-		for (int i = GetSize(mux_y); i < GetSize(neg_a); i++) {
-			if (neg_a[i] != ext)
-				reject;
-		}
-	}
-
 	{
-		// Anchor negations to the original negation width
+		// Anchor negations to the original neg output width
 		int width = GetSize(neg_y);
 
 		Cell *cell = neg;
