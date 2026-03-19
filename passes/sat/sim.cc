@@ -75,7 +75,7 @@ struct OutputWriter
 {
 	OutputWriter(SimWorker *w) { worker = w;};
 	virtual ~OutputWriter() {};
-	virtual void write(std::map<int, bool> &use_signal) = 0;
+	virtual void write(const std::vector<uint8_t> &use_signal) = 0;
 	SimWorker *worker;
 };
 
@@ -217,7 +217,13 @@ struct SimInstance
 
 	std::vector<Mem> memories;
 
-	dict<Wire*, pair<int, Const>> signal_database;
+	// Co-located signal metadata to avoid re-hashing per wire per timestep
+	struct SignalEntry {
+		int id;
+		std::vector<State> last_states;
+		SigSpec mapped;
+	};
+	dict<Wire*, SignalEntry> signal_database;
 	dict<IdString, std::map<int, pair<int, Const>>> trace_mem_database;
 	dict<std::pair<IdString, int>, Const> trace_mem_init_database;
 	dict<Wire*, fstHandle> fst_handles;
@@ -421,17 +427,21 @@ struct SimInstance
 		return result;
 	}
 
+	// Single-bit state lookup, returns Sz for absent nets
+	State resolve_bit(const SigBit &bit) const
+	{
+		if (bit.wire == nullptr)
+			return bit.data;
+		auto it = state_nets.find(bit);
+		return (it != state_nets.end()) ? it->second : State::Sz;
+	}
+
 	Const get_state(SigSpec sig)
 	{
 		Const::Builder builder(GetSize(sig));
 
 		for (auto bit : sigmap(sig))
-			if (bit.wire == nullptr)
-				builder.push_back(bit.data);
-			else if (state_nets.count(bit))
-				builder.push_back(state_nets.at(bit));
-			else
-				builder.push_back(State::Sz);
+			builder.push_back(resolve_bit(bit));
 
 		Const value = builder.build();
 		if (shared->debug)
@@ -453,12 +463,16 @@ struct SimInstance
 		}
 		log_assert(GetSize(sig) <= GetSize(value));
 
-		for (int i = 0; i < GetSize(sig); i++)
-			if (value[i] != State::Sa && state_nets.at(sig[i]) != value[i]) {
-				state_nets.at(sig[i]) = value[i];
+		for (int i = 0; i < GetSize(sig); i++) {
+			if (value[i] == State::Sa)
+				continue;
+			auto &cur = state_nets.at(sig[i]);
+			if (cur != value[i]) {
+				cur = value[i];
 				dirty_bits.insert(sig[i]);
 				did_something = true;
 			}
+		}
 
 		if (shared->debug)
 			log("[%s] set %s: %s\n", hiername(), log_signal(sig), log_signal(value));
@@ -531,9 +545,9 @@ struct SimInstance
 			return;
 		}
 
-		if (children.count(cell))
+		if (auto ch_it = children.find(cell); ch_it != children.end())
 		{
-			auto child = children.at(cell);
+			auto child = ch_it->second;
 			for (auto &conn: cell->connections())
 				if (cell->input(conn.first) && GetSize(conn.second)) {
 					Const value = get_state(conn.second);
@@ -646,13 +660,14 @@ struct SimInstance
 		{
 			for (auto bit : dirty_bits)
 			{
-				if (upd_cells.count(bit))
-					for (auto cell : upd_cells.at(bit))
+				if (auto uc_it = upd_cells.find(bit); uc_it != upd_cells.end())
+					for (auto cell : uc_it->second)
 						queue_cells.insert(cell);
 
-				if (upd_outports.count(bit) && parent != nullptr)
-					for (auto wire : upd_outports.at(bit))
-						queue_outports.insert(wire);
+				if (parent != nullptr)
+					if (auto up_it = upd_outports.find(bit); up_it != upd_outports.end())
+						for (auto wire : up_it->second)
+							queue_outports.insert(wire);
 			}
 
 			dirty_bits.clear();
@@ -1018,7 +1033,7 @@ struct SimInstance
 			if (shared->hide_internal && wire->name[0] == '$')
 				continue;
 
-			signal_database[wire] = make_pair(id, Const());
+			signal_database[wire] = {id, {}, sigmap(wire)};
 			id++;
 		}
 
@@ -1059,11 +1074,11 @@ struct SimInstance
 				hdlname.pop_back();
 				for (auto name : hdlname)
 					enter_scope("\\" + name);
-				register_signal(signal_name.c_str(), GetSize(signal.first), signal.first, signal.second.first, registers.count(signal.first)!=0);
+				register_signal(signal_name.c_str(), GetSize(signal.first), signal.first, signal.second.id, registers.count(signal.first)!=0);
 				for (auto name : hdlname)
 					exit_scope();
 			} else
-				register_signal(log_id(signal.first->name), GetSize(signal.first), signal.first, signal.second.first, registers.count(signal.first)!=0);
+				register_signal(log_id(signal.first->name), GetSize(signal.first), signal.first, signal.second.id, registers.count(signal.first)!=0);
 		}
 
 		for (auto &trace_mem : trace_mem_database)
@@ -1135,15 +1150,29 @@ struct SimInstance
 	{
 		for (auto &it : signal_database)
 		{
-			Wire *wire = it.first;
-			Const value = get_state(wire);
-			int id = it.second.first;
+			SignalEntry &entry = it.second;
+			const int sz = GetSize(entry.mapped);
+			std::vector<State> &last = entry.last_states;
 
-			if (it.second.second == value)
-				continue;
+			// Quick comparison against cached state, skip if unchanged
+			if ((int)last.size() == sz) {
+				bool same = true;
+				int i = 0;
+				for (auto &bit : entry.mapped) {
+					if (resolve_bit(bit) != last[i++]) { same = false; break; }
+				}
+				if (same) continue;
+			}
 
-			it.second.second = value;
-			data->emplace(id, value);
+			Const::Builder builder(sz);
+			last.resize(sz);
+			int i = 0;
+			for (auto &bit : entry.mapped) {
+				State s = resolve_bit(bit);
+				last[i++] = s;
+				builder.push_back(s);
+			}
+			data->emplace(entry.id, builder.build());
 		}
 
 		for (auto &trace_mem : trace_mem_database)
@@ -1328,22 +1357,23 @@ struct SimWorker : SimShared
 	{
 		std::map<int,Const> data;
 		top->register_output_step_values(&data);
-		output_data.emplace_back(t, data);
+		output_data.emplace_back(t, std::move(data));
 	}
 
 	void write_output_files()
 	{
-		std::map<int, bool> use_signal;
+		// Dense vector, IDs are sequential ints [1, next_output_id)
+		std::vector<uint8_t> use_signal(next_output_id, 0);
 		bool first = ignore_x;
 		for(auto& d : output_data)
 		{
 			if (first) {
 				for (auto &data : d.second)
-					use_signal[data.first] = !data.second.is_fully_undef();
+					use_signal[data.first] = data.second.is_fully_undef() ? 0 : 1;
 				first = false;
 			} else {
 				for (auto &data : d.second)
-					use_signal[data.first] = true;
+					use_signal[data.first] = 1;
 			}
 			if (!ignore_x) break;
 		}
@@ -1588,9 +1618,12 @@ struct SimWorker : SimShared
 				update(true);
 			register_output_step(time);
 
-			bool status = top->checkSignals();
-			if (status)
-				log_error("Signal difference\n");
+			// checkSignals is a no-op in sim mode, skip it
+			if (sim_mode != SimulationMode::sim) {
+				bool status = top->checkSignals();
+				if (status)
+					log_error("Signal difference\n");
+			}
 			cycle++;
 		});
 
@@ -2349,7 +2382,7 @@ struct VCDWriter : public OutputWriter
 		vcdfile.open(filename.c_str());
 	}
 
-	void write(std::map<int, bool> &use_signal) override
+	void write(const std::vector<uint8_t> &use_signal) override
 	{
 		if (!vcdfile.is_open()) return;
 		vcdfile << stringf("$version %s $end\n", worker->date ? yosys_maybe_version() : "Yosys");
@@ -2369,7 +2402,7 @@ struct VCDWriter : public OutputWriter
 			[this](IdString name) { vcdfile << stringf("$scope module %s $end\n", log_id(name)); },
 			[this]() { vcdfile << stringf("$upscope $end\n");},
 			[this,&use_signal](const char *name, int size, Wire *w, int id, bool is_reg) {
-				if (!use_signal.at(id)) return;
+				if (!use_signal[id]) return;
 				// Works around gtkwave trying to parse everything past the last [ in a signal
 				// name. While the emitted range doesn't necessarily match the wire's range,
 				// this is consistent with the range gtkwave makes up if it doesn't find a
@@ -2386,8 +2419,8 @@ struct VCDWriter : public OutputWriter
 			vcdfile << stringf("#%d\n", d.first);
 			for (auto &data : d.second)
 			{
-				if (!use_signal.at(data.first)) continue;
-				Const value = data.second;
+				if (!use_signal[data.first]) continue;
+				const Const &value = data.second;
 				vcdfile << "b";
 				for (int i = GetSize(value)-1; i >= 0; i--) {
 					switch (value[i]) {
@@ -2413,81 +2446,44 @@ struct AnnotateActivity : public OutputWriter {
 		std::vector<uint64_t> prevTimes;
 		std::vector<double_t> toggleCounts;
 		std::vector<uint64_t> highTimes;
-		std::vector<uint64_t> totalEventCounts;
 	};
 
-	typedef std::unordered_map<int, SignalActivityData> SignalActivityDataMap;
-
-	void write(std::map<int, bool> &use_signal) override
+	void write(const std::vector<uint8_t> &use_signal) override
 	{
-		// Init map
-		SignalActivityDataMap dataMap;
-		// For each event (new time when a value changed)
+		// Flat vector indexed by sequential signal ID
+		std::vector<SignalActivityData> dataVec(worker->next_output_id);
 		uint32_t nbTotalBits = 0;
-		for (auto &d : worker->output_data) {
-			// For each signal/values in that time slice
-			for (auto &data : d.second) {
-				int sig = data.first;
-				if (!use_signal.at(sig))
-					continue;
-				// Create an entry in the map with all zeros for all bits of the signal
-				SignalActivityDataMap::iterator itr = dataMap.find(sig);
-				if (itr == dataMap.end()) {
-					Const value = data.second;
-					std::vector<uint64_t> vals(GetSize(value), 0);
-					nbTotalBits += GetSize(value);
-					std::vector<double_t> dvals(GetSize(value), 0);
-					SignalActivityData data;
-					data.highTimes = vals;
-					data.prevTimes = vals;
-					data.lastValues = vals;
-					data.totalEventCounts = vals;
-					data.toggleCounts = dvals;
-					dataMap.emplace(sig, data);
-				}
-			}
-		}
-		log("Computing signal activity for %ld signals (%d bits)\n", use_signal.size(), nbTotalBits);
-		log_flush();
 		// Max simulation time
 		int max_time = 0;
-		// Inititalization of totalEventCounts and max_time
-		for (auto &d : worker->output_data) {
-			int time = d.first;
-			if (time > max_time)
-				max_time = time;
-			// For each signal/values in that time slice
-			for (auto &data : d.second) {
-				int sig = data.first;
-				if (!use_signal.at(sig))
-					continue;
-				Const value = data.second;
-				SignalActivityDataMap::iterator itr = dataMap.find(sig);
-				std::vector<uint64_t> &totalEventCounts = itr->second.totalEventCounts;
-				for (int i = GetSize(value) - 1; i >= 0; i--) {
-					totalEventCounts[i]++;
-				}
-			}
-		}
-
 		// clock pin id (highest toggling signal)
 		int clk = 0;
 		double_t highest_toggle = 0;
+
 		// For each event (new time when a value changed)
 		for (auto &d : worker->output_data) {
 			uint64_t time = d.first;
+			if ((int)time > max_time)
+				max_time = (int)time;
 			// For each signal/values in that time slice
 			for (auto &data : d.second) {
 				int sig = data.first;
-				if (!use_signal.at(sig))
+				if (!use_signal[sig])
 					continue;
-				Const value = data.second;
-				SignalActivityDataMap::iterator itr = dataMap.find(sig);
-				std::vector<uint64_t> &lastVals = itr->second.lastValues;
-				std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
-				std::vector<uint64_t> &prevTimes = itr->second.prevTimes;
-				std::vector<uint64_t> &highTimes = itr->second.highTimes;
-				std::vector<uint64_t> &totalEventCounts = itr->second.totalEventCounts;
+				const Const &value = data.second;
+				// Create an entry in the map with all zeros for all bits of the signal
+				SignalActivityData &sdata = dataVec[sig];
+				if (sdata.highTimes.empty()) {
+					int sz = GetSize(value);
+					nbTotalBits += sz;
+					sdata.highTimes.assign(sz, 0);
+					sdata.prevTimes.assign(sz, 0);
+					sdata.lastValues.assign(sz, 0);
+					sdata.toggleCounts.assign(sz, 0.0);
+				}
+				std::vector<uint64_t> &lastVals = sdata.lastValues;
+				std::vector<double_t> &toggleCounts = sdata.toggleCounts;
+				std::vector<uint64_t> &prevTimes = sdata.prevTimes;
+				std::vector<uint64_t> &highTimes = sdata.highTimes;
 				for (int i = GetSize(value) - 1; i >= 0; i--) {
 					uint64_t val = '-';
 					switch (value[i]) {
@@ -2510,13 +2506,6 @@ struct AnnotateActivity : public OutputWriter {
 						highTimes[i] += time - prevTimes[i];
 					}
 					prevTimes[i] = time;
-					// Final high time for last event of the given sig
-					totalEventCounts[i]--;
-					if (totalEventCounts[i] == 0) {
-						if (val == '1') {
-							highTimes[i] += max_time - prevTimes[i];
-						}
-					}
 					// If signal toggled
 					if (val != lastVals[i]) {
 						if (val == 'x' || val == 'z' || lastVals[i] == 'x' || lastVals[i] == 'z')
@@ -2533,6 +2522,24 @@ struct AnnotateActivity : public OutputWriter {
 			}
 		}
 
+		// Final high time for last event of the given sig
+		int nSignals = 0;
+		for (auto &entry : dataVec) {
+			if (entry.highTimes.empty()) continue;
+			nSignals++;
+			std::vector<uint64_t> &lastVals = entry.lastValues;
+			std::vector<uint64_t> &prevTimes = entry.prevTimes;
+			std::vector<uint64_t> &highTimes = entry.highTimes;
+			for (size_t i = 0; i < lastVals.size(); i++) {
+				if (lastVals[i] == '1') {
+					highTimes[i] += max_time - prevTimes[i];
+				}
+			}
+		}
+
+		log("Computing signal activity for %d signals (%d bits)\n", nbTotalBits > 0 ? nSignals : 0, nbTotalBits);
+		log_flush();
+
 		// Retrieve timescale from converted VCD file
 		double real_timescale = worker->fst->getTimescale();
 		if (worker->debug) {
@@ -2541,12 +2548,11 @@ struct AnnotateActivity : public OutputWriter {
 
 		// Compute clock period, find the highest toggling signal and compute its average period
 		double clk_period;
-		SignalActivityDataMap::iterator itr = dataMap.find(clk);
-		if (itr == dataMap.end()) { // if clock signal can't be identified, set frequency to 1GHz
+		if (clk == 0 || dataVec[clk].highTimes.empty()) { // if clock signal can't be identified, set frequency to 1GHz
 			log_warning("Clock signal not found, setting frequency to 1GHz...\n");
 			clk_period = 1.0 / 1.0e9;
 		} else {
-			std::vector<double_t> &clktoggleCounts = itr->second.toggleCounts;
+			std::vector<double_t> &clktoggleCounts = dataVec[clk].toggleCounts;
 			clk_period = real_timescale * (double)max_time / (clktoggleCounts[0] / 2.0);
 		}
 		log_flush();
@@ -2576,11 +2582,11 @@ struct AnnotateActivity : public OutputWriter {
 				  log_debug("endmodule");
 		  },
 		  [&](const char *name, int size, Wire *w, int id, bool) {
-			  if (!use_signal.at(id) || (w == nullptr))
+			  if (!use_signal[id] || (w == nullptr))
 				  return;
-			  SignalActivityDataMap::const_iterator itr = dataMap.find(id);
-			  const std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
-			  const std::vector<uint64_t> &highTimes = itr->second.highTimes;
+			  const SignalActivityData &sdata = dataVec[id];
+			  const std::vector<double_t> &toggleCounts = sdata.toggleCounts;
+			  const std::vector<uint64_t> &highTimes = sdata.highTimes;
 			  if (worker->debug) {
 				  std::string full_name = form_vcd_name(name, size, w);
 				  std::cout << full_name << " " << id << ":\n";
@@ -2597,6 +2603,7 @@ struct AnnotateActivity : public OutputWriter {
 				  std::cout << "     ACK: ";
 			  }
 			  std::string activity_str;
+			  activity_str.reserve(size * 24);
 			  if ((uint32_t) size != toggleCounts.size()) {
 				  std::string full_name = form_vcd_name(name, size, w);
 				  log_warning("Signal size/value mismatch for %s: %d vs %ld", full_name.c_str(), size, toggleCounts.size());
@@ -2611,6 +2618,7 @@ struct AnnotateActivity : public OutputWriter {
 				  log_debug("     ACKT: %s", activity_str.c_str());
 			  }
 			  std::string duty_str;
+			  duty_str.reserve(size * 24);
 			  for (uint32_t i = 0; i < (uint32_t)size; i++) {
 				  // Compute Duty cycle
 				  double duty = (double)highTimes[i] / (double)max_time;
@@ -2640,7 +2648,7 @@ struct FSTWriter : public OutputWriter
 		fstWriterClose(fstfile);
 	}
 
-	void write(std::map<int, bool> &use_signal) override
+	void write(const std::vector<uint8_t> &use_signal) override
 	{
 		if (!fstfile) return;
 		std::time_t t = std::time(nullptr);
@@ -2659,7 +2667,7 @@ struct FSTWriter : public OutputWriter
 			[this](IdString name) { fstWriterSetScope(fstfile, FST_ST_VCD_MODULE, stringf("%s",log_id(name)).c_str(), nullptr); },
 			[this]() { fstWriterSetUpscope(fstfile); },
 			[this,&use_signal](const char *name, int size, Wire *w, int id, bool is_reg) {
-				if (!use_signal.at(id)) return;
+				if (!use_signal[id]) return;
 				std::string full_name = form_vcd_name(name, size, w);
 				fstHandle fst_id = fstWriterCreateVar(fstfile, is_reg ? FST_VT_VCD_REG : FST_VT_VCD_WIRE, FST_VD_IMPLICIT, size,
 												full_name.c_str(), 0);
@@ -2672,8 +2680,8 @@ struct FSTWriter : public OutputWriter
 			fstWriterEmitTimeChange(fstfile, d.first);
 			for (auto &data : d.second)
 			{
-				if (!use_signal.at(data.first)) continue;
-				Const value = data.second;
+				if (!use_signal[data.first]) continue;
+				const Const &value = data.second;
 				std::stringstream ss;
 				for (int i = GetSize(value)-1; i >= 0; i--) {
 					switch (value[i]) {
@@ -2703,7 +2711,7 @@ struct AIWWriter : public OutputWriter
 		aiwfile << '.' << '\n';
 	}
 
-	void write(std::map<int, bool> &) override
+	void write(const std::vector<uint8_t> &) override
 	{
 		if (!aiwfile.is_open()) return;
 		if (worker->map_filename.empty())
