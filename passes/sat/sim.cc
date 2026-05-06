@@ -31,6 +31,7 @@
 #include <ctime>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -1385,6 +1386,7 @@ struct SimWorker : SimShared
 	std::string summary_filename;
 	std::string scope;
 	bool reg_overwrite = false;
+	double user_clk_period = 0.0;
 
 	~SimWorker()
 	{
@@ -2647,15 +2649,23 @@ struct AnnotateActivity : public OutputWriter {
 			log_debug("Timescale %e seconds extracted from converted VCD file", real_timescale);
 		}
 
-		// Compute clock period, find the highest toggling signal and compute its average period
+		// Default clock period to the user-provided period, otherwise find the highest toggling signal
 		double clk_period;
-		SignalActivityDataMap::iterator itr = dataMap.find(clk);
-		if (itr == dataMap.end()) { // if clock signal can't be identified, set frequency to 1GHz
-			log_warning("Clock signal not found, setting frequency to 1GHz...\n");
-			clk_period = 1.0 / 1.0e9;
+		if (worker->user_clk_period > 0.0) {
+			clk_period = worker->user_clk_period;
 		} else {
-			std::vector<double_t> &clktoggleCounts = itr->second.toggleCounts;
-			clk_period = real_timescale * (double)max_time / (clktoggleCounts[0] / 2.0);
+			SignalActivityDataMap::iterator itr = dataMap.find(clk);
+			if (itr == dataMap.end()) {
+				log_warning("Clock signal not found, setting frequency to 1GHz...\n");
+				clk_period = 1.0 / 1.0e9;
+			} else {
+				std::vector<double_t> &clktoggleCounts = itr->second.toggleCounts;
+				clk_period = real_timescale * (double)max_time / (clktoggleCounts[0] / 2.0);
+			}
+		}
+		if (!std::isfinite(clk_period) || clk_period <= 0.0) {
+			log_warning("Clock period invalid (%g); defaulting to 1GHz...\n", clk_period);
+			clk_period = 1.0 / 1.0e9;
 		}
 		log_flush();
 
@@ -2975,6 +2985,11 @@ struct SimPass : public Pass {
 		log("    -timescale <string>\n");
 		log("        include the specified timescale declaration in the vcd\n");
 		log("\n");
+		log("    -clk-period <real_seconds>\n");
+		log("        when used with -activity, override the auto-detected clock\n");
+		log("        period (in seconds) so activity factors normalise against a\n");
+		log("        caller-supplied master period. 1GHz fallback if invalid.\n");
+		log("\n");
 		log("    -n <integer>\n");
 		log("        number of clock cycles to simulate (default: 20)\n");
 		log("\n");
@@ -3233,6 +3248,10 @@ struct SimPass : public Pass {
 			}
 			if (args[argidx] == "-activity") {
 				worker.outputfiles.emplace_back(std::unique_ptr<AnnotateActivity>(new AnnotateActivity(&worker)));
+				continue;
+			}
+			if (args[argidx] == "-clk-period" && argidx+1 < args.size()) {
+				worker.user_clk_period = atof(args[++argidx].c_str());
 				continue;
 			}
 			if (args[argidx] == "-reg") {
