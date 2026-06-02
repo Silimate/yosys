@@ -25,6 +25,7 @@ OBJS += passes/opt/muxpack.o
 OBJS += passes/opt/opt_andor_pmux.o
 OBJS += passes/opt/opt_balance_tree.o
 OBJS += passes/opt/opt_parallel_prefix.o
+OBJS += passes/opt/opt_compact_pack.o
 OBJS += passes/opt/opt_prienc.o
 OBJS += passes/opt/opt_addcin.o
 

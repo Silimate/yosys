@@ -1,0 +1,371 @@
+# Tests for opt_compact_pack
+#
+# The first milestone recognizes boolean self-compaction:
+#   out[j] = popcount(in) > j
+# which is the semantic result of zero-filled loops like:
+#   if (in[i]) out[idx++] = 1'b1;
+
+# ============================================================================
+# Group A: positive equivalence tests
+# ============================================================================
+
+log -header "A1: 8-bit loop-carried boolean self-pack"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (
+  input  logic [7:0] sig,
+  output logic [7:0] sig2
+);
+  always_comb begin
+    int indx;
+    sig2 = '0;
+    indx = 0;
+    for (int i = 0; i < 8; i++) begin
+      if (sig[i]) begin
+        sig2[indx] = sig[i];
+        indx = indx + 1;
+      end
+    end
+  end
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert opt_compact_pack
+design -load postopt
+select t:$add -assert-count 7
+select t:$gt -assert-count 8
+design -reset
+log -pop
+
+# ============================================================================
+# Group D: high-side masked data compaction
+# ============================================================================
+
+log -header "D1: 8-bit high-side decrement data pack"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+read -sv <<EOF
+module top (
+  input  logic [7:0] disable_in,
+  input  logic [7:0] data_in,
+  output logic [7:0] mask
+);
+  always_comb begin
+    int indx;
+    mask = '0;
+    indx = 8;
+    for (int i = 8; i > 0; i--) begin
+      if (disable_in[i-1]) begin
+        mask[i-1] = 1'b0;
+      end else begin
+        mask[i-1] = data_in[indx-1];
+        indx = indx - 1;
+      end
+    end
+  end
+endmodule
+EOF
+verific -import top
+proc
+check -assert
+equiv_opt -assert opt_compact_pack
+design -load postopt
+select t:$sub -assert-count 0
+design -reset
+log -pop
+
+log -header "D2: 16 active bits inside a 32-bit output"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+read -sv <<EOF
+module top (
+  input  logic [31:0] disable_in,
+  input  logic [31:0] data_in,
+  output logic [31:0] mask
+);
+  always_comb begin
+    int indx;
+    mask = '0;
+    indx = 16;
+    for (int i = 16; i > 0; i--) begin
+      if (disable_in[i-1]) begin
+        mask[i-1] = 1'b0;
+      end else begin
+        mask[i-1] = data_in[indx-1];
+        indx = indx - 1;
+      end
+    end
+  end
+endmodule
+EOF
+verific -import top
+proc
+check -assert
+equiv_opt -assert opt_compact_pack
+design -load postopt
+select t:$sub -assert-count 0
+select t:$bmux -assert-count 0
+design -reset
+log -pop
+
+log -header "D3: structural high-side pack rewrite"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+read -sv <<EOF
+module top (
+  input  logic [15:0] disable_in,
+  input  logic [15:0] data_in,
+  output logic [15:0] mask
+);
+  always_comb begin
+    int indx;
+    mask = '0;
+    indx = 16;
+    for (int i = 16; i > 0; i--) begin
+      if (disable_in[i-1]) begin
+        mask[i-1] = 1'b0;
+      end else begin
+        mask[i-1] = data_in[indx-1];
+        indx = indx - 1;
+      end
+    end
+  end
+endmodule
+EOF
+verific -import top
+proc
+check -assert
+opt_compact_pack
+opt_parallel_prefix -arith
+opt_balance_tree -arith
+clean -purge
+select t:$sub -assert-count 0
+select t:$bmux -assert-count 0
+select t:$pmux -assert-min 1
+design -reset
+log -pop
+
+# ============================================================================
+# Group E: high-side negative / no-op cases
+# ============================================================================
+
+log -header "E1: decrement by two is not dense high-side pack"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+read -sv <<EOF
+module top (
+  input  logic [7:0] disable_in,
+  input  logic [7:0] data_in,
+  output logic [7:0] mask
+);
+  always_comb begin
+    int indx;
+    mask = '0;
+    indx = 7;
+    for (int i = 4; i > 0; i--) begin
+      if (!disable_in[i-1]) begin
+        mask[i-1] = data_in[indx];
+        indx = indx - 2;
+      end
+    end
+  end
+endmodule
+EOF
+verific -import top
+proc
+check -assert
+opt_compact_pack
+select t:$pmux -assert-count 0
+design -reset
+log -pop
+
+log -header "E2: output default is not zero"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+read -sv <<EOF
+module top (
+  input  logic [7:0] disable_in,
+  input  logic [7:0] data_in,
+  output logic [7:0] mask
+);
+  always_comb begin
+    int indx;
+    mask = '1;
+    indx = 8;
+    for (int i = 8; i > 0; i--) begin
+      if (!disable_in[i-1]) begin
+        mask[i-1] = data_in[indx-1];
+        indx = indx - 1;
+      end
+    end
+  end
+endmodule
+EOF
+verific -import top
+proc
+check -assert
+opt_compact_pack
+select t:$pmux -assert-count 0
+design -reset
+log -pop
+
+log -header "A2: 4-bit direct count-to-therm spelling"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (
+  input  logic [3:0] sig,
+  output logic [3:0] sig2
+);
+  logic [2:0] count;
+  always_comb begin
+    count = {2'b0, sig[0]} + {2'b0, sig[1]} + {2'b0, sig[2]} + {2'b0, sig[3]};
+    sig2[0] = count > 3'd0;
+    sig2[1] = count > 3'd1;
+    sig2[2] = count > 3'd2;
+    sig2[3] = count > 3'd3;
+  end
+endmodule
+EOF
+proc
+check -assert
+equiv_opt -assert opt_compact_pack
+design -load postopt
+select t:$add -assert-count 3
+select t:$gt -assert-count 4
+design -reset
+log -pop
+
+# ============================================================================
+# Group B: larger structural check
+# ============================================================================
+
+log -header "B1: 32-bit loop-carried boolean self-pack"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (
+  input  logic [31:0] sig,
+  output logic [31:0] sig2
+);
+  always_comb begin
+    int indx;
+    sig2 = '0;
+    indx = 0;
+    for (int i = 0; i < 32; i++) begin
+      if (sig[i]) begin
+        sig2[indx] = sig[i];
+        indx = indx + 1;
+      end
+    end
+  end
+endmodule
+EOF
+proc
+check -assert
+opt_compact_pack
+clean -purge
+select t:$add -assert-count 31
+select t:$gt -assert-count 32
+design -reset
+log -pop
+
+# ============================================================================
+# Group C: negative / no-op cases
+# ============================================================================
+
+log -header "C1: index increments by 2, not dense self-compaction"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (
+  input  logic [7:0] sig,
+  output logic [7:0] sig2
+);
+  always_comb begin
+    int indx;
+    sig2 = '0;
+    indx = 0;
+    for (int i = 0; i < 4; i++) begin
+      if (sig[i]) begin
+        sig2[indx] = sig[i];
+        indx = indx + 2;
+      end
+    end
+  end
+endmodule
+EOF
+proc
+check -assert
+opt_compact_pack
+select t:$gt -assert-count 0
+design -reset
+log -pop
+
+log -header "C2: output is not zero-filled"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (
+  input  logic [7:0] sig,
+  output logic [7:0] sig2
+);
+  always_comb begin
+    int indx;
+    sig2 = '1;
+    indx = 0;
+    for (int i = 0; i < 8; i++) begin
+      if (sig[i]) begin
+        sig2[indx] = sig[i];
+        indx = indx + 1;
+      end
+    end
+  end
+endmodule
+EOF
+proc
+check -assert
+opt_compact_pack
+select t:$gt -assert-count 0
+design -reset
+log -pop
+
+log -header "C3: width below default min-width"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (
+  input  logic [2:0] sig,
+  output logic [2:0] sig2
+);
+  always_comb begin
+    int indx;
+    sig2 = '0;
+    indx = 0;
+    for (int i = 0; i < 3; i++) begin
+      if (sig[i]) begin
+        sig2[indx] = sig[i];
+        indx = indx + 1;
+      end
+    end
+  end
+endmodule
+EOF
+proc
+check -assert
+opt_compact_pack
+select t:$gt -assert-count 0
+design -reset
+log -pop
