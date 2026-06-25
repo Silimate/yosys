@@ -67,6 +67,7 @@ typedef void (*fn_destroy)(cxxrtl_handle);
 typedef size_t (*fn_step)(cxxrtl_handle);
 typedef void (*fn_enum)(cxxrtl_handle, void *,
                         void (*)(void *, const char *, struct cxxrtl_object *, size_t));
+typedef void (*fn_outline_eval)(cxxrtl_outline);
 
 // Per-tracked-storage activity counters. One tracker exists per unique
 // `curr` pointer; aliases share the tracker of their source storage.
@@ -77,6 +78,7 @@ struct Tracker {
 	std::vector<double> toggle_counts;   // per-bit toggle counts
 	std::vector<uint64_t> high_times;    // per-bit accumulated high time
 	std::vector<uint64_t> last_change;   // per-bit time of last observed change
+	cxxrtl_outline outline;              // non-null for OUTLINE items (needs eval)
 };
 
 // A named debug item mapped back to a wire of the design being annotated.
@@ -275,7 +277,9 @@ struct CxxrtlSimPass : public Pass {
 		auto capi_destroy = (fn_destroy)dlsym(so, "cxxrtl_destroy");
 		auto capi_step = (fn_step)dlsym(so, "cxxrtl_step");
 		auto capi_enum = (fn_enum)dlsym(so, "cxxrtl_enum");
-		if (!design_create || !capi_create || !capi_destroy || !capi_step || !capi_enum)
+		auto capi_outline_eval = (fn_outline_eval)dlsym(so, "cxxrtl_outline_eval");
+		if (!design_create || !capi_create || !capi_destroy || !capi_step || !capi_enum ||
+		    !capi_outline_eval)
 			log_cmd_error("Missing CXXRTL C API symbols in %s.\n", so_path.c_str());
 
 		cxxrtl_handle handle = capi_create(design_create());
@@ -298,10 +302,13 @@ struct CxxrtlSimPass : public Pass {
 			EnumCtx *ctx = (EnumCtx*)data;
 			if (parts != 1)
 				return; // multi-part objects unsupported (post-splitnets)
-			if (object->type == CXXRTL_MEMORY || object->type == CXXRTL_OUTLINE)
-				return; // memories/outlines not annotated
+			if (object->type == CXXRTL_MEMORY)
+				return; // memories are not annotated
 			if (object->depth != 1 || object->width == 0)
 				return;
+			// OUTLINE items are inlined/optimized combinational nets whose
+			// value is only valid right after cxxrtl_outline_eval(); we still
+			// track them so internal wires get activity, not just ports/regs.
 
 			ItemInfo info;
 			info.name = name;
@@ -321,6 +328,7 @@ struct CxxrtlSimPass : public Pass {
 				t.toggle_counts.assign(object->width, 0.0);
 				t.high_times.assign(object->width, 0);
 				t.last_change.assign(object->width, 0);
+				t.outline = (object->type == CXXRTL_OUTLINE) ? object->outline : nullptr;
 				int idx = GetSize(*ctx->trackers);
 				ctx->trackers->push_back(std::move(t));
 				ctx->storage_to_tracker->emplace(key, idx);
@@ -335,7 +343,7 @@ struct CxxrtlSimPass : public Pass {
 
 		// 3. Open the waveform and match signals
 		FstData fst(wave_path);
-		double real_timescale = fst.getTimescale();
+		double real_timescale = pow(10.0, fst.getScale());
 
 		if (scope.empty()) {
 			scope = fst.autoScope(top);
@@ -432,6 +440,11 @@ struct CxxrtlSimPass : public Pass {
 			return changed;
 		};
 
+		// Outlines must be re-evaluated each sample to read a valid value.
+		bool have_outlines = false;
+		for (auto &t : trackers)
+			if (t.outline != nullptr) { have_outlines = true; break; }
+
 		bool initial = true;
 		uint64_t max_time = startCount;
 		int cycle = 0;
@@ -472,6 +485,13 @@ struct CxxrtlSimPass : public Pass {
 				if (diverged)
 					capi_step(handle);
 			}
+
+			// Refresh outline (inlined) nets: their curr buffer is only
+			// meaningful right after an eval and goes stale after each step.
+			if (have_outlines)
+				for (auto &t : trackers)
+					if (t.outline != nullptr)
+						capi_outline_eval(t.outline);
 
 			if (initial) {
 				// First sample: snapshot state, don't count
@@ -578,9 +598,15 @@ struct CxxrtlSimPass : public Pass {
 		}
 		log("Annotated activity/duty on %d/%d wires of module '%s'.\n",
 		    with_activity, design_wires, RTLIL::unescape_id(top->name).c_str());
-		if (with_activity < design_wires)
+		if (with_activity < design_wires) {
 			log_warning("%d wire(s) of '%s' have no activity data.\n",
 			            design_wires - with_activity, RTLIL::unescape_id(top->name).c_str());
+			if (debug)
+				for (auto w : top->wires())
+					if (w->name.isPublic() && !w->attributes.count(RTLIL::IdString("$ACKT")))
+						log_debug("  no activity data: wire %s (width %d)\n",
+						          log_id(w->name), w->width);
+		}
 		if (total_bits > 0) {
 			log("Average activity: %f\n", total_activity / total_bits);
 			log("Average duty    : %f\n", total_duty / total_bits);
