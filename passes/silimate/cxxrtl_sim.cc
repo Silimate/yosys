@@ -80,13 +80,13 @@ struct SignalActivity {
 
 // One named signal/port/register of the design, linked to its simulation storage and matching waveform signal.
 struct DesignSignal {
-	std::string name;       // full hierarchical item name (space-separated)
-	Wire *wire;             // wire in the main design, or nullptr
-	int tracker;            // index into trackers
-	fstHandle fst_handle;   // matching FST signal, or 0
-	bool is_input;          // top-level input: driven from FST every sample
+	std::string name;       // hierarchical name from CXXRTL (space/dot separated)
+	Wire *wire;             // matching wire in the design, or nullptr
+	int activity;           // index into the activities vector
+	fstHandle fst_handle;   // matching FST waveform signal, or 0
+	bool is_input;          // top-level input: driven from the waveform each step
 	bool is_sync;           // sync-driven (register): -reg overwrite target
-	bool writable;          // object->next != NULL
+	bool writable;          // has a next buffer (object->next != NULL)
 };
 
 struct CxxrtlSimPass : public Pass {
@@ -131,42 +131,14 @@ struct CxxrtlSimPass : public Pass {
 		log("\n");
 	}
 
-	// --- name mapping -----------------------------------------------------
-
-	// Resolve a debug item name to a wire of the hierarchical design.
-	// Item names are space-separated: leading components are instance names,
-	// the last component is the wire name (possibly dotted after flatten).
-	Wire *find_wire(Design *design, Module *top, const std::string &item_name)
+	// Resolve a CXXRTL signal name to a wire of the hierarchical design.
+	Wire *resolve_wire(Design *design, Module *mod, std::string name)
 	{
-		std::vector<std::string> parts;
-		size_t pos = 0;
-		while (pos <= item_name.size()) {
-			size_t sp = item_name.find(' ', pos);
-			if (sp == std::string::npos) sp = item_name.size();
-			parts.push_back(item_name.substr(pos, sp - pos));
-			pos = sp + 1;
-		}
-		if (parts.empty())
-			return nullptr;
-
-		// Descend through the instance path
-		Module *mod = top;
-		for (size_t i = 0; i + 1 < parts.size(); i++) {
-			Cell *cell = mod->cell(RTLIL::escape_id(parts[i]));
-			if (cell == nullptr)
-				return nullptr;
-			Module *child = design->module(cell->type);
-			if (child == nullptr)
-				return nullptr;
-			mod = child;
-		}
-
-		// Resolve the wire name, walking dotted prefixes (flattened paths)
-		// down the hierarchy as needed.
-		std::string name = parts.back();
+		for (auto &c : name)
+			if (c == ' ') // normalize all spaces to '.' for scoping
+				c = '.';
 		while (true) {
-			Wire *w = mod->wire(RTLIL::escape_id(name));
-			if (w != nullptr)
+			if (Wire *w = mod->wire(RTLIL::escape_id(name)))
 				return w;
 			size_t dot = name.find('.');
 			if (dot == std::string::npos)
@@ -174,20 +146,19 @@ struct CxxrtlSimPass : public Pass {
 			Cell *cell = mod->cell(RTLIL::escape_id(name.substr(0, dot)));
 			if (cell == nullptr)
 				return nullptr;
-			Module *child = design->module(cell->type);
-			if (child == nullptr)
+			mod = design->module(cell->type);
+			if (mod == nullptr)
 				return nullptr;
-			mod = child;
 			name = name.substr(dot + 1);
 		}
 	}
 
-	// --- pass entry point ---------------------------------------------------
-
+	// Pass entry point
 	void execute(std::vector<std::string> args, Design *design) override
 	{
 		log_header(design, "Executing CXXRTL_SIM pass (FST-driven CXXRTL re-simulation).\n");
 
+		// Initialize variable defaults
 		std::string so_path, wave_path, scope, module_name;
 		double clk_period_override = 0;
 		double start_time = 0, stop_time = -1;
@@ -195,6 +166,7 @@ struct CxxrtlSimPass : public Pass {
 		bool reg_overwrite = false;
 		bool debug = false;
 
+		// Argument parsing
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-so" && argidx+1 < args.size()) {
@@ -241,12 +213,13 @@ struct CxxrtlSimPass : public Pass {
 		}
 		extra_args(args, argidx, design);
 
+		// .so and waveform are required
 		if (so_path.empty())
 			log_cmd_error("-so <file.so> is required.\n");
 		if (wave_path.empty())
 			log_cmd_error("-r <waveform> is required.\n");
 
-		// The annotation root: an explicit module, or the design top
+		// The annotation root, explicit module or default to top.
 		bool module_mode = !module_name.empty();
 		Module *top;
 		if (module_mode) {
@@ -259,11 +232,10 @@ struct CxxrtlSimPass : public Pass {
 				log_cmd_error("No top module found; run `hierarchy -top <module>` first.\n");
 		}
 
-		// 1. Load the precompiled evaluator
+		// Load compiled evaluator
 		void *so = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
 		if (so == nullptr)
 			log_cmd_error("dlopen(%s) failed: %s\n", so_path.c_str(), dlerror());
-
 		auto design_create = (fn_design_create)dlsym(so, "cxxrtl_design_create");
 		auto capi_create = (fn_create)dlsym(so, "cxxrtl_create");
 		auto capi_destroy = (fn_destroy)dlsym(so, "cxxrtl_destroy");
@@ -276,67 +248,64 @@ struct CxxrtlSimPass : public Pass {
 
 		cxxrtl_handle handle = capi_create(design_create());
 
-		// 2. Enumerate debug items, dedupe storage, set up trackers
-		std::vector<DesignSignal> items;
-		std::vector<SignalActivity> trackers;
-		dict<uintptr_t, int> storage_to_tracker;
+		// Enumerate simulation signals, dedup storage, set up activity counters
+		std::vector<DesignSignal> signals;
+		std::vector<SignalActivity> activities;
+		dict<uintptr_t, int> storage_to_activity;
 
-		struct EnumCtx {
+		struct EnumContext {
 			CxxrtlSimPass *self;
-			std::vector<DesignSignal> *items;
-			std::vector<SignalActivity> *trackers;
-			dict<uintptr_t, int> *storage_to_tracker;
+			std::vector<DesignSignal> *signals;
+			std::vector<SignalActivity> *activities;
+			dict<uintptr_t, int> *storage_to_activity;
 			Design *design;
 			Module *top;
-		} ctx = { this, &items, &trackers, &storage_to_tracker, design, top };
+		} ctx = { this, &signals, &activities, &storage_to_activity, design, top };
 
 		capi_enum(handle, &ctx, [](void *data, const char *name, struct cxxrtl_object *object, size_t parts) {
-			EnumCtx *ctx = (EnumCtx*)data;
+			EnumContext *ctx = (EnumContext*)data;
 			if (parts != 1)
 				return; // multi-part objects unsupported (post-splitnets)
 			if (object->type == CXXRTL_MEMORY)
-				return; // memories are not annotated
+				return; // $mem_v2 internals are not directly annotated, but port signals are
 			if (object->depth != 1 || object->width == 0)
 				return;
-			// OUTLINE items are inlined/optimized combinational nets whose
-			// value is only valid right after cxxrtl_outline_eval(); we still
-			// track them so internal wires get activity, not just ports/regs.
 
-			DesignSignal info;
-			info.name = name;
-			info.wire = ctx->self->find_wire(ctx->design, ctx->top, info.name);
-			info.is_input = (object->flags & CXXRTL_INPUT) != 0;
-			info.is_sync = (object->flags & CXXRTL_DRIVEN_SYNC) != 0;
-			info.writable = object->next != nullptr;
-			info.fst_handle = 0;
+			DesignSignal sig;
+			sig.name = name;
+			sig.wire = ctx->self->resolve_wire(ctx->design, ctx->top, sig.name);
+			sig.is_input = (object->flags & CXXRTL_INPUT) != 0;
+			sig.is_sync = (object->flags & CXXRTL_DRIVEN_SYNC) != 0;
+			sig.writable = object->next != nullptr;
+			sig.fst_handle = 0;
 
+			// Dedup by storage name since aliased signals share same pointer
 			uintptr_t key = (uintptr_t)object->curr;
-			auto it = ctx->storage_to_tracker->find(key);
-			if (it == ctx->storage_to_tracker->end()) {
-				SignalActivity t;
-				t.object = object;
-				t.num_words = (object->width + 31) / 32;
-				t.prev.assign(t.num_words, 0);
-				t.toggle_counts.assign(object->width, 0.0);
-				t.high_times.assign(object->width, 0);
-				t.last_change.assign(object->width, 0);
-				t.outline = (object->type == CXXRTL_OUTLINE) ? object->outline : nullptr;
-				int idx = GetSize(*ctx->trackers);
-				ctx->trackers->push_back(std::move(t));
-				ctx->storage_to_tracker->emplace(key, idx);
-				info.tracker = idx;
+			auto it = ctx->storage_to_activity->find(key);
+			if (it == ctx->storage_to_activity->end()) {
+				SignalActivity act;
+				act.object = object;
+				act.num_words = (object->width + 31) / 32;
+				act.prev.assign(act.num_words, 0);
+				act.toggle_counts.assign(object->width, 0.0);
+				act.high_times.assign(object->width, 0);
+				act.last_change.assign(object->width, 0);
+				act.outline = (object->type == CXXRTL_OUTLINE) ? object->outline : nullptr;
+				int idx = GetSize(*ctx->activities);
+				ctx->activities->push_back(std::move(act));
+				ctx->storage_to_activity->emplace(key, idx);
+				sig.activity = idx;
 			} else {
-				info.tracker = it->second;
+				sig.activity = it->second;
 			}
-			ctx->items->push_back(std::move(info));
+			ctx->signals->push_back(std::move(sig));
 		});
 
-		log_debug("Enumerated %d debug items (%d unique storages).\n", GetSize(items), GetSize(trackers));
+		log_debug("Enumerated %d signals (%d unique storages).\n", GetSize(signals), GetSize(activities));
 
-		// 3. Open the waveform and match signals
+		// Open waveform to drive signals
 		FstData fst(wave_path);
 		double real_timescale = pow(10.0, fst.getScale());
-
 		if (scope.empty()) {
 			scope = fst.autoScope(top);
 			if (scope.empty())
@@ -347,25 +316,24 @@ struct CxxrtlSimPass : public Pass {
 
 		int found_inputs = 0, n_inputs = 0;
 		int found_regs = 0, n_regs = 0;
-		for (auto &info : items) {
+		for (auto &sig : signals) {
 			// FST names use '.' both for hierarchy and flattened wire names
-			std::string fst_name = scope + "." + info.name;
+			std::string fst_name = scope + "." + sig.name;
 			for (auto &c : fst_name)
 				if (c == ' ') c = '.';
-			info.fst_handle = fst.getHandle(fst_name);
+			sig.fst_handle = fst.getHandle(fst_name);
 
-			// Verify every signal we will drive from the waveform can be
-			// found before the replay loop drives it; warn otherwise.
-			if (info.is_input) {
+			// Verify every signal we will drive from the waveform can be found, warn on non
+			if (sig.is_input) {
 				n_inputs++;
-				if (info.fst_handle != 0)
+				if (sig.fst_handle != 0)
 					found_inputs++;
 				else
 					log_warning("Input port '%s' not found in waveform; left at its initial value.\n",
 					            fst_name.c_str());
-			} else if (reg_overwrite && info.is_sync && info.writable) {
+			} else if (reg_overwrite && sig.is_sync && sig.writable) { // do the same for registers if options allow
 				n_regs++;
-				if (info.fst_handle != 0)
+				if (sig.fst_handle != 0)
 					found_regs++;
 				else if (debug)
 					log_warning("Register '%s' not found in waveform; not overwritten.\n",
@@ -375,10 +343,9 @@ struct CxxrtlSimPass : public Pass {
 		log("Driving %d/%d input ports from the waveform.\n", found_inputs, n_inputs);
 		if (reg_overwrite)
 			log("Overwriting %d/%d registers from the waveform.\n", found_regs, n_regs);
+
+		// If no inputs are found, there is a problem
 		if (n_inputs > 0 && found_inputs == 0) {
-			// Without any driven input the replay would be meaningless. In
-			// module mode skip this module (workers handle many); for a
-			// whole-design run it is a hard configuration error.
 			if (module_mode) {
 				log_warning("No input ports of module '%s' matched in the waveform "
 				            "(scope \"%s\"); skipping annotation.\n",
@@ -390,7 +357,7 @@ struct CxxrtlSimPass : public Pass {
 			log_cmd_error("No input ports matched in the waveform; check -scope.\n");
 		}
 
-		// 4. Replay (start/stop semantics mirror the sim pass)
+		// Replay FST on the design
 		uint64_t startCount, stopCount;
 		if (start_time == 0)
 			startCount = fst.getStartTime();
@@ -434,8 +401,8 @@ struct CxxrtlSimPass : public Pass {
 
 		// Outlines must be re-evaluated each sample to read a valid value.
 		bool have_outlines = false;
-		for (auto &t : trackers)
-			if (t.outline != nullptr) { have_outlines = true; break; }
+		for (auto &act : activities)
+			if (act.outline != nullptr) { have_outlines = true; break; }
 
 		bool initial = true;
 		uint64_t max_time = startCount;
@@ -449,18 +416,18 @@ struct CxxrtlSimPass : public Pass {
 			}
 
 			if (initial) {
-				// Initialize every matched, writable signal from the waveform
-				for (auto &info : items) {
-					if (info.fst_handle == 0 || !info.writable)
+				// First sample: seed every matched, writable signal from the waveform
+				for (auto &sig : signals) {
+					if (sig.fst_handle == 0 || !sig.writable)
 						continue;
-					write_object(trackers[info.tracker].object, fst.valueOf(info.fst_handle));
+					write_object(activities[sig.activity].object, fst.valueOf(sig.fst_handle));
 				}
 			} else {
-				// Drive top-level inputs
-				for (auto &info : items) {
-					if (!info.is_input || info.fst_handle == 0)
+				// Later samples: drive only the top-level inputs
+				for (auto &sig : signals) {
+					if (!sig.is_input || sig.fst_handle == 0)
 						continue;
-					write_object(trackers[info.tracker].object, fst.valueOf(info.fst_handle));
+					write_object(activities[sig.activity].object, fst.valueOf(sig.fst_handle));
 				}
 			}
 
@@ -469,10 +436,10 @@ struct CxxrtlSimPass : public Pass {
 			// Overwrite register ground truth from the waveform
 			if (reg_overwrite && !initial) {
 				bool diverged = false;
-				for (auto &info : items) {
-					if (!info.is_sync || !info.writable || info.fst_handle == 0)
+				for (auto &sig : signals) {
+					if (!sig.is_sync || !sig.writable || sig.fst_handle == 0)
 						continue;
-					diverged |= write_object(trackers[info.tracker].object, fst.valueOf(info.fst_handle));
+					diverged |= write_object(activities[sig.activity].object, fst.valueOf(sig.fst_handle));
 				}
 				if (diverged)
 					capi_step(handle);
@@ -481,37 +448,37 @@ struct CxxrtlSimPass : public Pass {
 			// Refresh outline (inlined) nets: their curr buffer is only
 			// meaningful right after an eval and goes stale after each step.
 			if (have_outlines)
-				for (auto &t : trackers)
-					if (t.outline != nullptr)
-						capi_outline_eval(t.outline);
+				for (auto &act : activities)
+					if (act.outline != nullptr)
+						capi_outline_eval(act.outline);
 
 			if (initial) {
-				// First sample: snapshot state, don't count
-				for (auto &t : trackers) {
-					for (size_t w = 0; w < t.num_words; w++)
-						t.prev[w] = t.object->curr[w];
-					for (size_t bit = 0; bit < t.object->width; bit++)
-						t.last_change[bit] = time;
+				// First sample: snapshot state, don't count toggles yet
+				for (auto &act : activities) {
+					for (size_t w = 0; w < act.num_words; w++)
+						act.prev[w] = act.object->curr[w];
+					for (size_t bit = 0; bit < act.object->width; bit++)
+						act.last_change[bit] = time;
 				}
 				initial = false;
 			} else {
-				// Count toggles / accumulate high times (lazy, per changed word)
-				for (auto &t : trackers) {
-					const uint32_t *curr = t.object->curr;
-					for (size_t w = 0; w < t.num_words; w++) {
-						uint32_t diff = curr[w] ^ t.prev[w];
+				// Count toggles / accumulate high time (lazy, per changed word)
+				for (auto &act : activities) {
+					const uint32_t *curr = act.object->curr;
+					for (size_t w = 0; w < act.num_words; w++) {
+						uint32_t diff = curr[w] ^ act.prev[w];
 						while (diff != 0) {
 							int b = __builtin_ctz(diff);
 							diff &= diff - 1;
 							size_t bit = w * 32 + b;
-							if (bit >= t.object->width)
+							if (bit >= act.object->width)
 								break;
-							if ((t.prev[w] >> b) & 1)
-								t.high_times[bit] += time - t.last_change[bit];
-							t.last_change[bit] = time;
-							t.toggle_counts[bit] += 1.0;
+							if ((act.prev[w] >> b) & 1)
+								act.high_times[bit] += time - act.last_change[bit];
+							act.last_change[bit] = time;
+							act.toggle_counts[bit] += 1.0;
 						}
-						t.prev[w] = curr[w];
+						act.prev[w] = curr[w];
 					}
 				}
 			}
@@ -521,10 +488,10 @@ struct CxxrtlSimPass : public Pass {
 		});
 
 		// Close out high times for bits still high at the end
-		for (auto &t : trackers)
-			for (size_t bit = 0; bit < t.object->width; bit++)
-				if ((t.prev[bit / 32] >> (bit % 32)) & 1)
-					t.high_times[bit] += max_time - t.last_change[bit];
+		for (auto &act : activities)
+			for (size_t bit = 0; bit < act.object->width; bit++)
+				if ((act.prev[bit / 32] >> (bit % 32)) & 1)
+					act.high_times[bit] += max_time - act.last_change[bit];
 
 		log("Re-simulation complete: %d samples at %lu%s\n", cycle, (unsigned long)max_time, fst.getTimescaleString());
 
@@ -534,10 +501,10 @@ struct CxxrtlSimPass : public Pass {
 			clk_period = clk_period_override;
 		} else {
 			double highest_toggle = 0;
-			for (auto &t : trackers)
-				for (size_t bit = 0; bit < t.object->width; bit++)
-					if (t.toggle_counts[bit] > highest_toggle)
-						highest_toggle = t.toggle_counts[bit];
+			for (auto &act : activities)
+				for (size_t bit = 0; bit < act.object->width; bit++)
+					if (act.toggle_counts[bit] > highest_toggle)
+						highest_toggle = act.toggle_counts[bit];
 			if (highest_toggle < 2) {
 				log_warning("Clock signal not found, setting frequency to 1GHz...\n");
 				clk_period = 1.0 / 1.0e9;
@@ -559,23 +526,23 @@ struct CxxrtlSimPass : public Pass {
 		uint64_t total_bits = 0;
 		double cycles_total = ((double)duration * real_timescale / clk_period) * 2.0;
 
-		for (auto &info : items) {
-			if (info.wire == nullptr)
+		for (auto &sig : signals) {
+			if (sig.wire == nullptr)
 				continue;
-			SignalActivity &t = trackers[info.tracker];
-			int width = std::min(info.wire->width, (int)t.object->width);
+			SignalActivity &act = activities[sig.activity];
+			int width = std::min(sig.wire->width, (int)act.object->width);
 			std::string activity_str, duty_str;
 			for (int i = 0; i < width; i++) {
-				double activity = cycles_total > 0 ? t.toggle_counts[i] / cycles_total : 0.0;
-				double duty = duration > 0 ? (double)t.high_times[i] / (double)duration : 0.0;
+				double activity = cycles_total > 0 ? act.toggle_counts[i] / cycles_total : 0.0;
+				double duty = duration > 0 ? (double)act.high_times[i] / (double)duration : 0.0;
 				total_activity += activity;
 				total_duty += duty;
 				total_bits++;
 				activity_str += std::to_string(activity) + " ";
 				duty_str += std::to_string(duty) + " ";
 			}
-			info.wire->set_string_attribute("$ACKT", activity_str);
-			info.wire->set_string_attribute("$DUTY", duty_str);
+			sig.wire->set_string_attribute("$ACKT", activity_str);
+			sig.wire->set_string_attribute("$DUTY", duty_str);
 		}
 
 		// Report coverage over the design module's own public wires: the
