@@ -27,8 +27,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-// Time string parsing, identical to the sim pass: bare numbers are ns,
-// optional unit suffix, "END" means end of waveform (-1).
+// Time string exponent converter.
 static const std::map<std::string, int> g_units =
 {
 	{ "",    -9 }, // default is ns
@@ -58,9 +57,8 @@ static double stringToTime(std::string str)
 	return value * pow(10.0, g_units.at(endptr));
 }
 
-// Function pointer types for the C API symbols resolved from the evaluator
-// .so (the C API implementation is compiled into the evaluator itself via
-// -DCXXRTL_INCLUDE_CAPI_IMPL, it is not part of libyosys).
+// Function pointer types for the C API symbols resolved from the evaluator.
+// The C API implementation is compiled into the evaluator itself (-DCXXRTL_INCLUDE_CAPI_IMPL).
 typedef cxxrtl_toplevel (*fn_design_create)();
 typedef cxxrtl_handle (*fn_create)(cxxrtl_toplevel);
 typedef void (*fn_destroy)(cxxrtl_handle);
@@ -73,7 +71,7 @@ typedef void (*fn_outline_eval)(cxxrtl_outline);
 // `curr` pointer; aliases share the tracker of their source storage.
 struct Tracker {
 	struct cxxrtl_object *object;
-	size_t nwords;
+	size_t num_words;
 	std::vector<uint32_t> prev;          // previous sample value
 	std::vector<double> toggle_counts;   // per-bit toggle counts
 	std::vector<uint64_t> high_times;    // per-bit accumulated high time
@@ -100,29 +98,24 @@ struct CxxrtlSimPass : public Pass {
 		log("\n");
 		log("    cxxrtl_sim -so <file.so> -r <waveform> [options]\n");
 		log("\n");
-		log("Load the CXXRTL evaluator emitted by write_cxxrtl (and compiled by\n");
-		log("cxxrtl_compile), replay an input waveform through it, and annotate per-bit\n");
-		log("$ACKT/$DUTY activity onto the wires of the current design (same contract as\n");
-		log("`sim ... -activity`).\n");
+		log("Load a compiled CXXRTL evaluator emitted by write_cxxrtl, replay an input waveform through it,\n");
+		log("and annotate per-bit $ACKT/$DUTY activity onto the wires of the current design \n");
 		log("\n");
 		log("    -so <file.so>\n");
 		log("        precompiled evaluator (see cxxrtl_compile).\n");
 		log("\n");
 		log("    -module <name>\n");
-		log("        the design module the evaluator was emitted from; debug items are\n");
-		log("        resolved against (and annotated onto) this module instead of the\n");
-		log("        design top. Use with per-module evaluators whose child instances\n");
-		log("        were cut into FST-driven inputs.\n");
+		log("        the design module the evaluator was emitted from.\n");
 		log("\n");
 		log("    -r <file.fst|file.vcd>\n");
 		log("        input waveform; VCD is converted via vcd2fst (required).\n");
 		log("\n");
 		log("    -scope <name>\n");
-		log("        scope of the top module inside the waveform (default: auto-detect).\n");
+		log("        scope within the file to query from for the given module/evaluator.\n");
 		log("\n");
 		log("    -clk-period <seconds>\n");
-		log("        master clock period override; default: auto-detect from the\n");
-		log("        highest-toggling signal.\n");
+		log("        master clock period override. Otherwise, derives from the fastest-toggling signal and");
+		log("        assumes it's clock period from the timescale of the waveform.\n");
 		log("\n");
 		log("    -start <time>, -stop <time>\n");
 		log("        replay window; bare numbers are ns, unit suffixes (us/ns/ps/...)\n");
@@ -135,7 +128,7 @@ struct CxxrtlSimPass : public Pass {
 		log("        log progress every <n> samples.\n");
 		log("\n");
 		log("    -d\n");
-		log("        enable debug output (e.g. per-register waveform-match warnings).\n");
+		log("        enable debug output.\n");
 		log("\n");
 	}
 
@@ -323,8 +316,8 @@ struct CxxrtlSimPass : public Pass {
 			if (it == ctx->storage_to_tracker->end()) {
 				Tracker t;
 				t.object = object;
-				t.nwords = (object->width + 31) / 32;
-				t.prev.assign(t.nwords, 0);
+				t.num_words = (object->width + 31) / 32;
+				t.prev.assign(t.num_words, 0);
 				t.toggle_counts.assign(object->width, 0.0);
 				t.high_times.assign(object->width, 0);
 				t.last_change.assign(object->width, 0);
@@ -417,17 +410,17 @@ struct CxxrtlSimPass : public Pass {
 
 		// Write an FST value string (MSB first; x/z mapped to 0) into an object
 		auto write_object = [](struct cxxrtl_object *object, const std::string &v) -> bool {
-			size_t nwords = (object->width + 31) / 32;
+			size_t num_words = (object->width + 31) / 32;
 			bool changed = false;
 			uint32_t *tgt = object->next != nullptr ? object->next : object->curr;
-			std::vector<uint32_t> val(nwords, 0);
+			std::vector<uint32_t> val(num_words, 0);
 			size_t nbits = std::min((size_t)v.size(), object->width);
 			for (size_t i = 0; i < nbits; i++) {
 				char c = v[v.size() - 1 - i]; // FST strings are MSB first
 				if (c == '1')
 					val[i / 32] |= (uint32_t)1 << (i % 32);
 			}
-			for (size_t w = 0; w < nwords; w++) {
+			for (size_t w = 0; w < num_words; w++) {
 				if (tgt[w] != val[w])
 					changed = true;
 				tgt[w] = val[w];
@@ -435,7 +428,7 @@ struct CxxrtlSimPass : public Pass {
 			// For wires (separate curr/next), also force curr so the value
 			// is visible without an extra commit (used for init/reg overwrite).
 			if (object->next != nullptr && object->next != object->curr)
-				for (size_t w = 0; w < nwords; w++)
+				for (size_t w = 0; w < num_words; w++)
 					object->curr[w] = val[w];
 			return changed;
 		};
@@ -496,7 +489,7 @@ struct CxxrtlSimPass : public Pass {
 			if (initial) {
 				// First sample: snapshot state, don't count
 				for (auto &t : trackers) {
-					for (size_t w = 0; w < t.nwords; w++)
+					for (size_t w = 0; w < t.num_words; w++)
 						t.prev[w] = t.object->curr[w];
 					for (size_t bit = 0; bit < t.object->width; bit++)
 						t.last_change[bit] = time;
@@ -506,7 +499,7 @@ struct CxxrtlSimPass : public Pass {
 				// Count toggles / accumulate high times (lazy, per changed word)
 				for (auto &t : trackers) {
 					const uint32_t *curr = t.object->curr;
-					for (size_t w = 0; w < t.nwords; w++) {
+					for (size_t w = 0; w < t.num_words; w++) {
 						uint32_t diff = curr[w] ^ t.prev[w];
 						while (diff != 0) {
 							int b = __builtin_ctz(diff);
