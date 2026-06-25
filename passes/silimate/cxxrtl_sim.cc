@@ -59,19 +59,18 @@ static double stringToTime(std::string str)
 
 // Function pointer types for the C API symbols resolved from the evaluator.
 // The C API implementation is compiled into the evaluator itself (-DCXXRTL_INCLUDE_CAPI_IMPL).
-typedef cxxrtl_toplevel (*fn_design_create)();
-typedef cxxrtl_handle (*fn_create)(cxxrtl_toplevel);
-typedef void (*fn_destroy)(cxxrtl_handle);
-typedef size_t (*fn_step)(cxxrtl_handle);
-typedef void (*fn_enum)(cxxrtl_handle, void *,
-                        void (*)(void *, const char *, struct cxxrtl_object *, size_t));
-typedef void (*fn_outline_eval)(cxxrtl_outline);
+typedef cxxrtl_toplevel (*fn_design_create)();                     // build design object in C++
+typedef cxxrtl_handle (*fn_create)(cxxrtl_toplevel);               // wrap design in runnable handle
+typedef void (*fn_destroy)(cxxrtl_handle);                         // tear down design
+typedef size_t (*fn_step)(cxxrtl_handle);                          // evaluate the circuit once (between two #timestamps)
+typedef void (*fn_enum)(cxxrtl_handle, void *,                     // walk over every visible signal ($var)
+	void (*)(void *, const char *, struct cxxrtl_object *, size_t));
+typedef void (*fn_outline_eval)(cxxrtl_outline);                   // recompute OUTLINE signal values (optimized nets)
 
-// Per-tracked-storage activity counters. One tracker exists per unique
-// `curr` pointer; aliases share the tracker of their source storage.
-struct Tracker {
-	struct cxxrtl_object *object;
-	size_t num_words;
+// Accumulator for one signal's storage
+struct SignalAccumulator {
+	struct cxxrtl_object *object;        // CXXRTL simulation-side descriptor of the netlist wire
+	size_t num_words;                    // number of 32-bit chunks to hold the value
 	std::vector<uint32_t> prev;          // previous sample value
 	std::vector<double> toggle_counts;   // per-bit toggle counts
 	std::vector<uint64_t> high_times;    // per-bit accumulated high time
@@ -279,13 +278,13 @@ struct CxxrtlSimPass : public Pass {
 
 		// 2. Enumerate debug items, dedupe storage, set up trackers
 		std::vector<ItemInfo> items;
-		std::vector<Tracker> trackers;
+		std::vector<SignalAccumulator> trackers;
 		dict<uintptr_t, int> storage_to_tracker;
 
 		struct EnumCtx {
 			CxxrtlSimPass *self;
 			std::vector<ItemInfo> *items;
-			std::vector<Tracker> *trackers;
+			std::vector<SignalAccumulator> *trackers;
 			dict<uintptr_t, int> *storage_to_tracker;
 			Design *design;
 			Module *top;
@@ -314,7 +313,7 @@ struct CxxrtlSimPass : public Pass {
 			uintptr_t key = (uintptr_t)object->curr;
 			auto it = ctx->storage_to_tracker->find(key);
 			if (it == ctx->storage_to_tracker->end()) {
-				Tracker t;
+				SignalAccumulator t;
 				t.object = object;
 				t.num_words = (object->width + 31) / 32;
 				t.prev.assign(t.num_words, 0);
@@ -563,7 +562,7 @@ struct CxxrtlSimPass : public Pass {
 		for (auto &info : items) {
 			if (info.wire == nullptr)
 				continue;
-			Tracker &t = trackers[info.tracker];
+			SignalAccumulator &t = trackers[info.tracker];
 			int width = std::min(info.wire->width, (int)t.object->width);
 			std::string activity_str, duty_str;
 			for (int i = 0; i < width; i++) {
