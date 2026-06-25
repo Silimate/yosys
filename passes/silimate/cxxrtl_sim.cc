@@ -67,8 +67,8 @@ typedef void (*fn_enum)(cxxrtl_handle, void *,                     // walk over 
 	void (*)(void *, const char *, struct cxxrtl_object *, size_t));
 typedef void (*fn_outline_eval)(cxxrtl_outline);                   // recompute OUTLINE signal values (optimized nets)
 
-// Accumulator for one signal's storage
-struct SignalAccumulator {
+// Switching activity (toggles + high time) measured for one simulated net.
+struct SignalActivity {
 	struct cxxrtl_object *object;        // CXXRTL simulation-side descriptor of the netlist wire
 	size_t num_words;                    // number of 32-bit chunks to hold the value
 	std::vector<uint32_t> prev;          // previous sample value
@@ -78,8 +78,8 @@ struct SignalAccumulator {
 	cxxrtl_outline outline;              // non-null for OUTLINE items (needs eval)
 };
 
-// A named debug item mapped back to a wire of the design being annotated.
-struct ItemInfo {
+// One named signal/port/register of the design, linked to its simulation storage and matching waveform signal.
+struct DesignSignal {
 	std::string name;       // full hierarchical item name (space-separated)
 	Wire *wire;             // wire in the main design, or nullptr
 	int tracker;            // index into trackers
@@ -277,14 +277,14 @@ struct CxxrtlSimPass : public Pass {
 		cxxrtl_handle handle = capi_create(design_create());
 
 		// 2. Enumerate debug items, dedupe storage, set up trackers
-		std::vector<ItemInfo> items;
-		std::vector<SignalAccumulator> trackers;
+		std::vector<DesignSignal> items;
+		std::vector<SignalActivity> trackers;
 		dict<uintptr_t, int> storage_to_tracker;
 
 		struct EnumCtx {
 			CxxrtlSimPass *self;
-			std::vector<ItemInfo> *items;
-			std::vector<SignalAccumulator> *trackers;
+			std::vector<DesignSignal> *items;
+			std::vector<SignalActivity> *trackers;
 			dict<uintptr_t, int> *storage_to_tracker;
 			Design *design;
 			Module *top;
@@ -302,7 +302,7 @@ struct CxxrtlSimPass : public Pass {
 			// value is only valid right after cxxrtl_outline_eval(); we still
 			// track them so internal wires get activity, not just ports/regs.
 
-			ItemInfo info;
+			DesignSignal info;
 			info.name = name;
 			info.wire = ctx->self->find_wire(ctx->design, ctx->top, info.name);
 			info.is_input = (object->flags & CXXRTL_INPUT) != 0;
@@ -313,7 +313,7 @@ struct CxxrtlSimPass : public Pass {
 			uintptr_t key = (uintptr_t)object->curr;
 			auto it = ctx->storage_to_tracker->find(key);
 			if (it == ctx->storage_to_tracker->end()) {
-				SignalAccumulator t;
+				SignalActivity t;
 				t.object = object;
 				t.num_words = (object->width + 31) / 32;
 				t.prev.assign(t.num_words, 0);
@@ -562,7 +562,7 @@ struct CxxrtlSimPass : public Pass {
 		for (auto &info : items) {
 			if (info.wire == nullptr)
 				continue;
-			SignalAccumulator &t = trackers[info.tracker];
+			SignalActivity &t = trackers[info.tracker];
 			int width = std::min(info.wire->width, (int)t.object->width);
 			std::string activity_str, duty_str;
 			for (int i = 0; i < width; i++) {
