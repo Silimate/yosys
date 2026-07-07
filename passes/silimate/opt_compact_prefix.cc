@@ -236,7 +236,7 @@ struct OptCompactPrefixWorker : CutRegionWorker
 		for (auto bit : en_cands)
 			cand_bits.push_back(bit);
 
-		ConstEval ce(module);
+		ConstEval &ce = shared_ce();
 		SigSpec out_s = sigmap(root_sig);
 		SigSpec data_s = sigmap(data_sig);
 		SigSpec cand_s;
@@ -415,7 +415,7 @@ struct OptCompactPrefixWorker : CutRegionWorker
 	{
 		if (width < 4)
 			return false;
-		ConstEval ce(module);
+		ConstEval &ce = shared_ce();
 		SigSpec in_s = sigmap(in_sig);
 		SigSpec out_s = sigmap(out_sig);
 
@@ -511,7 +511,7 @@ struct OptCompactPrefixWorker : CutRegionWorker
 		int wd = GetSize(dis_s);
 		int wt = GetSize(data_s);
 		bool self = sigmap(dis_s) == sigmap(data_s);
-		ConstEval ce(module);
+		ConstEval &ce = shared_ce();
 		for (int pol = 0; pol < 2; pol++) {
 			// A self-pair (data == disable bus) can only be probed with all
 			// lanes enabled AND data all-ones, i.e. enable-high polarity.
@@ -546,7 +546,7 @@ struct OptCompactPrefixWorker : CutRegionWorker
 			return false;
 		if (lw > wd || lw > wt || wd > 62 || wt > 62)
 			return false;
-		ConstEval ce(module);
+		ConstEval &ce = shared_ce();
 		SigSpec dis_s = sigmap(dis_sig);
 		SigSpec data_s = sigmap(data_sig);
 		SigSpec out_s = sigmap(out_sig);
@@ -615,8 +615,14 @@ struct OptCompactPrefixWorker : CutRegionWorker
 		return mask;
 	}
 
+	// Evaluate the modulo vector set once and test all four
+	// (msb_first, offset) variants against the recorded outputs, in the
+	// original priority order with first-match tie-break. This replaces up
+	// to four full ConstEval sweeps (one per variant) with a single sweep;
+	// sets out_msb_first/out_offset on the first surviving variant.
 	bool fingerprint_modulo(const SigSpec &en_sig, const SigSpec &n_sig,
-	                        const SigSpec &mask_sig, int width, bool msb_first, int offset)
+	                        const SigSpec &mask_sig, int width,
+	                        bool &out_msb_first, int &out_offset)
 	{
 		if (width <= 0 || width > 62)
 			return false;
@@ -624,7 +630,7 @@ struct OptCompactPrefixWorker : CutRegionWorker
 		// also matches plain gating muxes; require a real counter range.
 		if (GetSize(n_sig) < 2)
 			return false;
-		ConstEval ce(module);
+		ConstEval &ce = shared_ce();
 		SigSpec en_s = sigmap(en_sig);
 		SigSpec n_s = sigmap(n_sig);
 		SigSpec mask_s = sigmap(mask_sig);
@@ -653,6 +659,12 @@ struct OptCompactPrefixWorker : CutRegionWorker
 			envals.push_back(lfsr & full);
 		}
 
+		// Variants in the original check order (msb/lsb x offset 0/1).
+		static const struct { bool msb; int off; } variants[] = {
+			{true, 0}, {false, 0}, {false, 1}, {true, 1}
+		};
+		bool alive[4] = {true, true, true, true};
+
 		for (uint64_t nv : nvals)
 			for (uint64_t ev : envals) {
 				uint64_t actual;
@@ -660,10 +672,27 @@ struct OptCompactPrefixWorker : CutRegionWorker
 				                    {n_s, const_u64(nv, nw)}},
 				               mask_s, actual))
 					return false;
-				if (actual != expected_modulo_mask(ev, nv, width, msb_first, offset))
+				bool any = false;
+				for (int v = 0; v < 4; v++) {
+					if (!alive[v])
+						continue;
+					if (actual != expected_modulo_mask(ev, nv, width,
+					                                   variants[v].msb, variants[v].off))
+						alive[v] = false;
+					else
+						any = true;
+				}
+				if (!any)
 					return false;
 			}
-		return true;
+
+		for (int v = 0; v < 4; v++)
+			if (alive[v]) {
+				out_msb_first = variants[v].msb;
+				out_offset = variants[v].off;
+				return true;
+			}
+		return false;
 	}
 
 	// --- Forward gather/compress: out[k] = data[i_k] where i_k is the
@@ -693,7 +722,7 @@ struct OptCompactPrefixWorker : CutRegionWorker
 	{
 		if (width < 4 || width > 62)
 			return false;
-		ConstEval ce(module);
+		ConstEval &ce = shared_ce();
 		SigSpec en_s = sigmap(en_sig);
 		SigSpec data_s = sigmap(data_sig);
 		SigSpec out_s = sigmap(out_sig);
@@ -961,6 +990,22 @@ struct OptCompactPrefixWorker : CutRegionWorker
 			true, std::max(8192, max_width * max_width * 4), max_width * (max_width + 8));
 	}
 
+	// True if any bit of `sig` is driven by a cell this pass emitted on an
+	// earlier fixpoint sweep (tagged in execute()). The emitted compaction
+	// logic still fingerprints as the same function, so this guard stops the
+	// outer fixpoint loop from re-rewriting its own output indefinitely.
+	bool root_driver_emitted(const SigSpec &sig)
+	{
+		for (auto bit : sigmap(sig)) {
+			if (!bit.wire)
+				continue;
+			Cell *drv = bit_to_driver.at(bit, nullptr);
+			if (drv && drv->get_bool_attribute(ID(opt_compact_prefix_emitted)))
+				return true;
+		}
+		return false;
+	}
+
 	void run()
 	{
 		if (module->has_processes_warn())
@@ -989,6 +1034,8 @@ struct OptCompactPrefixWorker : CutRegionWorker
 				break;
 			}
 			if (root_claimed(root.sig))
+				continue;
+			if (root_driver_emitted(root.sig))
 				continue;
 
 			int width = GetSize(root.sig);
@@ -1379,19 +1426,7 @@ struct OptCompactPrefixWorker : CutRegionWorker
 						fp_attempts++;
 						bool msb_first = false;
 						int offset = -1;
-						if (fingerprint_modulo(en.sig, n.sig, root.sig, width, true, 0)) {
-							msb_first = true;
-							offset = 0;
-						} else if (fingerprint_modulo(en.sig, n.sig, root.sig, width, false, 0)) {
-							msb_first = false;
-							offset = 0;
-						} else if (fingerprint_modulo(en.sig, n.sig, root.sig, width, false, 1)) {
-							msb_first = false;
-							offset = 1;
-						} else if (fingerprint_modulo(en.sig, n.sig, root.sig, width, true, 1)) {
-							msb_first = true;
-							offset = 1;
-						} else {
+						if (!fingerprint_modulo(en.sig, n.sig, root.sig, width, msb_first, offset)) {
 							log_debug("  mod %s/%s: fingerprint mismatch\n", en.name.c_str(), n.name.c_str());
 							continue;
 						}
@@ -1505,28 +1540,63 @@ struct OptCompactPrefixPass : public Pass
 		int total_removed = 0;
 		int total_emitted = 0;
 
+		// Overlapping compaction loops can share post-synthesis logic (e.g. one
+		// loop's start mask feeding the other loop's cone), so a single sweep
+		// claims the first region and masks the second. Iterate each module to
+		// a fixpoint: rewrite, tag the freshly-emitted cells, clean, and re-scan
+		// until a sweep finds nothing new. The tag (consumed by
+		// root_driver_emitted) stops the next sweep from re-matching this pass's
+		// own output, which still fingerprints as the same compaction function.
+		const int max_sweeps = 16;
 		for (auto module : design->selected_modules()) {
-			OptCompactPrefixWorker worker(module, max_width);
-			if (walk_budget > 0)
-				worker.walk_budget = walk_budget;
-			if (eval_budget > 0)
-				worker.eval_budget = eval_budget;
-			if (attempt_budget > 0)
-				worker.attempt_budget = attempt_budget;
-			worker.run();
-			total_forward += worker.forward_rewrites;
-			total_reverse += worker.reverse_rewrites;
-			total_modulo += worker.modulo_rewrites;
-			total_removed += worker.old_cells_removed;
-			total_emitted += worker.new_cells_emitted;
+			for (int sweep = 0; sweep < max_sweeps; sweep++) {
+				pool<Cell *> before;
+				for (auto c : module->cells())
+					before.insert(c);
+
+				OptCompactPrefixWorker worker(module, max_width);
+				if (walk_budget > 0)
+					worker.walk_budget = walk_budget;
+				if (eval_budget > 0)
+					worker.eval_budget = eval_budget;
+				if (attempt_budget > 0)
+					worker.attempt_budget = attempt_budget;
+				worker.run();
+
+				total_forward += worker.forward_rewrites;
+				total_reverse += worker.reverse_rewrites;
+				total_modulo += worker.modulo_rewrites;
+				total_removed += worker.old_cells_removed;
+				total_emitted += worker.new_cells_emitted;
+
+				if (worker.forward_rewrites + worker.reverse_rewrites +
+				        worker.modulo_rewrites == 0)
+					break;
+				if (sweep == max_sweeps - 1)
+					log_warning("opt_compact_prefix: fixpoint not reached for module %s "
+					            "after %d sweeps; some compaction opportunities may remain.\n",
+					            log_id(module), max_sweeps);
+
+				// Tag the cells emitted by this sweep so the next sweep skips
+				// them, then drop the now-dangling old cone so the masked
+				// sibling region becomes visible. Scope the clean to the module
+				// under rewrite so untouched modules keep their dangling cells
+				// until their own sweep, matching the original single-call run.
+				for (auto c : module->cells())
+					if (!before.count(c))
+						c->set_bool_attribute(ID(opt_compact_prefix_emitted));
+				Pass::call_on_module(design, module, "clean -purge");
+			}
 		}
+
+		// Drop the internal bookkeeping tag so it never leaks into the netlist.
+		for (auto module : design->modules())
+			for (auto c : module->cells())
+				c->attributes.erase(ID(opt_compact_prefix_emitted));
 
 		log("Rewrote %d forward pack(s), %d reverse suffix read(s), %d modulo decimation(s); "
 		    "removed %d old cell(s), emitted %d new cell(s).\n",
 		    total_forward, total_reverse, total_modulo, total_removed, total_emitted);
-
-		if (total_forward || total_reverse || total_modulo)
-			Yosys::run_pass("clean -purge");
 	}
 } OptCompactPrefixPass;
 

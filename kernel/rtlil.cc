@@ -616,6 +616,15 @@ int RTLIL::Const::as_int_saturating(bool is_signed) const
 	return as_int(is_signed);
 }
 
+void RTLIL::Const::tag_bare_integer_const(const std::string &value)
+{
+	if (value.empty() || value.find('\'') != std::string::npos)
+		return;
+	size_t start = (value[0] == '-' || value[0] == '+') ? 1 : 0;
+	if (start < value.size() && std::all_of(value.begin() + start, value.end(), ::isdigit))
+		flags |= RTLIL::CONST_FLAG_SIGNED;
+}
+
 int RTLIL::Const::get_min_size(bool is_signed) const
 {
 	if (empty()) return 0;
@@ -2886,6 +2895,9 @@ std::vector<RTLIL::NamedObject*> RTLIL::Module::selected_members() const
 void RTLIL::Module::add(RTLIL::Wire *wire)
 {
 	log_assert(!wire->name.empty());
+	if (count_id(wire->name) != 0)
+		log_error("RTLIL::Module::add: duplicate name '%s' in module '%s' (already used by an "
+			  "existing wire/cell/memory/process).\n", log_id(wire->name), log_id(name));
 	log_assert(count_id(wire->name) == 0);
 	log_assert(refcount_wires_ == 0);
 	wires_[wire->name] = wire;
