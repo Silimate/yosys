@@ -908,7 +908,9 @@ struct OptPriEncWorker {
 		}
 		std::sort(s_cands.begin(), s_cands.end(), [](const SCand& a, const SCand& b) {
 			if (a.rank != b.rank) return a.rank < b.rank;
-			return a.w->width > b.w->width;
+			if (a.w->width != b.w->width) return a.w->width > b.w->width;
+			// Deterministic across platforms (wire iteration order is not).
+			return a.w->name.str() < b.w->name.str();
 		});
 
 		for (auto& sc : s_cands) {
@@ -921,8 +923,12 @@ struct OptPriEncWorker {
 			int st = get_cone(SigSpec(S_wire), cone_cells, leaf_bits,
 			                  probe_cone_cells, max_leaf_bits);
 			if (st < 0) {
-				if (large_cone_budget <= 0) continue;
-				large_cone_budget--;
+				// Rank 0/1 (ports + mux/add/and tails) always get a full rewalk;
+				// only lower-priority wires consume the shared budget.
+				if (sc.rank >= 2) {
+					if (large_cone_budget <= 0) continue;
+					large_cone_budget--;
+				}
 				st = get_cone(SigSpec(S_wire), cone_cells, leaf_bits,
 				              max_cone_cells, max_leaf_bits);
 			}
