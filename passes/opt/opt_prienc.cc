@@ -25,6 +25,8 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+#include "passes/opt/rewrite_utils.h"
+
 // Priority-encoder variants the pass recognises.
 enum class PEVariant { NONE, CLZ_FULL, CLZ_SHORT, CTZ_FULL, CTZ_SHORT };
 
@@ -36,21 +38,6 @@ static const char* variant_name(PEVariant v) {
 		case PEVariant::CTZ_SHORT: return "ctz_short";
 		default: return "none";
 	}
-}
-
-static int clog2_int(int x) {
-	int r = 0;
-	while ((1 << r) < x) r++;
-	return r;
-}
-
-// Build an N-bit Const from a uint64_t pattern. Bit i set in `pattern` -> bit i
-// of the result. Bits beyond 64 are zero.
-static Const u64_const(uint64_t pattern, int N) {
-	std::vector<State> bits(N, State::S0);
-	for (int i = 0; i < N && i < 64; i++)
-		if ((pattern >> i) & 1ULL) bits[i] = State::S1;
-	return Const(bits);
 }
 
 // Return the index of the highest set bit (MSB) of `c`, or -1 if all zero.
@@ -98,24 +85,6 @@ struct OptPriEncWorker {
 	dict<Wire*, SigSpec> ctz_full_cache;
 
 	OptPriEncWorker(Module* m) : module(m), sigmap(m) { build_indexes(); }
-
-	bool is_sequential(Cell* c) {
-		return c->type.in(
-			ID($ff), ID($dff), ID($dffe), ID($adff), ID($adffe),
-			ID($sdff), ID($sdffe), ID($sdffce), ID($dffsr), ID($dffsre),
-			ID($_DFF_P_), ID($_DFF_N_),
-			ID($_DFFE_PP_), ID($_DFFE_PN_), ID($_DFFE_NP_), ID($_DFFE_NN_),
-			ID($_DFF_PP0_), ID($_DFF_PP1_), ID($_DFF_PN0_), ID($_DFF_PN1_),
-			ID($_DFF_NP0_), ID($_DFF_NP1_), ID($_DFF_NN0_), ID($_DFF_NN1_),
-			ID($dlatch), ID($adlatch), ID($dlatchsr),
-			ID($mem), ID($mem_v2), ID($meminit), ID($meminit_v2),
-			ID($memrd), ID($memrd_v2), ID($memwr), ID($memwr_v2),
-			ID($fsm),
-			ID($assert), ID($assume), ID($cover), ID($live), ID($fair),
-			ID($print), ID($check),
-			ID($anyconst), ID($anyseq), ID($allconst), ID($allseq),
-			ID($initstate));
-	}
 
 	void build_indexes() {
 		for (auto cell : module->cells()) {
@@ -213,7 +182,7 @@ struct OptPriEncWorker {
 	// Build the test-vector deck for an N-bit input.
 	vector<Const> gen_test_vectors(int N) {
 		vector<Const> vs;
-		vs.push_back(u64_const(0, N));
+		vs.push_back(const_u64(0, N));
 		for (int k = 0; k < N; k++) {
 			std::vector<State> bits(N, State::S0);
 			bits[k] = State::S1;
@@ -355,7 +324,7 @@ struct OptPriEncWorker {
 		log_assert(N >= 1 && (N & (N - 1)) == 0);
 		if (N == 1) {
 			cells_added++;
-			return module->Not(NEW_ID2_SUFFIX("clznot"), T);
+			return module->Not(NEW_ID2_SUFFIX("clznot"), T, false, cell_src(cell));
 		}
 		int N2 = N / 2;
 		SigSpec hi = T.extract(N2, N2);
@@ -376,7 +345,7 @@ struct OptPriEncWorker {
 		// becomes lo_zero (= 1 iff x == 0); the next bit becomes ~lo_zero (=
 		// 1 iff lo != 0, signalling result in [N/2, N-1]); the remaining bits
 		// are clz_lo[W1-2:0].
-		SigSpec lo_nonzero_spec = module->Not(NEW_ID2_SUFFIX("clz_lonz"), SigSpec(lo_zero));
+		SigSpec lo_nonzero_spec = module->Not(NEW_ID2_SUFFIX("clz_lonz"), SigSpec(lo_zero), false, cell_src(cell));
 		cells_added++;
 		SigBit lo_nonzero = lo_nonzero_spec[0];
 
@@ -388,7 +357,7 @@ struct OptPriEncWorker {
 
 		// $mux: Y = S ? B : A. We want Y = hi_zero ? pad_clz_lo : pad_clz_hi.
 		cells_added++;
-		return module->Mux(NEW_ID2_SUFFIX("clzmux"), pad_clz_hi, pad_clz_lo, SigSpec(hi_zero));
+		return module->Mux(NEW_ID2_SUFFIX("clzmux"), pad_clz_hi, pad_clz_lo, SigSpec(hi_zero), cell_src(cell));
 	}
 
 	// CLZ of arbitrary-width T, returning a (clog2(N+1))-bit result.
@@ -404,7 +373,7 @@ struct OptPriEncWorker {
 			return clz_padded;
 		// result = clz_padded - pad_amount, truncated to W = clog2(N+1) bits.
 		int W = clog2_int(N + 1);
-		SigSpec sub = module->Sub(NEW_ID2_SUFFIX("clzsub"), clz_padded, SigSpec(Const(pad_amount, GetSize(clz_padded))));
+		SigSpec sub = module->Sub(NEW_ID2_SUFFIX("clzsub"), clz_padded, SigSpec(Const(pad_amount, GetSize(clz_padded))), false, cell_src(cell));
 		cells_added++;
 		if (GetSize(sub) >= W)
 			return sub.extract(0, W);
@@ -546,10 +515,10 @@ struct OptPriEncWorker {
 		} else {
 			SigSpec above;
 			for (int i = 0; i < N; i++) {
-				above.append(module->Lt(NEW_ID2_SUFFIX("rrabove"), s, SigSpec(Const(i, W))));
+				above.append(module->Lt(NEW_ID2_SUFFIX("rrabove"), s, SigSpec(Const(i, W)), false, cell_src(cell)));
 				cells_added++;
 			}
-			SigSpec mask_hi = module->And(NEW_ID2_SUFFIX("rrmask"), req, above);
+			SigSpec mask_hi = module->And(NEW_ID2_SUFFIX("rrmask"), req, above, false, cell_src(cell));
 			cells_added++;
 
 			SigSpec cz_hi = emit_ctz_full(mask_hi, N);
@@ -562,19 +531,19 @@ struct OptPriEncWorker {
 			cz_hi = low_w(cz_hi);
 			cz_all = low_w(cz_all);
 
-			SigBit any_hi = module->ReduceOr(NEW_ID2_SUFFIX("rranyhi"), mask_hi);
+			SigBit any_hi = module->ReduceOr(NEW_ID2_SUFFIX("rranyhi"), mask_hi, false, cell_src(cell));
 			cells_added++;
-			anyreq = module->ReduceOr(NEW_ID2_SUFFIX("rranyreq"), req);
+			anyreq = module->ReduceOr(NEW_ID2_SUFFIX("rranyreq"), req, false, cell_src(cell));
 			cells_added++;
 			// any_hi ? cz_hi : cz_all
-			gsel = module->Mux(NEW_ID2_SUFFIX("rrgsel"), cz_all, cz_hi, any_hi);
+			gsel = module->Mux(NEW_ID2_SUFFIX("rrgsel"), cz_all, cz_hi, any_hi, cell_src(cell));
 			cells_added++;
 			rr_core_cache[key] = std::make_tuple(gsel, SigSpec(), anyreq);
 		}
 
 		SigSpec fallback = (kind == 0) ? SigSpec(Const(0, W)) : s;
 		// anyreq ? gsel : fallback
-		SigSpec res = module->Mux(NEW_ID2_SUFFIX("rrsel"), fallback, gsel, anyreq);
+		SigSpec res = module->Mux(NEW_ID2_SUFFIX("rrsel"), fallback, gsel, anyreq, cell_src(cell));
 		cells_added++;
 		return res;
 	}
