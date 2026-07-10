@@ -59,13 +59,13 @@ static double stringToTime(std::string str)
 
 // Function pointer types for the C API symbols resolved from the evaluator.
 // The C API implementation is compiled into the evaluator itself (-DCXXRTL_INCLUDE_CAPI_IMPL).
-typedef cxxrtl_toplevel (*fn_design_create)();                     // build design object in C++
-typedef cxxrtl_handle (*fn_create)(cxxrtl_toplevel);               // wrap design in runnable handle
-typedef void (*fn_destroy)(cxxrtl_handle);                         // tear down design
+typedef cxxrtl_toplevel (*fn_create_design)();                     // build design object in C++
+typedef cxxrtl_handle (*fn_create_handle)(cxxrtl_toplevel);        // wrap design in runnable handle
+typedef void (*fn_destroy_handle)(cxxrtl_handle);                  // tear down design
 typedef size_t (*fn_step)(cxxrtl_handle);                          // evaluate the circuit once (between two #timestamps)
-typedef void (*fn_enum)(cxxrtl_handle, void *,                     // walk over every visible signal ($var)
+typedef void (*fn_enum_signals)(cxxrtl_handle, void *,             // walk over every visible signal ($var)
 	void (*)(void *, const char *, struct cxxrtl_object *, size_t));
-typedef void (*fn_outline_eval)(cxxrtl_outline);                   // recompute OUTLINE signal values (optimized nets)
+typedef void (*fn_eval_outline)(cxxrtl_outline);                   // recompute OUTLINE signal values (optimized nets)
 
 // Switching activity (toggles + high time) measured for one simulated net.
 struct SignalActivity {
@@ -78,7 +78,7 @@ struct SignalActivity {
 	cxxrtl_outline outline;              // non-null for OUTLINE items (needs eval)
 };
 
-// One named signal/port/register of the design, linked to its simulation storage and matching waveform signal.
+// One named signal/port/register of the design that can be aliased by multiple signals.
 struct DesignSignal {
 	std::string name;       // hierarchical name from CXXRTL (space/dot separated)
 	Wire *wire;             // matching wire in the design, or nullptr
@@ -236,22 +236,22 @@ struct CxxrtlSimPass : public Pass {
 		void *so = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
 		if (so == nullptr)
 			log_cmd_error("dlopen(%s) failed: %s\n", so_path.c_str(), dlerror());
-		auto design_create = (fn_design_create)dlsym(so, "cxxrtl_design_create");
-		auto capi_create = (fn_create)dlsym(so, "cxxrtl_create");
-		auto capi_destroy = (fn_destroy)dlsym(so, "cxxrtl_destroy");
-		auto capi_step = (fn_step)dlsym(so, "cxxrtl_step");
-		auto capi_enum = (fn_enum)dlsym(so, "cxxrtl_enum");
-		auto capi_outline_eval = (fn_outline_eval)dlsym(so, "cxxrtl_outline_eval");
-		if (!design_create || !capi_create || !capi_destroy || !capi_step || !capi_enum ||
-		    !capi_outline_eval)
+		auto create_design = (fn_create_design)dlsym(so, "cxxrtl_design_create");
+
+		// C API symbols resolved from the evaluator (see typedefs above for more details).
+		auto create_handle = (fn_create_handle)dlsym(so, "cxxrtl_create");
+		auto destroy_handle = (fn_destroy_handle)dlsym(so, "cxxrtl_destroy");
+		auto step = (fn_step)dlsym(so, "cxxrtl_step");
+		auto enum_signals = (fn_enum_signals)dlsym(so, "cxxrtl_enum");
+		auto eval_outline = (fn_eval_outline)dlsym(so, "cxxrtl_outline_eval");
+		if (!create_design || !create_handle || !destroy_handle || !step || !enum_signals ||
+		    !eval_outline)
 			log_cmd_error("Missing CXXRTL C API symbols in %s.\n", so_path.c_str());
 
-		cxxrtl_handle handle = capi_create(design_create());
-
-		// Enumerate simulation signals, dedup storage, set up activity counters
-		std::vector<DesignSignal> signals;
-		std::vector<SignalActivity> activities;
-		dict<uintptr_t, int> storage_to_activity;
+		cxxrtl_handle handle = create_handle(create_design()); // create handle to whole design
+		std::vector<DesignSignal> signals;                     // list of all signals in a design
+		std::vector<SignalActivity> activities;                // list of all WIRE activities, connecting multiple signals (get aliased together)
+		dict<uintptr_t, int> storage_to_activity;              // map wire/aliases to activity values
 
 		struct EnumContext {
 			CxxrtlSimPass *self;
@@ -262,7 +262,7 @@ struct CxxrtlSimPass : public Pass {
 			Module *top;
 		} ctx = { this, &signals, &activities, &storage_to_activity, design, top };
 
-		capi_enum(handle, &ctx, [](void *data, const char *name, struct cxxrtl_object *object, size_t parts) {
+		enum_signals(handle, &ctx, [](void *data, const char *name, struct cxxrtl_object *object, size_t parts) {
 			EnumContext *ctx = (EnumContext*)data;
 			if (parts != 1)
 				return; // multi-part objects unsupported (post-splitnets)
@@ -350,7 +350,7 @@ struct CxxrtlSimPass : public Pass {
 				log_warning("No input ports of module '%s' matched in the waveform "
 				            "(scope \"%s\"); skipping annotation.\n",
 				            module_name.c_str(), scope.c_str());
-				capi_destroy(handle);
+				destroy_handle(handle);
 				dlclose(so);
 				return;
 			}
@@ -431,7 +431,7 @@ struct CxxrtlSimPass : public Pass {
 				}
 			}
 
-			capi_step(handle);
+			step(handle);
 
 			// Overwrite register ground truth from the waveform
 			if (reg_overwrite && !initial) {
@@ -442,7 +442,7 @@ struct CxxrtlSimPass : public Pass {
 					diverged |= write_object(activities[sig.activity].object, fst.valueOf(sig.fst_handle));
 				}
 				if (diverged)
-					capi_step(handle);
+					step(handle);
 			}
 
 			// Refresh outline (inlined) nets: their curr buffer is only
@@ -450,7 +450,7 @@ struct CxxrtlSimPass : public Pass {
 			if (have_outlines)
 				for (auto &act : activities)
 					if (act.outline != nullptr)
-						capi_outline_eval(act.outline);
+						eval_outline(act.outline);
 
 			if (initial) {
 				// First sample: snapshot state, don't count toggles yet
@@ -572,7 +572,7 @@ struct CxxrtlSimPass : public Pass {
 		}
 		log_flush();
 
-		capi_destroy(handle);
+		destroy_handle(handle);
 		dlclose(so);
 	}
 } CxxrtlSimPass;
