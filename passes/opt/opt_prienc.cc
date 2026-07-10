@@ -188,11 +188,19 @@ struct OptPriEncWorker {
 	vector<Wire*> wires_in_cone(const pool<SigBit>& cone_bits,
 	                            std::function<bool(Wire*)> keep) {
 		dict<Wire*, int> cover;
+		dict<Wire*, bool> keep_cache;
+		auto keep_cached = [&](Wire* w) -> bool {
+			auto it = keep_cache.find(w);
+			if (it != keep_cache.end()) return it->second;
+			bool ok = keep(w);
+			keep_cache[w] = ok;
+			return ok;
+		};
 		for (auto bit : cone_bits) {
 			auto it = bit_to_cand_wires.find(bit);
 			if (it == bit_to_cand_wires.end()) continue;
 			for (Wire* w : it->second) {
-				if (!keep(w)) continue;
+				if (!keep_cached(w)) continue;
 				cover[w]++;
 			}
 		}
@@ -231,17 +239,11 @@ struct OptPriEncWorker {
 		return out;
 	}
 
-	// PE deck: zero + one-hots first (reject most non-PEs immediately), then
-	// denser patterns that separate full vs short / CLZ vs CTZ. For large N the
-	// prefix/suffix sweeps are sparsified — one-hots already pin every position.
-	vector<Const> gen_test_vectors(int N) {
+	// Multi-bit confirmation patterns only (no zero / one-hots). Shared by PE
+	// and RR fingerprint decks so callers that already swept one-hots do not
+	// rebuild and discard them.
+	vector<Const> gen_multibit_test_vectors(int N, bool dense_small_n) {
 		vector<Const> vs;
-		vs.push_back(const_u64(0, N));
-		for (int k = 0; k < N; k++) {
-			std::vector<State> bits(N, State::S0);
-			bits[k] = State::S1;
-			vs.push_back(Const(bits));
-		}
 		auto push_prefix = [&](int k) {
 			if (k < 1 || k > N) return;
 			std::vector<State> bits(N, State::S0);
@@ -254,7 +256,7 @@ struct OptPriEncWorker {
 			for (int i = 0; i < k; i++) bits[i] = State::S0;
 			vs.push_back(Const(bits));
 		};
-		if (N <= 16) {
+		if (dense_small_n && N <= 16) {
 			for (int k = 1; k <= N; k++) push_prefix(k);
 			for (int k = 0; k < N; k++) push_suffix_clear(k);
 		} else {
@@ -268,49 +270,6 @@ struct OptPriEncWorker {
 			push_suffix_clear(N / 2);
 			push_suffix_clear(N - 1);
 		}
-		if (N >= 4) {
-			std::vector<State> aa(N, State::S0), fivefive(N, State::S0), e8(N, State::S0);
-			for (int i = 0; i < N; i++) {
-				if (i & 1) aa[i] = State::S1; else fivefive[i] = State::S1;
-			}
-			vs.push_back(Const(aa));
-			vs.push_back(Const(fivefive));
-			e8[0] = State::S1;
-			if (N > 1) e8[N - 1] = State::S1;
-			vs.push_back(Const(e8));
-		}
-		return vs;
-	}
-
-	// Leaner RR deck: empty + one-hots + a sparse multi-bit set. One-hots are
-	// s-independent (sanity); multi-bit + empty×s catch rotation dependence.
-	vector<Const> gen_rr_test_vectors(int N) {
-		vector<Const> vs;
-		vs.push_back(const_u64(0, N));
-		for (int k = 0; k < N; k++) {
-			std::vector<State> bits(N, State::S0);
-			bits[k] = State::S1;
-			vs.push_back(Const(bits));
-		}
-		auto push_prefix = [&](int k) {
-			if (k < 1 || k > N) return;
-			std::vector<State> bits(N, State::S0);
-			for (int i = 0; i < k; i++) bits[i] = State::S1;
-			vs.push_back(Const(bits));
-		};
-		auto push_suffix_clear = [&](int k) {
-			if (k < 0 || k >= N) return;
-			std::vector<State> bits(N, State::S1);
-			for (int i = 0; i < k; i++) bits[i] = State::S0;
-			vs.push_back(Const(bits));
-		};
-		push_prefix(2);
-		push_prefix(N / 2);
-		push_prefix(N - 1);
-		push_prefix(N);
-		push_suffix_clear(1);
-		push_suffix_clear(N / 2);
-		push_suffix_clear(N - 1);
 		if (N >= 4) {
 			std::vector<State> aa(N, State::S0), fivefive(N, State::S0), e8(N, State::S0);
 			for (int i = 0; i < N; i++) {
@@ -511,17 +470,10 @@ struct OptPriEncWorker {
 			vs.push_back(Const(bits));
 		}
 
-		// Multi-bit confirmation vectors (sparse for any N via gen_test_vectors tail).
+		// Multi-bit confirmation vectors (no zero/one-hot rebuild).
 		{
-			auto tail = gen_test_vectors(N);
-			for (auto& v : tail) {
-				int pop = 0;
-				auto b = v.to_bits();
-				for (int i = 0; i < N && i < (int)b.size(); i++)
-					if (b[i] == State::S1) pop++;
-				if (pop <= 1) continue;
-				vs.push_back(v);
-			}
+			auto multi = gen_multibit_test_vectors(N, /*dense_small_n=*/true);
+			vs.insert(vs.end(), multi.begin(), multi.end());
 		}
 
 		int n_checked = 0;
@@ -725,19 +677,14 @@ struct OptPriEncWorker {
 		}
 
 		// Phase 3: sparse multi-bit patterns × starts (rotation-sensitive).
-		auto multi = gen_rr_test_vectors(N);
+		auto multi = gen_multibit_test_vectors(N, /*dense_small_n=*/false);
 		for (auto& rv : multi) {
-			// Skip empty + one-hots already covered above.
-			int pop = 0;
-			auto b = rv.to_bits();
-			for (int i = 0; i < N && i < (int)b.size(); i++)
-				if (b[i] == State::S1) pop++;
-			if (pop <= 1) continue;
 			for (int s : starts)
 				if (!check(rv, s)) return -1;
 		}
 
-		if (checks < 2 * GetSize(starts)) return -1;
+		// Require empty×starts plus at least one one-hot (phases 1+2).
+		if (checks < GetSize(starts) + 1) return -1;
 		if (ok0) return 0;
 		if (ok1) return 1;
 		return -1;
