@@ -2,6 +2,7 @@
  *  yosys -- Yosys Open SYnthesis Suite
  *
  *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2026  Silimate Inc.     <akash@silimate.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -19,6 +20,7 @@
 
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"
+#include <algorithm>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -56,6 +58,19 @@ struct OptAndOrPmuxWorker
 		TERM_FAIL,
 		TERM_ZERO,
 		TERM_OK,
+		TERM_BUDGET,
+	};
+
+	enum WalkStatus {
+		WALK_OK,
+		WALK_FAIL,
+		WALK_BUDGET,
+	};
+
+	enum ConvertStatus {
+		CONVERT_NONE,
+		CONVERT_OK,
+		CONVERT_BUDGET,
 	};
 
 	struct Arm {
@@ -75,16 +90,30 @@ struct OptAndOrPmuxWorker
 		std::vector<BitContribs> bits;
 	};
 
+	struct CachedTerm {
+		TermResult result = TERM_FAIL;
+		Contribution contrib;
+	};
+
 	Module *module;
 	SigMap sigmap;
 
 	dict<SigBit, DriverBit> bit_drivers;
 	dict<SigBit, std::vector<ConsumerBit>> bit_consumers;
 	pool<SigBit> observable_bits;
-	pool<Cell*> removed_cells;
+	// IdString, not Cell*: pool<Cell*> uses hash_obj_ops and breaks after remove().
+	pool<IdString> removed_cell_names;
+
+	// Memoize structural parses. Over-budget results are not cached so a
+	// later retry with a larger cone cap can succeed.
+	dict<SigBit, CachedTerm> term_cache;
+	dict<SigBit, EqInfo> eq_cache;
+	pool<SigBit> eq_negative_cache;
 
 	int converted_count = 0;
+	static const int probe_cone_bits = 64;
 	static const int max_cone_bits = 100000;
+	static const int large_cone_budget = 32;
 	static const int min_pmux_bits = 8;
 
 	OptAndOrPmuxWorker(Module *module) : module(module), sigmap(module)
@@ -150,8 +179,6 @@ struct OptAndOrPmuxWorker
 		auto it = bit_drivers.find(bit);
 		if (it == bit_drivers.end() || it->second.cell == nullptr)
 			return false;
-		if (removed_cells.count(it->second.cell))
-			return false;
 		driver = it->second;
 		return true;
 	}
@@ -176,139 +203,273 @@ struct OptAndOrPmuxWorker
 			return true;
 		auto it = bit_consumers.find(bit);
 		if (it != bit_consumers.end())
-			for (auto &consumer : it->second)
-				if (!removed_cells.count(consumer.cell))
-					return true;
+			return !it->second.empty();
 		return false;
 	}
 
-	bool match_eq(SigBit bit, EqInfo &eq) const
+	bool cell_has_observable_output(Cell *cell) const
 	{
-		DriverBit driver;
-		if (!get_driver(bit, driver))
+		for (auto bit : sigmap(cell->getPort(ID::Y)))
+			if (bit_has_observable_output(bit))
+				return true;
+		return false;
+	}
+
+	// Drop a cell from the driver/consumer indexes before module->remove so
+	// later candidates do not touch freed Cell* entries (hash_obj_ops).
+	void erase_cell(Cell *cell)
+	{
+		for (auto &conn : cell->connections()) {
+			SigSpec sig = sigmap(conn.second);
+			if (cell->output(conn.first)) {
+				for (int i = 0; i < GetSize(sig); i++) {
+					SigBit bit = sig[i];
+					if (bit.wire == nullptr)
+						continue;
+					auto it = bit_drivers.find(bit);
+					if (it != bit_drivers.end() && it->second.cell == cell)
+						bit_drivers.erase(it);
+				}
+			}
+			if (cell->input(conn.first)) {
+				for (auto bit : sig) {
+					if (bit.wire == nullptr)
+						continue;
+					auto it = bit_consumers.find(bit);
+					if (it == bit_consumers.end())
+						continue;
+					auto &vec = it->second;
+					vec.erase(std::remove_if(vec.begin(), vec.end(),
+							[&](const ConsumerBit &c) { return c.cell == cell; }),
+							vec.end());
+					if (vec.empty())
+						bit_consumers.erase(it);
+				}
+			}
+		}
+		removed_cell_names.insert(cell->name);
+		module->remove(cell);
+	}
+
+	// Cheap reject: a decode OR must fan into $and/$eq/$or somewhere nearby.
+	bool cell_looks_interesting(Cell *cell) const
+	{
+		for (auto port : {ID::A, ID::B}) {
+			SigSpec sig = sigmap(cell->getPort(port));
+			for (auto bit : sig) {
+				if (bit.wire == nullptr)
+					continue;
+				DriverBit driver;
+				if (!get_driver(bit, driver))
+					continue;
+				if (driver.cell->type.in(ID($and), ID($or), ID($eq)))
+					return true;
+			}
+		}
+		return false;
+	}
+
+	// Prefer OR roots (non-OR consumers / ports) over internal reduction nodes.
+	int candidate_rank(Cell *cell) const
+	{
+		SigSpec y = sigmap(cell->getPort(ID::Y));
+		bool saw_non_or_consumer = false;
+		bool saw_port = false;
+		for (auto bit : y) {
+			if (bit.wire == nullptr)
+				continue;
+			if (bit.wire->port_output || bit.wire->get_bool_attribute(ID::keep) || observable_bits.count(bit))
+				saw_port = true;
+			auto it = bit_consumers.find(bit);
+			if (it == bit_consumers.end())
+				continue;
+			for (auto &consumer : it->second) {
+				if (consumer.cell->type != ID($or))
+					saw_non_or_consumer = true;
+			}
+		}
+		if (saw_port || saw_non_or_consumer)
+			return 0;
+		return 1;
+	}
+
+	bool match_eq(SigBit bit, EqInfo &eq)
+	{
+		bit = sigmap(bit);
+		if (eq_negative_cache.count(bit))
 			return false;
+		auto cached = eq_cache.find(bit);
+		if (cached != eq_cache.end()) {
+			eq = cached->second;
+			return true;
+		}
+
+		DriverBit driver;
+		if (!get_driver(bit, driver)) {
+			eq_negative_cache.insert(bit);
+			return false;
+		}
 
 		Cell *cell = driver.cell;
-		if (driver.port != ID::Y || driver.index != 0 || cell->type != ID($eq))
+		if (driver.port != ID::Y || driver.index != 0 || cell->type != ID($eq)) {
+			eq_negative_cache.insert(bit);
 			return false;
+		}
 
 		SigSpec nonconst_sig = sigmap(cell->getPort(ID::A));
 		SigSpec const_sig = sigmap(cell->getPort(ID::B));
 
 		if (!const_sig.is_fully_const()) {
-			if (!nonconst_sig.is_fully_const())
+			if (!nonconst_sig.is_fully_const()) {
+				eq_negative_cache.insert(bit);
 				return false;
+			}
 			std::swap(nonconst_sig, const_sig);
 		}
 
-		if (nonconst_sig.empty() || const_sig.empty() || nonconst_sig.is_fully_const())
+		if (nonconst_sig.empty() || const_sig.empty() || nonconst_sig.is_fully_const()) {
+			eq_negative_cache.insert(bit);
 			return false;
+		}
 
 		eq.select = nonconst_sig;
 		eq.value = const_sig.as_const();
-		eq.bit = sigmap(bit);
+		eq.bit = bit;
+		eq_cache[bit] = eq;
 		return true;
 	}
 
-	bool collect_or_terms(SigBit bit, std::vector<SigBit> &terms, pool<SigBit> &seen, int &budget) const
+	WalkStatus collect_or_terms(SigBit bit, std::vector<SigBit> &terms, pool<SigBit> &seen, int &budget) const
 	{
 		if (--budget < 0)
-			return false;
+			return WALK_BUDGET;
 
 		bit = sigmap(bit);
 
 		if (bit == State::S0 || bit == State::Sx || bit == State::Sz)
-			return true;
+			return WALK_OK;
 		if (bit == State::S1)
-			return false;
+			return WALK_FAIL;
 
 		if (!seen.insert(bit).second)
-			return false;
+			return WALK_FAIL;
 
 		DriverBit driver;
 		if (get_driver(bit, driver) && driver.port == ID::Y && driver.cell->type == ID($or)) {
 			SigBit a, b;
 			if (!get_input_bit(driver.cell, ID::A, driver.index, a))
-				return false;
+				return WALK_FAIL;
 			if (!get_input_bit(driver.cell, ID::B, driver.index, b))
-				return false;
-			return collect_or_terms(a, terms, seen, budget) && collect_or_terms(b, terms, seen, budget);
+				return WALK_FAIL;
+			WalkStatus sa = collect_or_terms(a, terms, seen, budget);
+			if (sa != WALK_OK)
+				return sa;
+			return collect_or_terms(b, terms, seen, budget);
 		}
 
 		terms.push_back(bit);
-		return true;
+		return WALK_OK;
 	}
 
-	bool collect_and_factors(SigBit bit, std::vector<SigBit> &factors, pool<SigBit> &seen, int &budget) const
+	WalkStatus collect_and_factors(SigBit bit, std::vector<SigBit> &factors, pool<SigBit> &seen, int &budget) const
 	{
 		if (--budget < 0)
-			return false;
+			return WALK_BUDGET;
 
 		bit = sigmap(bit);
 
 		if (bit == State::S0 || bit == State::S1 || bit == State::Sx || bit == State::Sz) {
 			factors.push_back(bit);
-			return true;
+			return WALK_OK;
 		}
 
 		if (!seen.insert(bit).second)
-			return false;
+			return WALK_FAIL;
 
 		DriverBit driver;
 		if (get_driver(bit, driver) && driver.port == ID::Y && driver.cell->type == ID($and)) {
 			SigBit a, b;
 			if (!get_input_bit(driver.cell, ID::A, driver.index, a))
-				return false;
+				return WALK_FAIL;
 			if (!get_input_bit(driver.cell, ID::B, driver.index, b))
-				return false;
-			return collect_and_factors(a, factors, seen, budget) && collect_and_factors(b, factors, seen, budget);
+				return WALK_FAIL;
+			WalkStatus sa = collect_and_factors(a, factors, seen, budget);
+			if (sa != WALK_OK)
+				return sa;
+			return collect_and_factors(b, factors, seen, budget);
 		}
 
 		factors.push_back(bit);
-		return true;
+		return WALK_OK;
 	}
 
-	TermResult parse_term(SigBit bit, Contribution &contrib) const
+	TermResult parse_term(SigBit bit, Contribution &contrib, int cone_budget)
 	{
+		bit = sigmap(bit);
+		auto cached = term_cache.find(bit);
+		if (cached != term_cache.end()) {
+			contrib = cached->second.contrib;
+			return cached->second.result;
+		}
+
 		EqInfo direct_eq;
 		if (match_eq(bit, direct_eq)) {
 			contrib.eq = direct_eq;
 			contrib.data.factors.clear();
+			term_cache[bit] = {TERM_OK, contrib};
 			return TERM_OK;
 		}
 
 		std::vector<SigBit> factors;
 		pool<SigBit> seen;
-		int budget = max_cone_bits;
-		if (!collect_and_factors(bit, factors, seen, budget))
+		int budget = cone_budget;
+		WalkStatus walk = collect_and_factors(bit, factors, seen, budget);
+		if (walk == WALK_BUDGET)
+			return TERM_BUDGET;
+		if (walk != WALK_OK) {
+			term_cache[bit] = {TERM_FAIL, Contribution()};
 			return TERM_FAIL;
+		}
 
+		Contribution parsed;
 		bool have_eq = false;
 		for (auto factor : factors)
 		{
 			factor = sigmap(factor);
-			if (factor == State::S0)
+			if (factor == State::S0) {
+				term_cache[bit] = {TERM_ZERO, Contribution()};
 				return TERM_ZERO;
-			if (factor == State::Sx || factor == State::Sz)
+			}
+			if (factor == State::Sx || factor == State::Sz) {
+				term_cache[bit] = {TERM_FAIL, Contribution()};
 				return TERM_FAIL;
+			}
 			if (factor == State::S1)
 				continue;
 
 			EqInfo eq;
 			if (match_eq(factor, eq)) {
 				if (!have_eq) {
-					contrib.eq = eq;
+					parsed.eq = eq;
 					have_eq = true;
-				} else if (contrib.eq.select != eq.select || contrib.eq.value != eq.value) {
+				} else if (parsed.eq.select != eq.select || parsed.eq.value != eq.value) {
+					term_cache[bit] = {TERM_FAIL, Contribution()};
 					return TERM_FAIL;
 				}
 				continue;
 			}
 
-			contrib.data.factors.push_back(factor);
+			parsed.data.factors.push_back(factor);
 		}
 
-		return have_eq ? TERM_OK : TERM_FAIL;
+		if (!have_eq) {
+			term_cache[bit] = {TERM_FAIL, Contribution()};
+			return TERM_FAIL;
+		}
+
+		contrib = parsed;
+		term_cache[bit] = {TERM_OK, contrib};
+		return TERM_OK;
 	}
 
 	SigBit make_and_tree(Cell *cell, const std::vector<SigBit> &factors, const std::string &src)
@@ -372,39 +533,82 @@ struct OptAndOrPmuxWorker
 		return make_or_tree(cell, terms, src);
 	}
 
-	bool collect_bit_contribs(Cell *cell, int bit_idx, BitContribs &bit_contribs) const
+	// Tiny fanin peek: reject AND/OR cones that never touch $eq before we
+	// spend the full cone budget expanding them. Visit OR/AND siblings
+	// before deeper spines so skewed reduction trees still find $eq leaves.
+	bool peek_has_eq(SigBit root, int budget) const
+	{
+		pool<SigBit> seen;
+		std::vector<SigBit> work = {sigmap(root)};
+		while (!work.empty()) {
+			if (--budget < 0)
+				return false;
+			SigBit bit = work.back();
+			work.pop_back();
+			if (bit.wire == nullptr)
+				continue;
+			if (!seen.insert(bit).second)
+				continue;
+
+			DriverBit driver;
+			if (!get_driver(bit, driver) || driver.port != ID::Y)
+				continue;
+			if (driver.cell->type == ID($eq))
+				return driver.index == 0;
+			if (!driver.cell->type.in(ID($and), ID($or)))
+				continue;
+
+			SigBit a, b;
+			if (!get_input_bit(driver.cell, ID::A, driver.index, a))
+				continue;
+			if (!get_input_bit(driver.cell, ID::B, driver.index, b))
+				continue;
+			work.push_back(a);
+			work.push_back(b);
+		}
+		return false;
+	}
+
+	ConvertStatus collect_bit_contribs(Cell *cell, int bit_idx, BitContribs &bit_contribs, int cone_budget)
 	{
 		SigSpec y = sigmap(cell->getPort(ID::Y));
 		SigBit y_bit = y[bit_idx];
 
 		if (!bit_has_observable_output(y_bit))
-			return false;
+			return CONVERT_NONE;
+		if (!peek_has_eq(y_bit, std::min(cone_budget, 128)))
+			return CONVERT_NONE;
 
 		std::vector<SigBit> terms;
 		pool<SigBit> seen;
-		int budget = max_cone_bits;
-		if (!collect_or_terms(y_bit, terms, seen, budget))
-			return false;
+		int budget = cone_budget;
+		WalkStatus walk = collect_or_terms(y_bit, terms, seen, budget);
+		if (walk == WALK_BUDGET)
+			return CONVERT_BUDGET;
+		if (walk != WALK_OK)
+			return CONVERT_NONE;
 
 		bit_contribs.bit_idx = bit_idx;
 		for (auto term : terms)
 		{
 			Contribution contrib;
-			TermResult result = parse_term(term, contrib);
+			TermResult result = parse_term(term, contrib, cone_budget);
+			if (result == TERM_BUDGET)
+				return CONVERT_BUDGET;
 			if (result == TERM_ZERO)
 				continue;
 			if (result == TERM_FAIL)
-				return false;
+				return CONVERT_NONE;
 
 			if (bit_contribs.select.empty())
 				bit_contribs.select = contrib.eq.select;
 			else if (bit_contribs.select != contrib.eq.select)
-				return false;
+				return CONVERT_NONE;
 
 			bit_contribs.contribs.push_back(contrib);
 		}
 
-		return !bit_contribs.contribs.empty();
+		return bit_contribs.contribs.empty() ? CONVERT_NONE : CONVERT_OK;
 	}
 
 	bool convert_group(Cell *cell, const SelectGroup &group, pool<int> &converted_bits)
@@ -465,46 +669,57 @@ struct OptAndOrPmuxWorker
 		return true;
 	}
 
-	bool try_convert(Cell *cell)
+	ConvertStatus try_convert(Cell *cell, int cone_budget)
 	{
-		if (removed_cells.count(cell))
-			return false;
+		if (removed_cell_names.count(cell->name))
+			return CONVERT_NONE;
 		if (cell->type != ID($or) || cell->get_bool_attribute(ID::keep))
-			return false;
+			return CONVERT_NONE;
+		if (!cell_has_observable_output(cell))
+			return CONVERT_NONE;
 
 		SigSpec y = sigmap(cell->getPort(ID::Y));
 		SigSpec a = sigmap(cell->getPort(ID::A));
 		SigSpec b = sigmap(cell->getPort(ID::B));
 		int width = GetSize(y);
 		if (width == 0)
-			return false;
+			return CONVERT_NONE;
 
 		std::vector<SelectGroup> groups;
+		dict<SigSpec, int> group_index;
+		bool hit_budget = false;
 
 		for (int bit_idx = 0; bit_idx < width; bit_idx++)
 		{
 			BitContribs bit_contribs;
-			if (!collect_bit_contribs(cell, bit_idx, bit_contribs))
+			ConvertStatus st = collect_bit_contribs(cell, bit_idx, bit_contribs, cone_budget);
+			if (st == CONVERT_BUDGET) {
+				hit_budget = true;
+				continue;
+			}
+			if (st != CONVERT_OK)
 				continue;
 
-			bool found = false;
-			for (auto &group : groups) {
-				if (group.select == bit_contribs.select) {
-					group.bits.push_back(bit_contribs);
-					found = true;
-					break;
-				}
-			}
-			if (!found)
+			auto git = group_index.find(bit_contribs.select);
+			if (git == group_index.end()) {
+				group_index[bit_contribs.select] = GetSize(groups);
 				groups.push_back({bit_contribs.select, {bit_contribs}});
+			} else {
+				groups[git->second].bits.push_back(bit_contribs);
+			}
 		}
+
+		// On the probe pass, any over-budget bit forces a full rewalk so a
+		// wide select group is not partially committed before all bits parse.
+		if (hit_budget && cone_budget < max_cone_bits)
+			return CONVERT_BUDGET;
 
 		pool<int> converted_bits;
 		for (auto &group : groups)
 			convert_group(cell, group, converted_bits);
 
 		if (converted_bits.empty())
-			return false;
+			return hit_budget ? CONVERT_BUDGET : CONVERT_NONE;
 
 		SigSpec keep_a, keep_b, keep_y;
 		for (int bit_idx = 0; bit_idx < width; bit_idx++) {
@@ -518,23 +733,64 @@ struct OptAndOrPmuxWorker
 		std::string src = cell->get_src_attribute();
 		if (!keep_y.empty())
 			module->addOr(NEW_ID2_SUFFIX("andor_pmux_keep_or"), keep_a, keep_b, keep_y, false, src);
-		removed_cells.insert(cell);
-		module->remove(cell);
+		erase_cell(cell);
 
-		return true;
+		return CONVERT_OK;
 	}
 
 	void run()
 	{
 		build_maps();
 
-		std::vector<Cell*> cells;
-		for (auto cell : module->selected_cells())
-			cells.push_back(cell);
+		struct Cand {
+			Cell *cell;
+			IdString name;
+			int width;
+		};
+		std::vector<Cand> cands;
 
-		for (auto cell : cells)
-			if (try_convert(cell))
-				build_maps();
+		for (auto cell : module->selected_cells()) {
+			if (cell->type != ID($or) || cell->get_bool_attribute(ID::keep))
+				continue;
+			SigSpec y = sigmap(cell->getPort(ID::Y));
+			if (y.empty())
+				continue;
+			if (!cell_has_observable_output(cell))
+				continue;
+			if (!cell_looks_interesting(cell))
+				continue;
+			// Skip pure OR-reduction internals: converting a parent root leaves
+			// the dead spine interconnected, so internals would still look
+			// "live" and emit duplicate smaller $pmux cells.
+			if (candidate_rank(cell) != 0)
+				continue;
+			cands.push_back({cell, cell->name, GetSize(y)});
+		}
+
+		// Wider roots first so a multi-bit select group is preferred over a
+		// narrower alias of the same cone. Name tie-break keeps order stable.
+		std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b) {
+			if (a.width != b.width)
+				return a.width > b.width;
+			return a.name.str() < b.name.str();
+		});
+
+		int large_left = large_cone_budget;
+		for (auto &cand : cands) {
+			if (removed_cell_names.count(cand.name))
+				continue;
+
+			ConvertStatus st = try_convert(cand.cell, probe_cone_bits);
+			if (st == CONVERT_OK)
+				continue;
+			if (st != CONVERT_BUDGET)
+				continue;
+
+			if (large_left <= 0)
+				continue;
+			large_left--;
+			try_convert(cand.cell, max_cone_bits);
+		}
 	}
 };
 
