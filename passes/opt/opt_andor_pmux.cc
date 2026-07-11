@@ -21,6 +21,7 @@
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"
 #include <algorithm>
+#include <deque>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -113,7 +114,6 @@ struct OptAndOrPmuxWorker
 	int converted_count = 0;
 	static const int probe_cone_bits = 64;
 	static const int max_cone_bits = 100000;
-	static const int large_cone_budget = 32;
 	static const int min_pmux_bits = 8;
 
 	OptAndOrPmuxWorker(Module *module) : module(module), sigmap(module)
@@ -251,20 +251,45 @@ struct OptAndOrPmuxWorker
 		module->remove(cell);
 	}
 
-	// Cheap reject: a decode OR must fan into $and/$eq/$or somewhere nearby.
+	// Cheap reject: walk a short $and/$or spine from A/B and accept if we hit
+	// $and/$eq (decode shape) or keep descending through $or reduction nodes.
 	bool cell_looks_interesting(Cell *cell) const
 	{
+		pool<SigBit> seen;
+		std::deque<SigBit> work;
+		int budget = 32;
+
 		for (auto port : {ID::A, ID::B}) {
-			SigSpec sig = sigmap(cell->getPort(port));
-			for (auto bit : sig) {
+			for (auto bit : sigmap(cell->getPort(port))) {
 				if (bit.wire == nullptr)
 					continue;
-				DriverBit driver;
-				if (!get_driver(bit, driver))
-					continue;
-				if (driver.cell->type.in(ID($and), ID($or), ID($eq)))
-					return true;
+				work.push_back(bit);
 			}
+		}
+
+		while (!work.empty() && budget-- > 0) {
+			SigBit bit = sigmap(work.front());
+			work.pop_front();
+			if (bit.wire == nullptr)
+				continue;
+			if (!seen.insert(bit).second)
+				continue;
+
+			DriverBit driver;
+			if (!get_driver(bit, driver) || driver.port != ID::Y)
+				continue;
+			if (driver.cell->type == ID($eq))
+				return driver.index == 0;
+			if (driver.cell->type == ID($and))
+				return true;
+			if (driver.cell->type != ID($or))
+				continue;
+
+			SigBit a, b;
+			if (get_input_bit(driver.cell, ID::A, driver.index, a))
+				work.push_back(a);
+			if (get_input_bit(driver.cell, ID::B, driver.index, b))
+				work.push_back(b);
 		}
 		return false;
 	}
@@ -534,17 +559,17 @@ struct OptAndOrPmuxWorker
 	}
 
 	// Tiny fanin peek: reject AND/OR cones that never touch $eq before we
-	// spend the full cone budget expanding them. Visit OR/AND siblings
-	// before deeper spines so skewed reduction trees still find $eq leaves.
+	// spend the full cone budget expanding them. BFS so OR/AND siblings are
+	// visited before deeper spines on skewed reduction trees.
 	bool peek_has_eq(SigBit root, int budget) const
 	{
 		pool<SigBit> seen;
-		std::vector<SigBit> work = {sigmap(root)};
+		std::deque<SigBit> work = {sigmap(root)};
 		while (!work.empty()) {
 			if (--budget < 0)
 				return false;
-			SigBit bit = work.back();
-			work.pop_back();
+			SigBit bit = work.front();
+			work.pop_front();
 			if (bit.wire == nullptr)
 				continue;
 			if (!seen.insert(bit).second)
@@ -775,7 +800,6 @@ struct OptAndOrPmuxWorker
 			return a.name.str() < b.name.str();
 		});
 
-		int large_left = large_cone_budget;
 		for (auto &cand : cands) {
 			if (removed_cell_names.count(cand.name))
 				continue;
@@ -786,9 +810,8 @@ struct OptAndOrPmuxWorker
 			if (st != CONVERT_BUDGET)
 				continue;
 
-			if (large_left <= 0)
-				continue;
-			large_left--;
+			// Roots already passed cheap filters; always allow a full rewalk so
+			// large decode trees are not silently truncated by a retry cap.
 			try_convert(cand.cell, max_cone_bits);
 		}
 	}
