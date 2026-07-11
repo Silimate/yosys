@@ -36,3 +36,43 @@ hierarchy -top tiny_decode
 proc
 opt_andor_pmux
 select -assert-count 0 t:$pmux
+
+design -reset
+read_verilog opt_andor_pmux.v
+
+hierarchy -top large_vector_decode
+proc
+design -save large_gold
+
+opt_andor_pmux
+select -assert-count 1 t:$pmux
+
+design -stash large_gate
+design -copy-from large_gold -as gold large_vector_decode
+design -copy-from large_gate -as gate large_vector_decode
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -show-inputs -show-outputs miter
+
+design -reset
+read_verilog opt_andor_pmux.v
+
+hierarchy -top stress_andor_no_eq
+proc
+opt_andor_pmux
+select -assert-count 0 t:$pmux
+
+# Synthetic OR-reduction stress: many intermediate $or cells, no $eq.
+# Cheap rejects / root ranking should keep this near-instant.
+design -reset
+read_verilog <<EOF
+module stress_or_reduce(input [255:0] a, input [255:0] b, output [255:0] y);
+  wire [255:0] t0 = a | b;
+  wire [255:0] t1 = t0 | {t0[0], t0[255:1]};
+  wire [255:0] t2 = t1 | {t1[1:0], t1[255:2]};
+  assign y = t2 | a | b;
+endmodule
+EOF
+hierarchy -top stress_or_reduce
+proc
+opt_andor_pmux
+select -assert-count 0 t:$pmux
