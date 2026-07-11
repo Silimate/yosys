@@ -1273,23 +1273,27 @@ struct SimInstance
 			child.second->register_output_step_values(data);
 	}
 
+	Const fst_value(fstHandle handle)
+	{
+		Const value = Const::from_string(shared->fst->valueOf(handle));
+		if (shared->norm_xz)
+			zinit(value);
+		return value;
+	}
+
 	bool setInitState()
 	{
 		bool did_something = false;
 		for(auto &item : fst_handles) {
 			if (item.second==0) continue; // Ignore signals not found
-			std::string v = shared->fst->valueOf(item.second);
-			did_something |= set_state(item.first, Const::from_string(v));
+			did_something |= set_state(item.first, fst_value(item.second));
 		}
 		for (auto cell : module->cells())
 		{
 			if (cell->is_mem_cell()) {
 				std::string memid = cell->parameters.at(ID::MEMID).decode_string();
 				for (auto &data : fst_memories[memid])
-				{
-					std::string v = shared->fst->valueOf(data.second);
-					set_memory_state(memid, Const(data.first), Const::from_string(v));
-				}
+					set_memory_state(memid, Const(data.first), fst_value(data.second));
 			}
 		}
 
@@ -1306,7 +1310,7 @@ struct SimInstance
 			if (register_wires.count(item.first) == 0) continue; // skip non-registers
 			Wire *wire = item.first;
 			// Extract wire value from simulation and VCD ground truth
-			Const vcd_val = Const::from_string(shared->fst->valueOf(item.second));
+			Const vcd_val = fst_value(item.second);
 			Const sim_val = get_state(wire);
 			if (sim_val != vcd_val) {
 				if (shared->debug)
@@ -1403,8 +1407,7 @@ struct SimInstance
 	{
 		bool did_something = false;
 		for(auto &item : fst_inputs) {
-			std::string v = shared->fst->valueOf(item.second);
-			did_something |= set_state(item.first, Const::from_string(v));
+			did_something |= set_state(item.first, fst_value(item.second));
 		}
 		for (auto child : children)
 			did_something |= child.second->setInputs();
@@ -3241,7 +3244,8 @@ struct SimPass : public Pass {
 		log("        overwrite register state from VCD file every cycle\n");
 		log("\n");
 		log("    -normxz\n");
-		log("        normalize x/z to 0 when computing -activity, matching CXXRTL\n");
+		log("        normalize waveform x/z to 0 before simulation and when computing\n");
+		log("        -activity, matching CXXRTL's two-state behavior\n");
 		log("\n");
 		log("    -bb\n");
 		log("        cut every parent<->child boundary in the hierarchy and source both sides from the FST\n");
