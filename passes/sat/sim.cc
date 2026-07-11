@@ -128,6 +128,7 @@ struct SimShared
 	std::vector<std::unique_ptr<OutputWriter>> outputfiles;
 	std::vector<std::pair<int,std::map<int,Const>>> output_data;
 	bool ignore_x = false;
+	bool norm_xz = false;
 	bool date = false;
 	bool multiclock = false;
 	int next_output_id = 0;
@@ -2770,18 +2771,22 @@ struct AnnotateActivity : public OutputWriter {
 				std::vector<uint64_t> &totalEventCounts = itr->second.totalEventCounts;
 				for (int i = GetSize(value) - 1; i >= 0; i--) {
 					uint64_t val = '-';
-					switch (value[i]) {
-					case State::S0:
-						val = '0';
-						break;
-					case State::S1:
-						val = '1';
-						break;
-					case State::Sx:
-						val = 'x';
-						break;
-					default:
-						val = 'z';
+					if (worker->norm_xz) {
+						val = value[i] == State::S1 ? '1' : '0';
+					} else {
+						switch (value[i]) {
+						case State::S0:
+							val = '0';
+							break;
+						case State::S1:
+							val = '1';
+							break;
+						case State::Sx:
+							val = 'x';
+							break;
+						default:
+							val = 'z';
+						}
 					}
 					if (lastVals[i] == 0) {
 						lastVals[i] = val;
@@ -3235,6 +3240,9 @@ struct SimPass : public Pass {
 		log("    -reg\n");
 		log("        overwrite register state from VCD file every cycle\n");
 		log("\n");
+		log("    -normxz\n");
+		log("        normalize x/z to 0 when computing -activity, matching CXXRTL\n");
+		log("\n");
 		log("    -bb\n");
 		log("        cut every parent<->child boundary in the hierarchy and source both sides from the FST\n");
 		log("        (each instance simulates its own logic only; boundary signals come from VCD)\n");
@@ -3442,6 +3450,10 @@ struct SimPass : public Pass {
 			}
 			if (args[argidx] == "-activity") {
 				worker.outputfiles.emplace_back(std::unique_ptr<AnnotateActivity>(new AnnotateActivity(&worker)));
+				continue;
+			}
+			if (args[argidx] == "-normxz") {
+				worker.norm_xz = true;
 				continue;
 			}
 			if (args[argidx] == "-reg") {
