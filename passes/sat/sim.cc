@@ -247,6 +247,11 @@ struct SimInstance
 	dict<std::pair<IdString, int>, Const> trace_mem_init_database;
 	dict<Wire*, fstHandle> fst_handles;
 	dict<Wire*, fstHandle> fst_inputs;
+	struct fst_boundary_input_t {
+		SigSpec target;
+		fstHandle handle;
+	};
+	std::vector<fst_boundary_input_t> fst_boundary_inputs;
 	dict<IdString, dict<int,fstHandle>> fst_memories;
 
 	// Helper function to set wire state from array element handles
@@ -356,11 +361,20 @@ struct SimInstance
 				dirty_children.insert(new SimInstance(shared, scope + "." + cell->name.unescape(), mod, cell, this));
 			}
 
-			// With -bb, source each parent-side child-output wire from VCD
+			// With -bb, source each parent-side child output from its instance port in the FST.
 			if (mod != nullptr && shared->blackbox_children && shared->fst) {
 				for (auto &conn : cell->connections()) {
 					Wire *port = mod->wire(conn.first);
 					if (!port || !port->port_output) continue;
+
+					std::string fst_name = scope + "." + cell->name.unescape() + "." + conn.first.unescape();
+					fstHandle handle = shared->fst->getHandle(fst_name);
+					if (handle != 0) {
+						fst_boundary_inputs.push_back({conn.second, handle});
+						continue;
+					}
+
+					// Fall back to parent-side wire names for traces without child port signals.
 					for (auto bit : sigmap(conn.second)) {
 						if (bit.wire == nullptr) continue;
 						auto it = fst_handles.find(bit.wire);
@@ -1406,12 +1420,27 @@ struct SimInstance
 		return issue_count;
 	}
 
+	bool setBoundaryInput(const fst_boundary_input_t &input)
+	{
+		Const value = fst_value(input.handle);
+		SigSpec target = sigmap(input.target);
+		log_assert(GetSize(target) <= GetSize(value));
+
+		bool did_something = false;
+		for (int bit = 0; bit < GetSize(target); bit++)
+			if (target[bit].wire != nullptr)
+				did_something |= set_state(target[bit], value[bit]);
+		return did_something;
+	}
+
 	bool setInputs()
 	{
 		bool did_something = false;
 		for(auto &item : fst_inputs) {
 			did_something |= set_state(item.first, fst_value(item.second));
 		}
+		for (auto &input : fst_boundary_inputs)
+			did_something |= setBoundaryInput(input);
 		for (auto child : children)
 			did_something |= child.second->setInputs();
 
@@ -1850,15 +1879,24 @@ struct SimWorker : SimShared
 				initialize_stable_past();
 				initial = false;
 			}
+
+			// Make waveform register state authoritative before evaluating clocks.
+			if (reg_overwrite)
+				for (auto t : tops)
+					did_something |= t->setRegisters(time);
+
 			if (did_something)
 				update(true);
 
-			// Override register state from VCD every cycle
+			// Restore any registers changed by simulation, then settle only combinational logic.
 			if (reg_overwrite) {
 				bool diverged = false;
 				for (auto t : tops)
 					diverged |= t->setRegisters(time);
-				if (diverged) update(true);
+				if (diverged) {
+					for (auto t : tops)
+						t->update_ph1();
+				}
 			}
 
 			register_output_step(time);
