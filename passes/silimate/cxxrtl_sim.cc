@@ -100,6 +100,12 @@ struct DesignMemory {
 	dict<int, fstHandle> fst_handles;
 };
 
+// Signals and memories discovered in one CXXRTL enumeration.
+struct EnumeratedObjects {
+	std::vector<RawSignal> signals;
+	std::vector<DesignMemory> memories;
+};
+
 struct CxxrtlSimPass : public Pass {
 	CxxrtlSimPass() : Pass("cxxrtl_sim", "re-simulate with a CXXRTL evaluator and annotate activity") {}
 
@@ -148,17 +154,21 @@ struct CxxrtlSimPass : public Pass {
 	static Wire *resolve_wire(Design *design, Module *mod, std::string name)
 	{
 		for (auto &c : name)
-			if (c == ' ') // normalize all spaces to '.' for scoping
+			if (c == ' ') // CXXRTL signal names uses spaces as hierarchy separators
 				c = '.';
+		// Traverse hierarchy to find the wire. in the design.
 		while (true) {
+			// Check if current module has a wire with this name.
 			if (Wire *w = mod->wire(RTLIL::escape_id(name)))
 				return w;
+			// Otherwise, check if the current module has a cell with the first part of the name.
 			size_t dot = name.find('.');
 			if (dot == std::string::npos)
 				return nullptr;
 			Cell *cell = mod->cell(RTLIL::escape_id(name.substr(0, dot)));
 			if (cell == nullptr)
 				return nullptr;
+			// Find the module that contains the cell and continue.
 			mod = design->module(cell->type);
 			if (mod == nullptr)
 				return nullptr;
@@ -166,6 +176,7 @@ struct CxxrtlSimPass : public Pass {
 		}
 	}
 
+	// Turn a CXXRTL name into the corresponding FST name that can be looked up in the waveform.
 	static std::string waveform_name(const std::string &scope, std::string name)
 	{
 		name = scope + "." + name;
@@ -175,32 +186,23 @@ struct CxxrtlSimPass : public Pass {
 		return name;
 	}
 
-	// Enumeration callback for cxxrtl_enum. Keeps the nets we can annotate and appends them to the list handed to us through the void* argument.
-	static void keep_signal(void *list, const char *name, struct cxxrtl_object *object, size_t parts)
+	// Keep ordinary signals for activity and memories for first-sample restoration.
+	static void keep_object(void *context, const char *name, struct cxxrtl_object *object, size_t parts)
 	{
 		if (parts != 1)
 			return; // multi-part objects unsupported (post-splitnets)
-		if (object->type == CXXRTL_MEMORY)
-			return; // $mem_v2 internals are not directly annotated, but port signals are, which is what matters
-		if (object->depth != 1 || object->width == 0)
+
+		auto &objects = *static_cast<EnumeratedObjects*>(context);
+		if (object->type == CXXRTL_MEMORY) {
+			if (object->width > 0 && object->depth > 0)
+				objects.memories.push_back({ name, object, {} });
 			return;
-		((std::vector<RawSignal>*)list)->push_back({ name, object });
+		}
+
+		if (object->depth == 1 && object->width > 0)
+			objects.signals.push_back({ name, object });
 	}
 
-	// Enumeration callback that keeps memories for first-sample state restoration.
-	static void keep_memory(void *list, const char *name, struct cxxrtl_object *objects, size_t parts)
-	{
-		if (parts != 1 || objects[0].type != CXXRTL_MEMORY)
-			return;
-		if (objects[0].width == 0 || objects[0].depth == 0)
-			return;
-		((std::vector<DesignMemory>*)list)->push_back({ name, &objects[0], {} });
-	}
-
-	// Return which activity counters this net should use. The first time we see a
-	// storage we make a new set of counters; if another name already uses the same
-	// storage, we return that same set so they share one count. activities is a
-	// std::deque so these pointers stay valid as more entries are added.
 	SignalActivity *find_or_add_activity(
 		struct cxxrtl_object *object,
 		std::deque<SignalActivity> &activities,
@@ -335,17 +337,18 @@ struct CxxrtlSimPass : public Pass {
 
 		// Output tables
 		std::vector<DesignSignal> &signals,
-		std::deque<SignalActivity> &activities
+		std::deque<SignalActivity> &activities,
+		std::vector<DesignMemory> &memories
 	) {
-		// Gather all nets that we can annotate and store them into the raw table.
-		std::vector<RawSignal> raw;
-		enum_signals(handle, &raw, keep_signal);
+		EnumeratedObjects objects;
+		enum_signals(handle, &objects, keep_object);
+		memories = std::move(objects.memories);
 
 		// Map storage address to its corresponding activity object.
 		dict<uintptr_t, SignalActivity*> seen;
 
 		// For every net, create a DesignSignal object and store it into the signal table.
-		for (auto &r : raw) {
+		for (auto &r : objects.signals) {
 			DesignSignal sig;
 			sig.name = r.name;
 			sig.wire = resolve_wire(design, top, sig.name);
@@ -457,8 +460,7 @@ struct CxxrtlSimPass : public Pass {
 		std::vector<DesignMemory> memories;                    // memory state restored at the first sample
 
 		// Populate tables
-		collect_signals(handle, enum_signals, design, top, signals, activities);
-		enum_signals(handle, &memories, keep_memory);
+		collect_signals(handle, enum_signals, design, top, signals, activities, memories);
 		log("Collected %d signals and %d unique wire activities.\n", GetSize(signals), GetSize(activities));
 
 		// Open waveform to drive signals
