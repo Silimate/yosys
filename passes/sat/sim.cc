@@ -496,7 +496,10 @@ struct SimInstance
 			else
 				builder.push_back(State::Sz);
 
-		return builder.build();
+		Const value = builder.build();
+		if (shared->norm_xz)
+			zinit(value);
+		return value;
 	}
 
 	Const get_state(SigSpec sig)
@@ -3244,8 +3247,8 @@ struct SimPass : public Pass {
 		log("        overwrite register state from VCD file every cycle\n");
 		log("\n");
 		log("    -normxz\n");
-		log("        normalize waveform x/z to 0 before simulation and when computing\n");
-		log("        -activity, matching CXXRTL's two-state behavior\n");
+		log("        normalize x/z to 0 before values participate in simulation and\n");
+		log("        when computing -activity, matching CXXRTL's two-state behavior\n");
 		log("\n");
 		log("    -bb\n");
 		log("        cut every parent<->child boundary in the hierarchy and source both sides from the FST\n");
