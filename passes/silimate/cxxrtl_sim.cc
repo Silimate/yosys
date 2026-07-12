@@ -203,6 +203,7 @@ struct CxxrtlSimPass : public Pass {
 			objects.signals.push_back({ name, object });
 	}
 
+	// Finds or creates a SignalActivity object for a DesignSignal object.
 	SignalActivity *find_or_add_activity(
 		struct cxxrtl_object *object,
 		std::deque<SignalActivity> &activities,
@@ -227,22 +228,22 @@ struct CxxrtlSimPass : public Pass {
 		return &act;
 	}
 
-	// Write an FST value (MSB first; x/z mapped to 0) into packed storage.
+	// Write an FST value (MSB first; x/z mapped to 0) into packed 32-bit representation expected by CXXRTL.
 	static bool write_value(uint32_t *target, size_t width, const std::string &value)
 	{
-		size_t num_words = (width + 31) / 32;
+		size_t num_words = (width + 31) / 32; // number of words needed to represent the 'width' bits including padding
 		bool changed = false;
 		size_t nbits = std::min(value.size(), width);
 		for (size_t word = 0; word < num_words; word++) {
 			uint32_t packed = 0;
-			size_t first_bit = word * 32;
-			size_t last_bit = std::min(first_bit + 32, nbits);
+			size_t first_bit = word * 32; // LSB of the current word
+			size_t last_bit = std::min(first_bit + 32, nbits); // MSB of the current word
 			for (size_t bit = first_bit; bit < last_bit; bit++)
-				if (value[value.size() - 1 - bit] == '1')
+				if (value[value.size() - 1 - bit] == '1') // convert the FST value to a 32-bit packed representation
 					packed |= (uint32_t)1 << (bit - first_bit);
 			if (target[word] != packed)
 				changed = true;
-			target[word] = packed;
+			target[word] = packed; // example: target[0] = bits 0-31, target[1] = bits 32-63, etc.
 		}
 		return changed;
 	}
