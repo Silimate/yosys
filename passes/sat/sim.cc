@@ -1880,23 +1880,15 @@ struct SimWorker : SimShared
 				initial = false;
 			}
 
-			// Make waveform register state authoritative before evaluating clocks.
-			if (reg_overwrite)
-				for (auto t : tops)
-					did_something |= t->setRegisters(time);
-
 			if (did_something)
 				update(true);
 
-			// Restore any registers changed by simulation, then settle only combinational logic.
+			// Override register state from VCD every cycle
 			if (reg_overwrite) {
 				bool diverged = false;
 				for (auto t : tops)
 					diverged |= t->setRegisters(time);
-				if (diverged) {
-					for (auto t : tops)
-						t->update_ph1();
-				}
+				if (diverged) update(true);
 			}
 
 			register_output_step(time);
