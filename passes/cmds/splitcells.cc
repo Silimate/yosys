@@ -199,7 +199,7 @@ struct SplitcellsWorker
 							dim_index = base_name.substr(bracket_pos, reg_pos - bracket_pos);
 							base_name = base_name.substr(0, reg_pos);
 							strip_reg = true;
-						} else { // <base>_reg[word]
+						} else { // <base>_reg[word] / <base>_reg.attr, or <base>[word] with no _reg
 							dim_index = base_name.substr(bracket_pos);
 						}
 						base_name = base_name.substr(0, bracket_pos);

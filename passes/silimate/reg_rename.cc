@@ -106,9 +106,8 @@ struct RegRenameInstance {
 
 			// After peeling, the name is a register if the base ends in "_reg".
 			bool is_reg = end >= 4 && cellName.compare(end - 4, 4, "_reg") == 0;
-			size_t reg_pos = end - 4; // position of "_reg"
-
 			if (is_reg) {
+				size_t reg_pos = end - 4; // position of "_reg"
 
 				// Remove "_reg" to get the target wire specification
 				cellName.erase(reg_pos, 4);
