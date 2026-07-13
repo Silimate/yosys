@@ -200,7 +200,13 @@ bool is_extending_cell(RTLIL::IdString type)
 bool is_inlinable_cell(RTLIL::IdString type)
 {
 	return is_unary_cell(type) || is_binary_cell(type) || type.in(
-		ID($mux), ID($concat), ID($slice), ID($pmux), ID($bmux), ID($demux), ID($bwmux), ID($buf));
+		ID($mux), ID($concat), ID($slice), ID($pmux), ID($bmux), ID($demux), ID($bwmux), ID($buf),
+		// Single-bit gates from ABC (-g cmos/gates/aig)
+		ID($_BUF_), ID($_NOT_),
+		ID($_AND_), ID($_NAND_), ID($_OR_), ID($_NOR_),
+		ID($_XOR_), ID($_XNOR_), ID($_ANDNOT_), ID($_ORNOT_),
+		ID($_MUX_), ID($_NMUX_),
+		ID($_AOI3_), ID($_OAI3_), ID($_AOI4_), ID($_OAI4_));
 }
 
 bool is_ff_cell(RTLIL::IdString type)
@@ -1217,6 +1223,100 @@ struct CxxrtlWorker {
 			f << ",";
 			f << cell->getParam(ID::OFFSET).as_int();
 			f << ">().val()";
+		// Single-bit gates
+		} else if (cell->type == ID($_BUF_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+		} else if (cell->type == ID($_NOT_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_not()";
+		} else if (cell->type == ID($_AND_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_and(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ")";
+		} else if (cell->type == ID($_NAND_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_and(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ").bit_not()";
+		} else if (cell->type == ID($_OR_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_or(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ")";
+		} else if (cell->type == ID($_NOR_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_or(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ").bit_not()";
+		} else if (cell->type == ID($_XOR_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_xor(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ")";
+		} else if (cell->type == ID($_XNOR_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_xor(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ").bit_not()";
+		} else if (cell->type == ID($_ANDNOT_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_and(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ".bit_not())";
+		} else if (cell->type == ID($_ORNOT_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_or(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ".bit_not())";
+		} else if (cell->type == ID($_MUX_)) {
+			f << "(";
+			dump_sigspec_rhs(cell->getPort(ID::S), for_debug);
+			f << " ? ";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << " : ";
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ")";
+		} else if (cell->type == ID($_NMUX_)) {
+			f << "((";
+			dump_sigspec_rhs(cell->getPort(ID::S), for_debug);
+			f << " ? ";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << " : ";
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ").bit_not())";
+		} else if (cell->type == ID($_AOI3_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_and(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ").bit_or(";
+			dump_sigspec_rhs(cell->getPort(ID::C), for_debug);
+			f << ").bit_not()";
+		} else if (cell->type == ID($_OAI3_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_or(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ").bit_and(";
+			dump_sigspec_rhs(cell->getPort(ID::C), for_debug);
+			f << ").bit_not()";
+		} else if (cell->type == ID($_AOI4_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_and(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ").bit_or(";
+			dump_sigspec_rhs(cell->getPort(ID::C), for_debug);
+			f << ".bit_and(";
+			dump_sigspec_rhs(cell->getPort(ID::D), for_debug);
+			f << ")).bit_not()";
+		} else if (cell->type == ID($_OAI4_)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
+			f << ".bit_or(";
+			dump_sigspec_rhs(cell->getPort(ID::B), for_debug);
+			f << ").bit_and(";
+			dump_sigspec_rhs(cell->getPort(ID::C), for_debug);
+			f << ".bit_or(";
+			dump_sigspec_rhs(cell->getPort(ID::D), for_debug);
+			f << ")).bit_not()";
 		} else {
 			log_assert(false);
 		}
