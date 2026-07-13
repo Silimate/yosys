@@ -1315,7 +1315,10 @@ struct SimInstance
 		}
 
 		for (auto child : children)
-			did_something |= child.second->setInitState();
+			if (child.second->setInitState()) {
+				dirty_children.insert(child.second);
+				did_something = true;
+			}
 		return did_something;
 	}
 
@@ -1343,7 +1346,10 @@ struct SimInstance
 		}
 		// Apply to all child modules
 		for (auto child : children)
-			did_something |= child.second->setRegisters(time);
+			if (child.second->setRegisters(time)) {
+				dirty_children.insert(child.second);
+				did_something = true;
+			}
 		return did_something;
 	}
 

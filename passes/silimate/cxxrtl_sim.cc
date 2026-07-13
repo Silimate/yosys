@@ -24,6 +24,7 @@
 #include <cmath>
 #include <deque>
 #include <dlfcn.h>
+#include <fstream>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -56,6 +57,27 @@ static double stringToTime(std::string str)
 		log_error("Time value '%s' must be positive\n", str.c_str());
 
 	return value * pow(10.0, g_units.at(endptr));
+}
+
+// Format a CXXRTL object's current value as an MSB-first binary string (debug -vcd dump).
+static std::string value_to_bits(const struct cxxrtl_object *object)
+{
+	std::string s;
+	s.reserve(object->width);
+	for (int bit = (int)object->width - 1; bit >= 0; bit--)
+		s += ((object->curr[bit / 32] >> (bit % 32)) & 1) ? '1' : '0';
+	return s;
+}
+
+// Generate a printable VCD identifier code (base-94, ASCII 33..126) for signal index n.
+static std::string vcd_ident(size_t n)
+{
+	std::string s;
+	do {
+		s += char(33 + (n % 94));
+		n /= 94;
+	} while (n > 0);
+	return s;
 }
 
 // Function pointer types for the C API symbols resolved from the evaluator.
@@ -144,6 +166,10 @@ struct CxxrtlSimPass : public Pass {
 		log("\n");
 		log("    -log-interval <n>\n");
 		log("        log progress every <n> samples.\n");
+		log("\n");
+		log("    -vcd <file>\n");
+		log("        dump per-sample settled signal values to <file> in VCD format\n");
+		log("        (debug; lets you diff the replay against the sim pass waveform).\n");
 		log("\n");
 		log("    -d\n");
 		log("        enable debug output.\n");
@@ -366,7 +392,7 @@ struct CxxrtlSimPass : public Pass {
 		log_header(design, "Executing CXXRTL_SIM pass (FST-driven CXXRTL re-simulation).\n");
 
 		// Initialize variable defaults
-		std::string so_path, wave_path, scope, module_name;
+		std::string so_path, wave_path, scope, module_name, vcd_path;
 		double clk_period_override = 0;
 		double start_time = 0, stop_time = -1;
 		int log_interval = 0;
@@ -406,6 +432,10 @@ struct CxxrtlSimPass : public Pass {
 			}
 			if (args[argidx] == "-log-interval" && argidx+1 < args.size()) {
 				log_interval = atoi(args[++argidx].c_str());
+				continue;
+			}
+			if (args[argidx] == "-vcd" && argidx+1 < args.size()) {
+				vcd_path = args[++argidx];
 				continue;
 			}
 			if (args[argidx] == "-reg") {
@@ -577,6 +607,40 @@ struct CxxrtlSimPass : public Pass {
 		uint64_t max_time = startCount;
 		int sample_count = 0;
 
+		// Optional debug VCD: dump each sample's settled values so the CXXRTL replay
+		// can be diffed against the sim pass waveform to localize divergences.
+		std::ofstream vcd_file;
+		std::vector<std::string> vcd_ids, vcd_prev;
+		if (!vcd_path.empty()) {
+			// Suffix the module name so per-module invocations (parallel or serial)
+			// don't clobber a shared -vcd path: foo.vcd -> foo.<module>.vcd.
+			std::string out_path = vcd_path;
+			if (!module_name.empty()) {
+				size_t dot = out_path.rfind('.');
+				std::string base = dot == std::string::npos ? out_path : out_path.substr(0, dot);
+				std::string ext = dot == std::string::npos ? ".vcd" : out_path.substr(dot);
+				out_path = base + "." + module_name + ext;
+			}
+			vcd_file.open(out_path.c_str());
+			if (!vcd_file.is_open())
+				log_cmd_error("Cannot open -vcd file '%s' for writing.\n", out_path.c_str());
+			log("Dumping per-sample values to VCD: %s\n", out_path.c_str());
+			vcd_file << "$timescale 1" << fst.getTimescaleString() << " $end\n";
+			vcd_file << "$scope module cxxrtl $end\n";
+			vcd_ids.resize(signals.size());
+			vcd_prev.assign(signals.size(), std::string());
+			for (size_t i = 0; i < signals.size(); i++) {
+				vcd_ids[i] = vcd_ident(i);
+				std::string nm = signals[i].name;
+				for (auto &c : nm)
+					if (c == ' ')
+						c = '.';
+				vcd_file << "$var wire " << signals[i].object->width << " "
+				         << vcd_ids[i] << " " << nm << " $end\n";
+			}
+			vcd_file << "$upscope $end\n$enddefinitions $end\n";
+		}
+
 		std::vector<fstHandle> no_clocks;
 		fst.reconstructAllAtTimes(no_clocks, startCount, stopCount, INT_MAX, [&](uint64_t time) {
 			if (log_interval > 0 && sample_count > 0 && sample_count % log_interval == 0) {
@@ -599,6 +663,21 @@ struct CxxrtlSimPass : public Pass {
 
 			// Recalculate valid design wires whose values CXXRTL optimized away.
 			refresh_outlines(outlines, eval_outline);
+
+			// Record this sample's settled values to the debug VCD (change-based).
+			if (vcd_file.is_open()) {
+				vcd_file << "#" << (unsigned long long)time << "\n";
+				for (size_t i = 0; i < signals.size(); i++) {
+					std::string bits = value_to_bits(signals[i].object);
+					if (!first_sample && bits == vcd_prev[i])
+						continue;
+					if (signals[i].object->width == 1)
+						vcd_file << bits << vcd_ids[i] << "\n";
+					else
+						vcd_file << "b" << bits << " " << vcd_ids[i] << "\n";
+					vcd_prev[i] = bits;
+				}
+			}
 
 			// Update every wire activity/duty
 			if (first_sample)
