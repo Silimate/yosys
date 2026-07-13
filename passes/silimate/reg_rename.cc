@@ -96,9 +96,10 @@ struct RegRenameInstance {
 			// Walk right-to-left, removing each trailing "[digits]" group.
 			while (end && cellName[end - 1] == ']') {
 				size_t open = cellName.rfind('[', end - 1);
-				std::string inner = cellName.substr(open + 1, end - open - 2); // chars between [ ] brackets
-				if (open == std::string::npos || inner.empty() ||
-						inner.find_first_not_of("0123456789") != std::string::npos)
+				if (open == std::string::npos)
+					break;
+				std::string inner = cellName.substr(open + 1, end - open - 2);
+				if (inner.empty() || inner.find_first_not_of("0123456789") != std::string::npos)
 					break;
 				end = open;
 			}
