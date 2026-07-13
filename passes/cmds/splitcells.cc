@@ -190,41 +190,40 @@ struct SplitcellsWorker
 					// Strip existing '[' or '.' from cell name
 					size_t bracket_pos = base_name.find_first_of("[.");
 					bool strip_reg = false;
+					std::string dim_index;
 					if (bracket_pos != std::string::npos) {
 
 						// Check if we will strip off _reg suffix from base name
 						size_t reg_pos = base_name.rfind("_reg");
-						if (reg_pos != std::string::npos && reg_pos > bracket_pos) {
+						if (reg_pos != std::string::npos && reg_pos > bracket_pos) { // <base>[word]_reg
+							dim_index = base_name.substr(bracket_pos, reg_pos - bracket_pos);
 							base_name = base_name.substr(0, reg_pos);
 							strip_reg = true;
+						} else { // <base>_reg[word] / <base>_reg.attr, or <base>[word] with no _reg
+							dim_index = base_name.substr(bracket_pos);
 						}
 						base_name = base_name.substr(0, bracket_pos);
 					}
 
-					// Extract dimensional indices from Q port wire name
+					// Prefer dimensional index from the cell name; fall back to Q port wire name index otherwise
+					bool q_is_wire = slice_lsb < GetSize(raw_q) && raw_q[slice_lsb].is_wire();
+					if (dim_index.empty() && q_is_wire) {
+						std::string wire_name = raw_q[slice_lsb].wire->name.str();
+						size_t wb = wire_name.find_first_of("[.");
+						if (wb != std::string::npos)
+							dim_index = wire_name.substr(wb);
+					}
+
+					int bit_offset = q_is_wire ? user_index(slice_lsb) : name_lsb;
 					std::string wire_indices;
-					if (slice_lsb < GetSize(raw_q) && raw_q[slice_lsb].is_wire()) {
-
-							// Extract wire name (ex: \Memory[0] or \Memory.attr)
-							Wire *w = raw_q[slice_lsb].wire;
-							std::string wire_name = w->name.str();
-
-							// Extract bit offset from the wire (ex: 0)
-							int bit_offset = user_index(slice_lsb);
-
-							// Concatenate struct attribute or wire index (ex: \Memory[0] -> [0]) to the bit offset
-							size_t bracket_pos = wire_name.find_first_of("[.");
-							if (bracket_pos != std::string::npos) {
-									wire_indices = wire_name.substr(bracket_pos) + (strip_reg ? "_reg" : "") + stringf(
-										"%c%d%c", format[0], bit_offset, format[1]);
-							} else { // no '[' or '.', so no concatenation using wire, use slice_lsb + name_lsb offset instead
-									wire_indices = stringf(
-										"%c%d%c", format[0], slice_lsb + user_index(0), format[1]);
-							}
+					if (!dim_index.empty()) {
+						// Concatenate struct attribute or wire index (ex: \Memory[0] -> [0]) to the bit offset
+						wire_indices = dim_index + (strip_reg ? "_reg" : "") + stringf(
+							"%c%d%c", format[0], bit_offset, format[1]);
 					} else {
-							// Fallback
-							wire_indices = stringf(
-								"%c%d%c", format[0], name_lsb, format[1]);
+						// no '[' or '.' on cell or Q, warn as this may cause problems in reg annotation
+						wire_indices = stringf("%c%d%c", format[0],
+							q_is_wire ? slice_lsb + user_index(0) : name_lsb, format[1]);
 					}
 					// Construct uniquified name by concatenating the base name with the wire indices
 					slice_name = module->uniquify(base_name + wire_indices);
