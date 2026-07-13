@@ -224,9 +224,6 @@ struct SplitcellsWorker
 						// no '[' or '.' on cell or Q, warn as this may cause problems in reg annotation
 						wire_indices = stringf("%c%d%c", format[0],
 							q_is_wire ? slice_lsb + user_index(0) : name_lsb, format[1]);
-						if (i == 1)
-							log_warning("Unexpected FF name %s.%s while blasting; no [.] index on cell or Q port\n",
-								log_id(module), log_id(cell));
 					}
 					// Construct uniquified name by concatenating the base name with the wire indices
 					slice_name = module->uniquify(base_name + wire_indices);
