@@ -89,17 +89,27 @@ struct RegRenameInstance {
 				continue;
 			}
 
-			// We know it is a reg with _reg suffix with all brackets removed
-			std::string searchName = cell->name.c_str();
-			if (auto pos = searchName.find('['); pos != std::string::npos)
-				searchName.erase(pos);
+			// Accept both \name_reg[bit] and \name[word]_reg[bit].
+			std::string cellName = cell->name.c_str();
+			size_t end = cellName.size();
 
-			// If register name with no brackets ends with _reg, we can process it
-			size_t reg_pos = searchName.rfind("_reg");
-			if (reg_pos != std::string::npos && reg_pos == searchName.size() - 4) {
+			// Walk right-to-left, removing each trailing "[digits]" group.
+			while (end && cellName[end - 1] == ']') {
+				size_t open = cellName.rfind('[', end - 1);
+				if (open == std::string::npos)
+					break;
+				std::string inner = cellName.substr(open + 1, end - open - 2);
+				if (inner.empty() || inner.find_first_not_of("0123456789") != std::string::npos)
+					break;
+				end = open;
+			}
+
+			// After peeling, the name is a register if the base ends in "_reg".
+			bool is_reg = end >= 4 && cellName.compare(end - 4, 4, "_reg") == 0;
+			if (is_reg) {
+				size_t reg_pos = end - 4; // position of "_reg"
 
 				// Remove "_reg" to get the target wire specification
-				std::string cellName = cell->name.c_str();
 				cellName.erase(reg_pos, 4);
 
 				// Index comes from the right-most brackets
@@ -217,24 +227,6 @@ struct RegRenameInstance {
 
 		// Delete the old unused wires
 		module->remove(wireRemoveCache);
-
-		// A flop now drives each claimed target bit. If any of those bits belong to an alias, drop it.
-		if (!claimed_bits.empty()) {
-			std::vector<RTLIL::SigSig> kept;
-			for (auto &conn : module->connections()) {
-				RTLIL::SigSpec new_lhs, new_rhs;
-				for (int i = 0; i < GetSize(conn.first); i++) {
-					SigBit lb = conn.first[i];
-					if (lb.wire && lb.wire->port_output && claimed_bits.count(lb))
-						continue;
-					new_lhs.append(lb);
-					new_rhs.append(conn.second[i]);
-				}
-				if (GetSize(new_lhs))
-					kept.push_back(RTLIL::SigSig(new_lhs, new_rhs));
-			}
-			module->new_connections(kept);
-		}
 	}
 
 	void process_all(dict<std::string, RegInfo> &vcd_reg_widths)

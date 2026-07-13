@@ -128,7 +128,6 @@ struct SimShared
 	std::vector<std::unique_ptr<OutputWriter>> outputfiles;
 	std::vector<std::pair<int,std::map<int,Const>>> output_data;
 	bool ignore_x = false;
-	bool norm_xz = false;
 	bool date = false;
 	bool multiclock = false;
 	int next_output_id = 0;
@@ -247,11 +246,6 @@ struct SimInstance
 	dict<std::pair<IdString, int>, Const> trace_mem_init_database;
 	dict<Wire*, fstHandle> fst_handles;
 	dict<Wire*, fstHandle> fst_inputs;
-	struct fst_boundary_input_t {
-		SigSpec target;
-		fstHandle handle;
-	};
-	std::vector<fst_boundary_input_t> fst_boundary_inputs;
 	dict<IdString, dict<int,fstHandle>> fst_memories;
 
 	// Helper function to set wire state from array element handles
@@ -361,20 +355,11 @@ struct SimInstance
 				dirty_children.insert(new SimInstance(shared, scope + "." + cell->name.unescape(), mod, cell, this));
 			}
 
-			// With -bb, source each parent-side child output from its instance port in the FST.
+			// With -bb, source each parent-side child-output wire from VCD
 			if (mod != nullptr && shared->blackbox_children && shared->fst) {
 				for (auto &conn : cell->connections()) {
 					Wire *port = mod->wire(conn.first);
 					if (!port || !port->port_output) continue;
-
-					std::string fst_name = scope + "." + cell->name.unescape() + "." + conn.first.unescape();
-					fstHandle handle = shared->fst->getHandle(fst_name);
-					if (handle != 0) {
-						fst_boundary_inputs.push_back({conn.second, handle});
-						continue;
-					}
-
-					// Fall back to parent-side wire names for traces without child port signals.
 					for (auto bit : sigmap(conn.second)) {
 						if (bit.wire == nullptr) continue;
 						auto it = fst_handles.find(bit.wire);
@@ -510,10 +495,7 @@ struct SimInstance
 			else
 				builder.push_back(State::Sz);
 
-		Const value = builder.build();
-		if (shared->norm_xz)
-			zinit(value);
-		return value;
+		return builder.build();
 	}
 
 	Const get_state(SigSpec sig)
@@ -1290,35 +1272,28 @@ struct SimInstance
 			child.second->register_output_step_values(data);
 	}
 
-	Const fst_value(fstHandle handle)
-	{
-		Const value = Const::from_string(shared->fst->valueOf(handle));
-		if (shared->norm_xz)
-			zinit(value);
-		return value;
-	}
-
 	bool setInitState()
 	{
 		bool did_something = false;
 		for(auto &item : fst_handles) {
 			if (item.second==0) continue; // Ignore signals not found
-			did_something |= set_state(item.first, fst_value(item.second));
+			std::string v = shared->fst->valueOf(item.second);
+			did_something |= set_state(item.first, Const::from_string(v));
 		}
 		for (auto cell : module->cells())
 		{
 			if (cell->is_mem_cell()) {
 				std::string memid = cell->parameters.at(ID::MEMID).decode_string();
 				for (auto &data : fst_memories[memid])
-					set_memory_state(memid, Const(data.first), fst_value(data.second));
+				{
+					std::string v = shared->fst->valueOf(data.second);
+					set_memory_state(memid, Const(data.first), Const::from_string(v));
+				}
 			}
 		}
 
 		for (auto child : children)
-			if (child.second->setInitState()) {
-				dirty_children.insert(child.second);
-				did_something = true;
-			}
+			did_something |= child.second->setInitState();
 		return did_something;
 	}
 
@@ -1330,7 +1305,7 @@ struct SimInstance
 			if (register_wires.count(item.first) == 0) continue; // skip non-registers
 			Wire *wire = item.first;
 			// Extract wire value from simulation and VCD ground truth
-			Const vcd_val = fst_value(item.second);
+			Const vcd_val = Const::from_string(shared->fst->valueOf(item.second));
 			Const sim_val = get_state(wire);
 			if (sim_val != vcd_val) {
 				if (shared->debug)
@@ -1346,10 +1321,7 @@ struct SimInstance
 		}
 		// Apply to all child modules
 		for (auto child : children)
-			if (child.second->setRegisters(time)) {
-				dirty_children.insert(child.second);
-				did_something = true;
-			}
+			did_something |= child.second->setRegisters(time);
 		return did_something;
 	}
 
@@ -1426,27 +1398,13 @@ struct SimInstance
 		return issue_count;
 	}
 
-	bool setBoundaryInput(const fst_boundary_input_t &input)
-	{
-		Const value = fst_value(input.handle);
-		SigSpec target = sigmap(input.target);
-		log_assert(GetSize(target) <= GetSize(value));
-
-		bool did_something = false;
-		for (int bit = 0; bit < GetSize(target); bit++)
-			if (target[bit].wire != nullptr)
-				did_something |= set_state(target[bit], value[bit]);
-		return did_something;
-	}
-
 	bool setInputs()
 	{
 		bool did_something = false;
 		for(auto &item : fst_inputs) {
-			did_something |= set_state(item.first, fst_value(item.second));
+			std::string v = shared->fst->valueOf(item.second);
+			did_something |= set_state(item.first, Const::from_string(v));
 		}
-		for (auto &input : fst_boundary_inputs)
-			did_something |= setBoundaryInput(input);
 		for (auto child : children)
 			did_something |= child.second->setInputs();
 
@@ -1885,7 +1843,6 @@ struct SimWorker : SimShared
 				initialize_stable_past();
 				initial = false;
 			}
-
 			if (did_something)
 				update(true);
 
@@ -2813,22 +2770,18 @@ struct AnnotateActivity : public OutputWriter {
 				std::vector<uint64_t> &totalEventCounts = itr->second.totalEventCounts;
 				for (int i = GetSize(value) - 1; i >= 0; i--) {
 					uint64_t val = '-';
-					if (worker->norm_xz) {
-						val = value[i] == State::S1 ? '1' : '0';
-					} else {
-						switch (value[i]) {
-						case State::S0:
-							val = '0';
-							break;
-						case State::S1:
-							val = '1';
-							break;
-						case State::Sx:
-							val = 'x';
-							break;
-						default:
-							val = 'z';
-						}
+					switch (value[i]) {
+					case State::S0:
+						val = '0';
+						break;
+					case State::S1:
+						val = '1';
+						break;
+					case State::Sx:
+						val = 'x';
+						break;
+					default:
+						val = 'z';
 					}
 					if (lastVals[i] == 0) {
 						lastVals[i] = val;
@@ -3282,10 +3235,6 @@ struct SimPass : public Pass {
 		log("    -reg\n");
 		log("        overwrite register state from VCD file every cycle\n");
 		log("\n");
-		log("    -normxz\n");
-		log("        normalize x/z to 0 before values participate in simulation and\n");
-		log("        when computing -activity, matching CXXRTL's two-state behavior\n");
-		log("\n");
 		log("    -bb\n");
 		log("        cut every parent<->child boundary in the hierarchy and source both sides from the FST\n");
 		log("        (each instance simulates its own logic only; boundary signals come from VCD)\n");
@@ -3493,10 +3442,6 @@ struct SimPass : public Pass {
 			}
 			if (args[argidx] == "-activity") {
 				worker.outputfiles.emplace_back(std::unique_ptr<AnnotateActivity>(new AnnotateActivity(&worker)));
-				continue;
-			}
-			if (args[argidx] == "-normxz") {
-				worker.norm_xz = true;
 				continue;
 			}
 			if (args[argidx] == "-reg") {
