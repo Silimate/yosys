@@ -247,6 +247,8 @@ struct SimInstance
 	dict<std::pair<IdString, int>, Const> trace_mem_init_database;
 	dict<Wire*, fstHandle> fst_handles;
 	dict<Wire*, fstHandle> fst_inputs;
+	// Bit-accurate FST drives for -bb child outputs
+	std::vector<std::pair<SigSpec, fstHandle>> fst_input_sigs;
 	dict<IdString, dict<int,fstHandle>> fst_memories;
 
 	// Helper function to set wire state from array element handles
@@ -356,21 +358,24 @@ struct SimInstance
 				dirty_children.insert(new SimInstance(shared, scope + "." + cell->name.unescape(), mod, cell, this));
 			}
 
-			// With -bb, source each parent-side child-output wire from VCD.
-			// Prefer scope.<inst>.<port> (RTL hierarchy); fall back to the parent
-			// wire name when that path is absent.
+			// With -bb, source each parent-side child-output from VCD.
 			if (mod != nullptr && shared->blackbox_children && shared->fst) {
 				for (auto &conn : cell->connections()) {
 					Wire *port = mod->wire(conn.first);
 					if (!port || !port->port_output) continue;
+					SigSpec dest = sigmap(conn.second);
+					if (dest.empty()) continue;
+					// Prefer scope.<inst>.<port> (RTL hierarchy)
 					std::string child_path = scope + "." + cell->name.unescape() + "." +
 					                         port->name.unescape();
 					fstHandle child_id = shared->fst->getHandle(child_path);
-					for (auto bit : sigmap(conn.second)) {
-						if (bit.wire == nullptr) continue;
-						if (child_id != 0)
-							fst_inputs[bit.wire] = child_id;
-						else {
+					if (child_id != 0) {
+						// Full SigSpec so bit-blasted ports get the right FST bit.
+						fst_input_sigs.emplace_back(dest, child_id);
+					} else {
+						// Fall back to parent wire name when inst.port is absent.
+						for (auto bit : dest) {
+							if (bit.wire == nullptr) continue;
 							auto it = fst_handles.find(bit.wire);
 							if (it != fst_handles.end())
 								fst_inputs[bit.wire] = it->second;
@@ -1418,6 +1423,14 @@ struct SimInstance
 	bool setInputs()
 	{
 		bool did_something = false;
+		for (auto &item : fst_input_sigs) {
+			Const value = fst_value(item.second);
+			if (GetSize(value) < GetSize(item.first))
+				continue;
+			if (GetSize(value) > GetSize(item.first))
+				value = value.extract(0, GetSize(item.first));
+			did_something |= set_state(item.first, value);
+		}
 		for(auto &item : fst_inputs) {
 			did_something |= set_state(item.first, fst_value(item.second));
 		}
