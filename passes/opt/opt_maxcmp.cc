@@ -348,6 +348,11 @@ struct OptMaxCmpWorker : CutRegionWorker
 			maps.push_back(vector<int>(N, -1));
 			return maps;
 		}
+		// model() shifts enmask (a uint64_t) by the lane's enable index, so an
+		// enable width past 64 is unrepresentable; refuse it rather than risk
+		// shift-by->=64 UB (callers also cap M <= 64 before we reach here).
+		if (M > 64)
+			return maps;
 		if (M == N) {
 			vector<int> id(N);
 			for (int i = 0; i < N; i++) id[i] = i;
@@ -551,7 +556,11 @@ struct OptMaxCmpWorker : CutRegionWorker
 						if (e >= 0) {
 							auto &eb = enable_buses[e];
 							int M = GetSize(eb.sig);
-							if (M < 1 || (M != N && N % M != 0))
+							// Enable fingerprinting models the mask in a single
+							// uint64_t, so cap the enable width at 64 bits; wider
+							// buses would shift by >=64 in model() (UB) and be
+							// truncated in pack_bits.
+							if (M < 1 || M > 64 || (M != N && N % M != 0))
 								continue;
 							if (eb.sig == vb.sig)
 								continue;
