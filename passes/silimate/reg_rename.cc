@@ -227,6 +227,29 @@ struct RegRenameInstance {
 
 		// Delete the old unused wires
 		module->remove(wireRemoveCache);
+
+		// Flops now drive claimed bits; drop leftover alias assigns onto those
+		// output-port bits so they are not multi-driven (breaks cxxrtl eval).
+		if (!claimed_bits.empty()) {
+			std::vector<RTLIL::SigSig> kept;
+			bool dropped = false;
+			for (auto &conn : module->connections()) {
+				RTLIL::SigSpec new_lhs, new_rhs;
+				for (int i = 0; i < GetSize(conn.first); i++) {
+					SigBit lb = conn.first[i];
+					if (lb.wire && lb.wire->port_output && claimed_bits.count(lb)) {
+						dropped = true;
+						continue;
+					}
+					new_lhs.append(lb);
+					new_rhs.append(conn.second[i]);
+				}
+				if (GetSize(new_lhs))
+					kept.push_back(RTLIL::SigSig(new_lhs, new_rhs));
+			}
+			if (dropped)
+				module->new_connections(kept);
+		}
 	}
 
 	void process_all(dict<std::string, RegInfo> &vcd_reg_widths)
