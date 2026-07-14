@@ -64,6 +64,21 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 	// the product would explode compile/techmap cost.
 	int64_t max_xbar_emit_bits = 1 << 18; // 256K bit-cases (~N=64, nb=32, slot_w=128)
 
+	// ---- gather-rooted anchor ----
+	// Detect an exclusive first-fit that is consumed only as a per-slot data
+	// gather (slot_data[s] = data[the s-th enabled lane]) with no explicit
+	// per-lane rank/dsel bus, optionally buried under guard muxes (an FSM
+	// `case`, a per-entry `hit` mux) and/or with entry-side compaction (the
+	// s-th non-guarded slot reads the s-th enabled lane). Correctness is
+	// gated by the same ConstEval fingerprint used by the dsel path.
+	bool gather_root = true;
+	int max_gather_roots = 32; // per-module cap on gather-root candidates
+	int max_gather_en = 24;    // per-root cap on enable-bus candidates
+	int max_sel_cands = 8;     // per-root cap on entry-select-bus candidates
+	bool dbg_compact = false;  // verbose compaction cut/group diagnostics
+	int min_slots = 2;         // min gather slot count (== exclusive nb)
+	int max_guard_peel = 8;    // max guard-mux levels to descend when peeling
+
 	int regions_rewritten = 0;
 	int cells_added = 0;
 
@@ -2253,6 +2268,7 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 		std::string name;
 		int slots = 0;
 		int slot_w = 0;
+		SigSpec hold_sig; // per-slot FF-Q hold bus (slot-major), for compaction
 	};
 	vector<GatherCand> collect_exclusive_gather_cands(int nb)
 	{
@@ -2266,7 +2282,7 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 				return;
 			if (!seen.insert(s).second)
 				return;
-			cands.push_back({sig, nm, slots, slot_w});
+			cands.push_back({sig, nm, slots, slot_w, SigSpec()});
 		};
 
 		std::map<std::string, vector<std::pair<int, Cell *>>> ff_groups;
@@ -2619,6 +2635,1330 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 		return roots;
 	}
 
+	// ================================================================
+	// Gather-rooted anchor.
+	//
+	// The dsel-rooted path above needs an explicit per-lane rank bus to
+	// anchor on. Some RTL never materializes one: the first-fit result is
+	// consumed only as a per-slot DATA gather (slot_data[s] = data[the s-th
+	// enabled lane in priority order]). Here we anchor directly on the
+	// gather. The scan/emit machinery is shared with the exclusive dsel
+	// path; only the anchor, region reconstruction and fingerprint differ.
+	// ================================================================
+	// A reconstructed per-lane enable factor: `bits` holds the n lane bits
+	// (lane-major, possibly gathered through an affine index/bit stride) and
+	// `neg` marks a term that is inverted before the AND. The lane enable is
+	// en[k] = AND_t (neg_t ? !bits_t[k] : bits_t[k]).
+	struct EnTerm {
+		SigSpec bits;
+		bool neg = false;
+		std::string name;
+	};
+
+	struct GatherRegion {
+		SigSpec en_sig;   // n 1-bit lane enables (the "avail" bus)
+		vector<EnTerm> en_terms; // composite enable factors (compacted path)
+		int n = 0;
+		int nb = 0;       // slot budget == number of gather slots
+		bool msb_first = false;
+		SigSpec attr_sig; // lane-major per-lane payload (n * slot_w bits)
+		int slot_w = 0;
+		vector<FieldKey> attr_keys;
+		SigSpec gather_sig; // the matched slot-major gather output (nb * slot_w)
+		std::string name;
+		pool<Cell *> cut_cells;
+		Cell *anchor = nullptr;
+		// Entry-side compaction: the slots are not read directly by index s,
+		// but through a per-slot "select" bus sel[j] that itself forms a
+		// second exclusive first-fit (the j-th ungated slot reads scan slot
+		// popcount(sel[<j])). Empty when the gather is read by direct index.
+		SigSpec sel_sig;  // nb 1-bit entry-select enables
+		bool sel_compl = false; // active entry == !sel_sig[j] (e.g. sel==hit)
+		bool sel_rev = false; // sel_sig bit for entry j is at index nb-1-j
+		bool ent_msb_first = false; // entry-side scan direction
+		SigSpec hold_sig; // nb*slot_w slot-major hold value (FF-Q) when no lane
+		bool compacted = false;
+		// When true the matched root still carries the per-entry active gate
+		// (inactive entry -> hold), so the model/emit gate the drawn slot by
+		// act[j]. When false the gate is external (already peeled), so an
+		// inactive entry's ungated draw is a don't-care discarded downstream.
+		bool ent_gated = false;
+		// Guard leaves pinned to the allocation-active branch during the
+		// fingerprint (FSM case select, per-slot guard mux selects). Not
+		// re-driven by the rewrite: only the isolated alloc sub-node is.
+		vector<std::pair<SigSpec, Const>> guard_sets;
+		SigSpec hold_q;   // pre-opt $dff hold-mux Q feedback leaves (forced 0)
+	};
+
+	// Deterministic per-(vector,slot) payload for the gather-rooted probe;
+	// distinct namespace from gather_payload so a data leaf that also feeds
+	// the enable cannot alias its own value across the two roles.
+	int gather_root_payload(int vidx, int lane, int a) const
+	{
+		uint64_t x = (uint64_t)(vidx * 0x27d4eb2fu) ^ ((uint64_t)(lane + 1) * 0x165667b1u);
+		x ^= x >> 15;
+		x *= 0xd6e8feb86659fd93ULL;
+		x ^= x >> 32;
+		uint64_t mask = (a >= 31) ? 0x7fffffffULL : ((1ULL << a) - 1);
+		return (int)(x & mask);
+	}
+
+	// Fingerprint the gather-rooted region: with (en, data) forced (and any
+	// guard leaves pinned to the allocation-active branch), slot s of `root`
+	// must equal the payload of the lane that took slot s in the exclusive
+	// first-fit, and 0 when no lane took slot s. Returns true iff every
+	// slot/bit matches on every structured enable vector.
+	bool fingerprint_gather_rooted(ConstEval &ce, const SigSpec &root,
+	                               const GatherRegion &gr, int64_t cone_est,
+	                               const char *name)
+	{
+		int n = gr.n, nb = gr.nb, slot_w = gr.slot_w, a = gr.slot_w;
+		SigSpec en_s = sigmap(gr.en_sig);
+		SigSpec attr_s = sigmap(gr.attr_sig);
+		vector<vector<int>> vs = make_exclusive_vectors(n);
+		int vidx = 0;
+		for (auto &e : vs) {
+			vidx++;
+			ExclResult ar = compute_alloc_exclusive_dir(e, n, nb, gr.msb_first);
+			vector<int> data(n);
+			for (int l = 0; l < n; l++)
+				data[l] = gather_root_payload(vidx, l, a);
+			vector<std::pair<SigSpec, Const>> sets = gr.guard_sets;
+			sets.push_back({en_s, pack_lanes(e, 1)});
+			sets.push_back({attr_s, pack_lanes(data, a)});
+			if (GetSize(gr.hold_q) > 0)
+				sets.push_back({gr.hold_q, Const(State::S0, GetSize(gr.hold_q))});
+			Const res;
+			if (!eval_root(ce, sets, root, res, cone_est)) {
+				log_debug("  gather-root %s: fingerprint eval failed (vidx %d)\n", name, vidx);
+				return false;
+			}
+			for (int s = 0; s < nb; s++) {
+				int leader_lane = -1;
+				for (int l = 0; l < n; l++)
+					if (ar.done[l] && ar.dsel[l] == s) { leader_lane = l; break; }
+				for (int b = 0; b < slot_w; b++) {
+					bool got = (s * slot_w + b < GetSize(res)) &&
+					           res[s * slot_w + b] == State::S1;
+					bool exp = (leader_lane >= 0) && ((data[leader_lane] >> b) & 1);
+					if (got != exp) {
+						log_debug("  gather-root %s: mismatch slot %d bit %d (vidx %d)\n",
+						          name, s, b, vidx);
+						return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	// Entry-side compaction rank: number of active entries strictly before j
+	// in entry priority order. `act[j]` is the per-entry active mask.
+	vector<int> entry_ranks(const vector<int> &act, int nb, bool ent_msb) const
+	{
+		vector<int> erank(nb, 0);
+		int acc = 0;
+		for (int p = 0; p < nb; p++) {
+			int j = ent_msb ? (nb - 1 - p) : p;
+			erank[j] = acc;
+			acc += act[j] ? 1 : 0;
+		}
+		return erank;
+	}
+
+	// Fingerprint the entry-side-compacted gather. With (en, sel, data, hold)
+	// forced (plus any pinned guard leaves), entry-slot j of `root` must equal
+	// the payload of the lane drawn by the popcount(active[<j])-th active
+	// entry, or the FF-Q hold value when that lane-slot has no leader.
+	//   node[j] = leader(erank[j]) exists ? data[leader(erank[j])] : hold[j]
+	// Pseudo-random enable-term bit (deterministic in (vidx, term, lane)).
+	int en_term_bit(int vidx, int t, int k) const
+	{
+		uint64_t x = (uint64_t)(vidx * 0x9e3779b1u) ^ ((uint64_t)(t + 1) * 0x85ebca77u) ^
+		             ((uint64_t)(k + 1) * 0xc2b2ae3du);
+		x ^= x >> 15;
+		x *= 0xd6e8feb86659fd93ULL;
+		x ^= x >> 31;
+		return (int)(x & 1);
+	}
+
+	bool fingerprint_gather_compacted(ConstEval &ce, const SigSpec &root,
+	                                  const GatherRegion &gr, int64_t cone_est,
+	                                  const char *name, bool quick)
+	{
+		int n = gr.n, nb = gr.nb, slot_w = gr.slot_w, a = gr.slot_w;
+		SigSpec en_s = sigmap(gr.en_sig);
+		SigSpec sel_s = sigmap(gr.sel_sig);
+		SigSpec attr_s = sigmap(gr.attr_sig);
+		SigSpec hold_s = sigmap(gr.hold_sig);
+		int T = GetSize(gr.en_terms);
+		int n_struct = 2 + 3 * n; // structured prefix of make_exclusive_vectors
+		vector<vector<int>> lane_vs = make_exclusive_vectors(n);
+		vector<vector<int>> sel_vs = make_exclusive_vectors(nb);
+		// Quick probe: a small structured subset that rejects wrong
+		// (en,sel,direction) combos in a handful of evals before the full sweep.
+		int lane_lim = quick ? std::min(6, GetSize(lane_vs)) : GetSize(lane_vs);
+		int sel_lim = quick ? std::min(6, GetSize(sel_vs)) : GetSize(sel_vs);
+		int vidx = 0;
+		for (int li = 0; li < lane_lim; li++) {
+			vector<int> &e_struct = lane_vs[li];
+			bool rnd = (li >= n_struct); // vary non-primary terms on random tail
+			// Realize the lane enable e[] from the composite terms: the first
+			// term carries the structured pattern, the rest pass (=1) on
+			// structured vectors and are randomized on the tail so each term's
+			// AND role is exercised.
+			vector<vector<int>> tvals(T, vector<int>(n));
+			vector<int> e(n, 1);
+			for (int t = 0; t < T; t++) {
+				bool neg = gr.en_terms[t].neg;
+				for (int k = 0; k < n; k++) {
+					int factor = (t == 0) ? e_struct[k] : (rnd ? en_term_bit(li, t, k) : 1);
+					tvals[t][k] = neg ? (factor ? 0 : 1) : factor;
+					e[k] &= factor;
+				}
+			}
+			ExclResult ar = compute_alloc_exclusive_dir(e, n, nb, gr.msb_first);
+			vector<int> leader(nb, -1);
+			for (int m = 0; m < nb; m++)
+				for (int l = 0; l < n; l++)
+					if (ar.done[l] && ar.dsel[l] == m) {
+						leader[m] = l;
+						break;
+					}
+			for (int si = 0; si < sel_lim; si++) {
+				vector<int> &sv = sel_vs[si];
+				vidx++;
+				vector<int> data(n), hold(nb);
+				for (int l = 0; l < n; l++)
+					data[l] = gather_root_payload(vidx, l, a);
+				for (int j = 0; j < nb; j++)
+					hold[j] = gather_root_payload(vidx, n + j, a);
+				vector<int> act(nb);
+				for (int j = 0; j < nb; j++) {
+					int sj = gr.sel_rev ? (nb - 1 - j) : j;
+					act[j] = gr.sel_compl ? (sv[sj] ? 0 : 1) : (sv[sj] ? 1 : 0);
+				}
+				vector<int> erank = entry_ranks(act, nb, gr.ent_msb_first);
+				vector<std::pair<SigSpec, Const>> sets = gr.guard_sets;
+				if (T == 0)
+					sets.push_back({en_s, pack_lanes(e, 1)});
+				else
+					for (int t = 0; t < T; t++)
+						sets.push_back({sigmap(gr.en_terms[t].bits), pack_lanes(tvals[t], 1)});
+				sets.push_back({sel_s, pack_lanes(sv, 1)});
+				sets.push_back({attr_s, pack_lanes(data, a)});
+				sets.push_back({hold_s, pack_lanes(hold, a)});
+				Const res;
+				if (!eval_root(ce, sets, root, res, cone_est)) {
+					log_debug("  compacted %s: eval failed (vidx %d)\n", name, vidx);
+					return false;
+				}
+				for (int j = 0; j < nb; j++) {
+					int m = erank[j];
+					bool valid = (m >= 0 && m < nb && leader[m] >= 0);
+					int val = (gr.ent_gated && !act[j]) ? hold[j]
+					                                    : (valid ? data[leader[m]] : hold[j]);
+					for (int b = 0; b < slot_w; b++) {
+						bool got = (j * slot_w + b < GetSize(res)) &&
+						           res[j * slot_w + b] == State::S1;
+						bool exp = (val >> b) & 1;
+						if (got != exp) {
+							log_debug("  compacted %s: mismatch entry %d bit %d (vidx %d)\n",
+							          name, j, b, vidx);
+							return false;
+						}
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	// Emit the composed lane-side exclusive scan + identity gather and the
+	// entry-side compaction net for a matched compacted region.
+	//   slot_data[m]  = data[leader lane of lane-slot m]     (identity gather)
+	//   slot_valid[m] = lane-slot m has a leader
+	//   erank[j]      = popcount(active[<j])                 (entry prefix)
+	//   node[j]       = slot_valid[erank[j]] ? slot_data[erank[j]] : hold[j]
+	void emit_gather_compacted(const GatherRegion &gr)
+	{
+		Region rg;
+		rg.n = gr.n;
+		rg.nb = gr.nb;
+		rg.msb_first = gr.msb_first;
+		rg.exclusive = true;
+		rg.exclusive_and2 = false;
+		rg.field_w = clog2_int(gr.nb + 1);
+		rg.anchor = gr.anchor;
+		if (rg.anchor == nullptr)
+			find_anchor_driver(gr.gather_sig, rg.anchor);
+		Cell *anchor = rg.anchor;
+		Cell *cell = anchor;  // NEW_ID2_SUFFIX expands to cell->module->uniquify(...)
+		int cnt_w = clog2_int(rg.nb + 1);
+
+		// Build the lane enable from the composite terms (or use the single
+		// enable bus for the direct path).
+		if (gr.en_terms.empty()) {
+			rg.en_sig = gr.en_sig;
+		} else {
+			SigSpec en_bits;
+			for (int k = 0; k < gr.n; k++) {
+				SigBit e = State::S1;
+				for (auto &term : gr.en_terms) {
+					SigBit v = sigmap(term.bits)[k];
+					if (term.neg)
+						v = emit_not(anchor, v);
+					e = emit_and(anchor, e, v);
+				}
+				en_bits.append(e);
+			}
+			rg.en_sig = en_bits;
+		}
+
+		vector<SigBit> leader, grant;
+		vector<SigSpec> slot, therm;
+		bool use_therm = rg.nb <= max_therm_nb;
+		if (use_therm)
+			emit_scan_exclusive_therm(rg, leader, therm, grant, slot, cnt_w);
+		else
+			emit_scan_exclusive_bin(rg, leader, slot, grant, cnt_w);
+
+		XbarCand xb;
+		xb.sig = gr.gather_sig;
+		xb.name = gr.name;
+		xb.nb = gr.nb;
+		xb.slot_w = gr.slot_w;
+		xb.attr_sig = gr.attr_sig;
+		xb.a = gr.slot_w;
+		xb.identity = true;
+		xb.anchor = anchor;
+		SigSpec slot_data = emit_exclusive_gather(rg, xb, grant, slot, cnt_w,
+		                                          use_therm ? &therm : nullptr);
+
+		vector<SigBit> slot_valid(rg.nb);
+		for (int m = 0; m < rg.nb; m++) {
+			SigSpec terms;
+			for (int l = 0; l < rg.n; l++) {
+				SigBit eqs = use_therm ? emit_therm_eq(anchor, therm[l], m, rg.nb)
+				                       : emit_eq_const(anchor, slot[l], m, cnt_w);
+				terms.append(emit_and(anchor, grant[l], eqs));
+			}
+			slot_valid[m] = emit_reduce_or(anchor, terms);
+		}
+
+		// Entry-side exclusive thermometer prefix over the active mask.
+		SigSpec sel_s = sigmap(gr.sel_sig);
+		vector<SigBit> act(rg.nb);
+		for (int j = 0; j < rg.nb; j++) {
+			int sj = gr.sel_rev ? (rg.nb - 1 - j) : j;
+			act[j] = gr.sel_compl ? emit_not(anchor, sel_s[sj]) : SigBit(sel_s[sj]);
+		}
+		// Entry-side exclusive prefix: thermometer for small nb, else a
+		// saturating binary count so wide nb can't emit O(nb^2) prefix logic.
+		bool ent_use_therm = rg.nb <= max_therm_nb;
+		vector<SigBit> act_p(rg.nb);
+		vector<int> ent_of_p(rg.nb);
+		for (int p = 0; p < rg.nb; p++) {
+			int j = gr.ent_msb_first ? (rg.nb - 1 - p) : p;
+			ent_of_p[p] = j;
+			act_p[p] = act[j];
+		}
+		vector<SigSpec> ent_therm(rg.nb), ent_slot(rg.nb);
+		if (ent_use_therm) {
+			vector<SigSpec> ent_therm_p;
+			emit_prefix_therm_log(anchor, act_p, rg.nb, ent_therm_p);
+			for (int p = 0; p < rg.nb; p++)
+				ent_therm[ent_of_p[p]] = ent_therm_p[p];
+		} else {
+			vector<SigSpec> ent_slot_p;
+			SigSpec ent_total;
+			emit_prefix_count_sat_log(anchor, act_p, cnt_w, rg.nb, ent_slot_p, ent_total);
+			for (int p = 0; p < rg.nb; p++)
+				ent_slot[ent_of_p[p]] = ent_slot_p[p];
+		}
+
+		SigSpec hold_s = sigmap(gr.hold_sig);
+		SigSpec out;
+		for (int j = 0; j < rg.nb; j++) {
+			SigSpec cases, sels;
+			vector<SigBit> valid_terms;
+			for (int m = 0; m < rg.nb; m++) {
+				SigBit eqm = ent_use_therm
+				             ? emit_therm_eq(anchor, ent_therm[j], m, rg.nb)
+				             : emit_eq_const(anchor, ent_slot[j], m, cnt_w);
+				sels.append(eqm);
+				cases.append(slot_data.extract(m * gr.slot_w, gr.slot_w));
+				valid_terms.push_back(emit_and(anchor, eqm, slot_valid[m]));
+			}
+			Wire *dy = module->addWire(NEW_ID2_SUFFIX("ffa_compact_gather"), gr.slot_w);
+			module->addPmux(NEW_ID2_SUFFIX("ffa_compact_gather_pmux"),
+			                Const(0, gr.slot_w), cases, sels, dy, cell_src(anchor));
+			cells_added++;
+			SigBit valid_j = emit_reduce_or(anchor, SigSpec(valid_terms));
+			if (gr.ent_gated)
+				valid_j = emit_and(anchor, valid_j, act[j]);
+			SigSpec hold_j = hold_s.extract(j * gr.slot_w, gr.slot_w);
+			out.append(emit_mux(anchor, hold_j, SigSpec(dy), valid_j));
+		}
+		int dn = connect_driven(gr.gather_sig, out, anchor, "ffa_gather_dangling");
+		claim_region(gr.gather_sig, gr.cut_cells);
+		regions_rewritten++;
+		std::string en_desc;
+		if (gr.en_terms.empty()) {
+			en_desc = log_signal(gr.en_sig);
+		} else {
+			for (auto &t : gr.en_terms) {
+				if (!en_desc.empty())
+					en_desc += "&";
+				en_desc += std::string(t.neg ? "!" : "") + t.name;
+			}
+		}
+		log("  %s: %s <- first_fit_alloc gather-rooted-compacted(en=%s, sel=%s%s, "
+		    "nb=%d, slot_w=%d, lane=%s ent=%s) [%d bit(s) re-driven]\n",
+		    log_id(module), gr.name.c_str(), en_desc.c_str(),
+		    gr.sel_compl ? "!" : "", log_signal(gr.sel_sig), gr.nb, gr.slot_w,
+		    gr.msb_first ? "MSB" : "LSB", gr.ent_msb_first ? "MSB" : "LSB", dn);
+	}
+
+	// A per-lane source recovered from cut leaves. `bits` is lane-major (lane
+	// k occupies [k*w, (k+1)*w)), gathered through the source's affine
+	// index/bit stride so lanes 0..n-1 line up on strided array elements.
+	struct LaneSrc {
+		std::string id;
+		int w = 0;
+		SigSpec bits;
+	};
+
+	// Group cut leaves by source stem into idx -> (offset -> bit). A wire
+	// "base[idx]" (Verific's per-element array lowering) contributes idx; a
+	// plain bus contributes idx -1. Offsets are the bit positions within the
+	// element/bus.
+	std::map<std::string, std::map<int, std::map<int, SigBit>>>
+	group_leaf_srcs(const pool<SigBit> &leaves)
+	{
+		std::map<std::string, std::map<int, std::map<int, SigBit>>> g;
+		for (auto bit : leaves) {
+			if (!bit.wire)
+				continue;
+			std::string base;
+			int idx = -1;
+			if (parse_indexed_port_name(bit.wire, base, idx))
+				g[base][idx][(int)bit.offset] = bit;
+			else
+				g[bit.wire->name.str()][-1][(int)bit.offset] = bit;
+		}
+		return g;
+	}
+
+	// Candidate lane counts implied by the cut leaves. A source spread over
+	// several array indices offers #idx lanes (array-of-lanes); a single
+	// packed element offers #offset lanes (and bit-per-lane divisors).
+	std::set<int> lane_count_candidates(const pool<SigBit> &leaves)
+	{
+		auto g = group_leaf_srcs(leaves);
+		std::set<int> ns;
+		for (auto &kv : g) {
+			int ni = GetSize(kv.second);
+			if (ni > 1) {
+				ns.insert(ni);
+			} else {
+				int no = GetSize(kv.second.begin()->second);
+				ns.insert(no);
+				for (int w = 2; w <= max_gather_w; w++)
+					if (no % w == 0)
+						ns.insert(no / w);
+			}
+		}
+		return ns;
+	}
+
+	// Partition `leaves` into per-source lane groups for n lanes. Each source
+	// is either an array-of-lanes (n strided array indices, w bits each) or a
+	// single packed element whose bit offsets carry the lanes (contiguous, or
+	// bit-strided when 1 bit/lane). Every source must map exactly onto lanes
+	// 0..n-1 in lane-major order.
+	bool partition_lane_srcs(const pool<SigBit> &leaves, int n, vector<LaneSrc> &out)
+	{
+		auto g = group_leaf_srcs(leaves);
+		if (g.empty() || GetSize(g) != count_leaf_srcs(leaves))
+			return false; // an unnamed leaf slipped through
+		for (auto &kv : g) {
+			LaneSrc ls;
+			ls.id = kv.first;
+			auto &byidx = kv.second;
+			vector<int> idxv;
+			for (auto &p : byidx)
+				idxv.push_back(p.first);
+			if (GetSize(idxv) == n) {
+				// array-of-lanes: array index is the lane axis
+				std::sort(idxv.begin(), idxv.end());
+				int stride = (n > 1) ? (idxv[1] - idxv[0]) : 1;
+				if (stride <= 0)
+					return false;
+				vector<int> ov;
+				for (auto &p : byidx[idxv[0]])
+					ov.push_back(p.first);
+				std::sort(ov.begin(), ov.end());
+				int w = GetSize(ov);
+				ls.w = w;
+				for (int k = 0; k < n; k++) {
+					if (idxv[k] != idxv[0] + k * stride)
+						return false;
+					auto &m = byidx[idxv[k]];
+					if (GetSize(m) != w)
+						return false;
+					for (int o = 0; o < w; o++) {
+						auto it = m.find(ov[o]);
+						if (it == m.end())
+							return false;
+						ls.bits.append(it->second);
+					}
+				}
+			} else if (GetSize(idxv) == 1) {
+				// single packed element: bit offset is the lane/bit axis
+				auto &m = byidx[idxv[0]];
+				vector<int> ov;
+				for (auto &p : m)
+					ov.push_back(p.first);
+				std::sort(ov.begin(), ov.end());
+				int total = GetSize(ov);
+				if (total % n != 0)
+					return false;
+				int w = total / n;
+				ls.w = w;
+				if (w == 1) {
+					int stride = (n > 1) ? (ov[1] - ov[0]) : 1;
+					if (stride <= 0)
+						return false;
+					for (int k = 0; k < n; k++) {
+						if (ov[k] != ov[0] + k * stride)
+							return false;
+						ls.bits.append(m[ov[k]]);
+					}
+				} else {
+					for (int i = 0; i < n * w; i++)
+						ls.bits.append(m[ov[i]]); // contiguous lane-major
+				}
+			} else {
+				return false;
+			}
+			out.push_back(ls);
+		}
+		return true;
+	}
+
+	int count_leaf_srcs(const pool<SigBit> &leaves)
+	{
+		std::set<std::string> srcs;
+		for (auto bit : leaves) {
+			if (!bit.wire)
+				return -1;
+			std::string base;
+			int idx = -1;
+			srcs.insert(parse_indexed_port_name(bit.wire, base, idx) ? base
+			                                                          : bit.wire->name.str());
+		}
+		return GetSize(srcs);
+	}
+
+	// Split reconstructed lane sources into the data payload (one wide source
+	// of width slot_w) and the 1-bit enable factors. The enable list may be
+	// empty here when a materialized internal enable bus supplies the enable;
+	// the caller checks the combined term count.
+	bool classify_srcs(const vector<LaneSrc> &srcs, int n, int slot_w,
+	                   SigSpec &attr_sig, vector<EnTerm> &en_terms)
+	{
+		vector<const LaneSrc *> wide, thin;
+		for (auto &s : srcs) {
+			if (slot_w > 1 && s.w == slot_w)
+				wide.push_back(&s);
+			else if (s.w == 1)
+				thin.push_back(&s);
+			else
+				return false; // unexpected width -> not this shape
+		}
+		if (slot_w > 1) {
+			if (GetSize(wide) != 1)
+				return false;
+			attr_sig = wide[0]->bits;
+		} else {
+			// slot_w == 1: no separate wide payload; the gather value is the
+			// done bit (all-ones data). Use a constant payload.
+			attr_sig = SigSpec(State::S1, n);
+		}
+		for (auto s : thin)
+			en_terms.push_back({s->bits, false, s->id});
+		return true;
+	}
+
+	// Try to match an entry-side-compacted gather rooted at `root_in`: the nb
+	// slots are read by an entry-side compaction (entry j draws lane-slot
+	// popcount(active[<j])) rather than by direct index. `hold_in` is the
+	// per-slot FF-Q hold value used when no lane is granted. The lane enable
+	// and (strided) data payload are reconstructed from the cut leaves.
+	bool match_gather_compacted(const SigSpec &root_in, int slots, int slot_w,
+	                            const std::string &name, const SigSpec &hold_in,
+	                            GatherRegion &out)
+	{
+		if (GetSize(hold_in) != slots * slot_w)
+			return false;
+		SigSpec root = sigmap(root_in);
+		SigSpec hold = sigmap(hold_in);
+		if (!sig_bus_ok(hold))
+			return false;
+		pool<Cell *> cone_cells;
+		pool<SigBit> leaf_bits;
+		int max_cone = std::max(512, max_n * 256);
+		int max_leaf = max_n * max_n + max_n * 64 + max_n;
+		if (!get_cone(root, cone_cells, leaf_bits, max_cone, max_leaf))
+			return false;
+		if (cone_cells.empty())
+			return false;
+		bool has_mux = false;
+		for (auto c : cone_cells)
+			if (c->type.in(ID($mux), ID($pmux), ID($bmux))) {
+				has_mux = true;
+				break;
+			}
+		if (!has_mux)
+			return false;
+		// The hold value must be a cone leaf (the register Q feedback), not a
+		// signal recomputed inside the allocation cone.
+		pool<SigBit> hold_bits = sig_bit_pool(hold);
+		for (auto bit : hold_bits) {
+			Cell *drv = bit_to_driver.at(bit, nullptr);
+			if (drv != nullptr && cone_cells.count(drv))
+				return false;
+		}
+
+		vector<BusCand> sel_cands =
+		    collect_gather_en_cands(cone_cells, slots, slots, max_sel_cands);
+		if (dbg_compact)
+			log("    [dbg] try compacted %s (slots=%d, slot_w=%d): cone %d cells, %d sel\n",
+			    name.c_str(), slots, slot_w, GetSize(cone_cells), GetSize(sel_cands));
+		log_debug("ffa: compacted %s (slots=%d, slot_w=%d): cone %d cells, %d sel\n",
+		          name.c_str(), slots, slot_w, GetSize(cone_cells), GetSize(sel_cands));
+		ConstEval ce(module);
+		int64_t cone_est = GetSize(cone_cells) + 16;
+		// Leaves left after removing sel+hold(+en-bus) hold the remaining lane
+		// enable factors and the (possibly strided) data payload; bound how
+		// many we reconstruct.
+		int extra_cap = max_n * (max_gather_w + 4) + 64;
+
+		for (auto &sel : sel_cands) {
+			if (walk_exhausted() || eval_exhausted())
+				break;
+			pool<SigBit> sel_bits = sig_bit_pool(sel.sig);
+			bool overlap = false;
+			for (auto b : sel_bits)
+				if (hold_bits.count(b)) {
+					overlap = true;
+					break;
+				}
+			if (overlap)
+				continue;
+			pool<SigBit> base0 = sel_bits;
+			for (auto b : hold_bits)
+				base0.insert(b);
+			pool<SigBit> extra0;
+			if (!cut_cone_extra_leaves(root, base0, GetSize(cone_cells) + 32, extra0,
+			                           extra_cap)) {
+				if (dbg_compact)
+					log("    [dbg] sel=%s: cut_extra failed\n", sel.name.c_str());
+				continue;
+			}
+			if (extra0.empty())
+				continue;
+			// Lane count comes from the strided data / primary enable leaves
+			// left after removing sel+hold (a derived enable bus is cut below).
+			std::set<int> n_cands = lane_count_candidates(extra0);
+			for (int n : n_cands) {
+				if (n < min_n || n > max_n || slots > n)
+					continue;
+				// Emit-size guard: the compacted net is ~n*nb*slot_w (lane scan +
+				// identity gather) plus nb*nb*slot_w (entry pmux). Skip candidates
+				// whose emit would explode compile/techmap cost.
+				int64_t emit_bits =
+				    (int64_t)(n + slots) * slots * slot_w;
+				if (emit_bits > max_xbar_emit_bits)
+					continue;
+				if (walk_exhausted() || eval_exhausted())
+					break;
+				// A derived enable factor (e.g. `!lhit`) is not a cut leaf;
+				// pin one width-n internal bus as a boundary so it acts as a
+				// forceable per-lane enable term. ei == -1 covers designs whose
+				// enable factors are all primary/strided leaves.
+				vector<BusCand> eb_cands =
+				    collect_internal_buses(cone_cells, n, max_gather_en);
+				if (dbg_compact) {
+					std::string s;
+					for (auto &e : eb_cands)
+						s += " " + e.name;
+					log("    [dbg] sel=%s n=%d: %d internal en-bus(es):%s\n", sel.name.c_str(),
+					    n, GetSize(eb_cands), s.c_str());
+				}
+				for (int ei = -1; ei < GetSize(eb_cands); ei++) {
+					if (eval_exhausted())
+						break;
+					const BusCand *eb = (ei >= 0) ? &eb_cands[ei] : nullptr;
+					pool<SigBit> base = base0;
+					SigSpec eb_sig;
+					if (eb != nullptr) {
+						eb_sig = sigmap(eb->sig);
+						pool<SigBit> ebb = sig_bit_pool(eb_sig);
+						bool clash = false;
+						for (auto b : ebb)
+							if (base.count(b)) {
+								clash = true;
+								break;
+							}
+						if (clash)
+							continue;
+						for (auto b : ebb)
+							base.insert(b);
+					}
+					pool<SigBit> extra;
+					if (eb == nullptr)
+						extra = extra0;
+					else if (!cut_cone_extra_leaves(root, base, GetSize(cone_cells) + 32, extra,
+					                                extra_cap))
+						continue;
+					if (extra.empty())
+						continue;
+					vector<LaneSrc> srcs;
+					if (!partition_lane_srcs(extra, n, srcs)) {
+						if (dbg_compact && eb == nullptr) {
+							std::string s;
+							auto g = group_leaf_srcs(extra);
+							for (auto &kv : g) {
+								int no = GetSize(kv.second.begin()->second);
+								s += stringf(" %s[#idx=%d,off=%d]", kv.first.c_str(),
+								             GetSize(kv.second), no);
+							}
+							log("    [dbg] sel=%s n=%d: partition failed (%d extra):%s\n",
+							    sel.name.c_str(), n, GetSize(extra), s.c_str());
+						}
+						continue;
+					}
+					SigSpec attr_sig;
+					vector<EnTerm> en_terms;
+					if (!classify_srcs(srcs, n, slot_w, attr_sig, en_terms))
+						continue;
+					// A cut-leaf enable bus (eb) may be flattened in the opposite
+					// lane order from the array-index-ordered strided leaves; try
+					// both so per-lane alignment can be recovered.
+					SigSpec eb_rev_sig;
+					if (eb != nullptr) {
+						for (int k = n - 1; k >= 0; k--)
+							eb_rev_sig.append(eb_sig[k]);
+						en_terms.insert(en_terms.begin(), {eb_sig, false, eb->name});
+					}
+					int T = GetSize(en_terms);
+					if (T < 1 || T > 4)
+						continue;
+					if (dbg_compact)
+						log("    [dbg] %s: sel=%s n=%d eb=%s: partition ok, %d src, T=%d, "
+						    "slot_w=%d\n",
+						    name.c_str(), sel.name.c_str(), n, eb ? eb->name.c_str() : "-",
+						    GetSize(srcs), T, slot_w);
+					pool<SigBit> allowed = base;
+					for (auto &s : srcs)
+						for (auto b : sig_bit_pool(s.bits))
+							allowed.insert(b);
+					pool<SigBit> hit;
+					pool<Cell *> cut_cells;
+					if (!cut_cone_walk(root, allowed, GetSize(cone_cells) + 32, &hit, &cut_cells,
+					                   &allowed, &leaf_bits, &cone_cells))
+						continue;
+					bool conflict = false;
+					for (auto b : allowed) {
+						Cell *drv = bit_to_driver.at(b, nullptr);
+						if (drv != nullptr && cut_cells.count(drv)) {
+							conflict = true;
+							break;
+						}
+					}
+					if (conflict)
+						continue;
+
+					int ebr_lim = (eb != nullptr) ? 2 : 1;
+					for (int ebr = 0; ebr < ebr_lim; ebr++)
+						for (int pol = 0; pol < (1 << T); pol++)
+							for (int lane_dir = 0; lane_dir < 2; lane_dir++)
+								for (int ent_dir = 0; ent_dir < 2; ent_dir++)
+									for (int cpl = 0; cpl < 2; cpl++)
+										for (int srev = 0; srev < 2; srev++)
+											for (int eg = 0; eg < 2; eg++) {
+												if (eval_exhausted())
+													break;
+												GatherRegion gr;
+												gr.n = n;
+												gr.nb = slots;
+												gr.msb_first = (lane_dir == 1);
+												gr.attr_sig = attr_sig;
+												gr.slot_w = slot_w;
+												gr.sel_sig = sel.sig;
+												gr.sel_compl = (cpl == 1);
+												gr.sel_rev = (srev == 1);
+												gr.ent_msb_first = (ent_dir == 1);
+												gr.hold_sig = hold;
+												gr.compacted = true;
+												gr.ent_gated = (eg == 1);
+												gr.en_terms = en_terms;
+												if (eb != nullptr)
+													gr.en_terms[0].bits = (ebr == 1) ? eb_rev_sig : eb_sig;
+												for (int t = 0; t < T; t++)
+													gr.en_terms[t].neg = (pol >> t) & 1;
+												if (!fingerprint_gather_compacted(ce, root, gr, cone_est,
+												                                  name.c_str(), true))
+													continue;
+												if (!fingerprint_gather_compacted(ce, root, gr, cone_est,
+												                                  name.c_str(), false))
+													continue;
+												gr.gather_sig = root;
+												gr.name = name;
+												gr.cut_cells = cut_cells;
+												find_anchor_driver(root, gr.anchor);
+												out = gr;
+												log_debug("  compacted %s: MATCH n=%d nb=%d lane=%s "
+												          "ent=%s sel=%s%s%s eb=%s%s terms=%d gated=%d\n",
+												          name.c_str(), n, slots,
+												          gr.msb_first ? "MSB" : "LSB",
+												          gr.ent_msb_first ? "MSB" : "LSB",
+												          gr.sel_compl ? "!" : "",
+												          gr.sel_rev ? "rev " : "", sel.name.c_str(),
+												          eb ? eb->name.c_str() : "-",
+												          (eb && ebr == 1) ? "(rev)" : "", T,
+												          gr.ent_gated);
+												return true;
+											}
+				}
+			}
+		}
+		return false;
+	}
+
+	// Candidate gather roots: per-slot flop-D packs grouped by register stem,
+	// plus split-array buses of equal-width elements. Unlike
+	// collect_exclusive_gather_cands this is not gated on a known nb: the
+	// slot count comes from the candidate itself.
+	vector<GatherCand> collect_gather_roots()
+	{
+		// Map each FF D bit to its aligned Q bit, so a gather root that feeds a
+		// register (directly or as a split-array slice) can recover the per-slot
+		// hold value the allocation branch keeps when no lane is granted.
+		dict<SigBit, SigBit> ffd_to_q;
+		for (auto c : module->cells()) {
+			if (!is_gather_ff(c) || !c->hasPort(ID::D) || !c->hasPort(ID::Q))
+				continue;
+			SigSpec d = c->getPort(ID::D), q = c->getPort(ID::Q);
+			int w = std::min(GetSize(d), GetSize(q));
+			for (int i = 0; i < w; i++)
+				ffd_to_q[sigmap(d[i])] = sigmap(q[i]);
+		}
+		auto derive_hold = [&](const SigSpec &sig) -> SigSpec {
+			SigSpec s = sigmap(sig);
+			SigSpec hold;
+			for (auto bit : s) {
+				auto it = ffd_to_q.find(bit);
+				if (it == ffd_to_q.end())
+					return SigSpec();
+				hold.append(it->second);
+			}
+			return hold;
+		};
+
+		vector<GatherCand> cands;
+		pool<SigSpec> seen;
+		auto add = [&](const SigSpec &sig, const std::string &nm, int slots, int slot_w,
+		               SigSpec hold = SigSpec()) {
+			if (slots < min_slots || slots > max_n)
+				return;
+			if (slot_w < 1 || slot_w > max_gather_w)
+				return;
+			SigSpec s = sigmap(sig);
+			if (!sig_bus_ok(s) || root_claimed(s))
+				return;
+			if (!seen.insert(s).second)
+				return;
+			if (hold.empty())
+				hold = derive_hold(sig);
+			GatherCand gc;
+			gc.sig = sig;
+			gc.name = nm;
+			gc.slots = slots;
+			gc.slot_w = slot_w;
+			gc.hold_sig = hold;
+			cands.push_back(gc);
+		};
+
+		std::map<std::string, vector<std::pair<int, Cell *>>> ff_groups;
+		for (auto c : module->cells()) {
+			if (!is_gather_ff(c) || !c->hasPort(ID::Q) || !c->hasPort(ID::D))
+				continue;
+			SigSpec q = c->getPort(ID::Q);
+			if (q.empty() || !q[0].wire)
+				continue;
+			std::string base;
+			int idx = -1;
+			if (parse_indexed_port_name(q[0].wire, base, idx))
+				ff_groups[base].push_back({idx, c});
+		}
+		for (auto &kv : ff_groups) {
+			auto entries = kv.second;
+			std::sort(entries.begin(), entries.end(),
+			          [](const std::pair<int, Cell *> &a, const std::pair<int, Cell *> &b) {
+			              return a.first < b.first;
+			          });
+			int slot_w = GetSize(entries.front().second->getPort(ID::D));
+			bool ok = slot_w >= 1;
+			for (auto &e : entries)
+				if (GetSize(e.second->getPort(ID::D)) != slot_w) {
+					ok = false;
+					break;
+				}
+			if (!ok)
+				continue;
+			// Contiguous index run only (compaction indexes slots by position).
+			bool contiguous = true;
+			for (int i = 0; i < GetSize(entries); i++)
+				if (entries[i].first != entries.front().first + i) {
+					contiguous = false;
+					break;
+				}
+			if (!contiguous)
+				continue;
+			SigSpec pack, qpack;
+			for (auto &e : entries) {
+				pack.append(e.second->getPort(ID::D));
+				qpack.append(e.second->getPort(ID::Q));
+			}
+			// The per-slot FF-Q is the hold value the allocation branch keeps
+			// when no lane is granted (needed to model entry-side compaction).
+			add(pack, stringf("gather_ff[%s]", kv.first.c_str()), GetSize(entries),
+			    slot_w, qpack);
+		}
+
+		vector<Wire *> all;
+		for (auto w : module->wires())
+			all.push_back(w);
+		for (auto &bus : collect_split_buses(all)) {
+			if (bus.entries < min_slots || bus.entries > max_n)
+				continue;
+			if (bus.elem_width < 1 || bus.elem_width > max_gather_w)
+				continue;
+			add(bus.sig, bus.name, bus.entries, bus.elem_width);
+		}
+
+		if (GetSize(cands) > max_gather_roots)
+			cands.resize(max_gather_roots);
+		return cands;
+	}
+
+	// Collect width-w 1-bit-lane buses from a gather cone, for w in [lo, hi].
+	// Shallow (leaf-side) buses first, then capped. Used both for the lane
+	// enable bus (w in [min_n, max_n]) and the entry-select bus (w == nb).
+	vector<BusCand> collect_gather_en_cands(const pool<Cell *> &cone_cells, int lo,
+	                                        int hi, int cap)
+	{
+		pool<SigBit> internal_bits;
+		for (auto c : cone_cells)
+			for (auto &conn : c->connections())
+				if (c->output(conn.first))
+					for (auto bit : sigmap(conn.second))
+						if (bit.wire)
+							internal_bits.insert(bit);
+		auto all_internal_or_input = [&](const SigSpec &s) {
+			for (auto bit : s)
+				if (!bit.wire || (!internal_bits.count(bit) &&
+				                  bit_to_driver.at(bit, nullptr) != nullptr))
+					return false;
+			return true;
+		};
+		vector<BusCand> cands;
+		pool<SigSpec> seen;
+		auto add = [&](const SigSpec &sig, const std::string &nm) {
+			SigSpec s = sigmap(sig);
+			int w = GetSize(s);
+			if (w < lo || w > hi)
+				return;
+			if (!sig_bus_ok(s) || !all_internal_or_input(s))
+				return;
+			if (!seen.insert(s).second)
+				return;
+			cands.push_back({s, nm, w, 1});
+		};
+		for (auto w : module->wires())
+			add(SigSpec(w), w->name.str());
+		for (auto &bus : collect_cone_split_buses(internal_bits))
+			if (bus.elem_width == 1)
+				add(bus.sig, bus.name);
+
+		dict<Cell *, int> depth = compute_cone_depths(cone_cells);
+		auto bus_depth = [&](const SigSpec &s) {
+			int d = 0;
+			for (auto bit : s) {
+				Cell *drv = bit_to_driver.at(bit, nullptr);
+				if (drv != nullptr)
+					d = std::max(d, depth.at(drv, 1 << 30));
+			}
+			return d;
+		};
+		std::stable_sort(cands.begin(), cands.end(),
+		                 [&](const BusCand &a, const BusCand &b) {
+		                     return bus_depth(a.sig) < bus_depth(b.sig);
+		                 });
+		if (GetSize(cands) > cap)
+			cands.resize(cap);
+		return cands;
+	}
+	vector<BusCand> collect_gather_en_cands(const pool<Cell *> &cone_cells)
+	{
+		return collect_gather_en_cands(cone_cells, min_n, max_n, max_gather_en);
+	}
+
+	// Width-w buses driven entirely inside the cone (combinational, not FF-Q
+	// or primary input). These are the derived enable factors (e.g. `lhit`)
+	// that the composite-enable matcher pins as a forceable cut boundary;
+	// FF-Q/primary enables are handled as leaves via the extra-leaf partition.
+	// Sorted deepest-first, since a derived enable sits above the raw inputs.
+	vector<BusCand> collect_internal_buses(const pool<Cell *> &cone_cells, int w, int cap)
+	{
+		pool<SigBit> internal_bits;
+		for (auto c : cone_cells)
+			for (auto &conn : c->connections())
+				if (c->output(conn.first))
+					for (auto bit : sigmap(conn.second))
+						if (bit.wire)
+							internal_bits.insert(bit);
+		auto all_internal = [&](const SigSpec &s) {
+			for (auto bit : s)
+				if (!bit.wire || !internal_bits.count(bit))
+					return false;
+			return true;
+		};
+		vector<BusCand> cands;
+		pool<SigSpec> seen;
+		auto add = [&](const SigSpec &sig, const std::string &nm) {
+			SigSpec s = sigmap(sig);
+			if (GetSize(s) != w || !sig_bus_ok(s) || !all_internal(s))
+				return;
+			if (!seen.insert(s).second)
+				return;
+			cands.push_back({s, nm, w, 1});
+		};
+		for (auto wr : module->wires())
+			add(SigSpec(wr), wr->name.str());
+		for (auto &bus : collect_cone_split_buses(internal_bits))
+			if (bus.elem_width == 1)
+				add(bus.sig, bus.name);
+		dict<Cell *, int> depth = compute_cone_depths(cone_cells);
+		auto bus_depth = [&](const SigSpec &s) {
+			int d = 0;
+			for (auto bit : s) {
+				Cell *drv = bit_to_driver.at(bit, nullptr);
+				if (drv != nullptr)
+					d = std::max(d, depth.at(drv, 1 << 30));
+			}
+			return d;
+		};
+		std::stable_sort(cands.begin(), cands.end(),
+		                 [&](const BusCand &a, const BusCand &b) {
+		                     return bus_depth(a.sig) > bus_depth(b.sig);
+		                 });
+		if (GetSize(cands) > cap)
+			cands.resize(cap);
+		return cands;
+	}
+
+	// Try to match a direct-index exclusive identity gather rooted at the
+	// slot-major bus `root_in` (slot s read by index s; no guards). Fills
+	// `out`. `slots`/`slot_w` describe the bus layout; `name` is for logs.
+	bool match_gather_core(const SigSpec &root_in, int slots, int slot_w,
+	                       const std::string &name, GatherRegion &out)
+	{
+		SigSpec root = sigmap(root_in);
+		pool<Cell *> cone_cells;
+		pool<SigBit> leaf_bits;
+		int max_cone = std::max(512, max_n * 256);
+		int max_leaf = max_n * max_n + max_n * 64 + max_n;
+		if (!get_cone(root, cone_cells, leaf_bits, max_cone, max_leaf))
+			return false;
+		if (cone_cells.empty())
+			return false;
+
+		// Cheap structural pre-filter: a gather is a mux/priority network.
+		bool has_mux = false;
+		for (auto c : cone_cells)
+			if (c->type.in(ID($mux), ID($pmux), ID($bmux))) {
+				has_mux = true;
+				break;
+			}
+		if (!has_mux)
+			return false;
+
+		vector<BusCand> en_cands = collect_gather_en_cands(cone_cells);
+		log_debug("ffa: gather-root %s (slots=%d, slot_w=%d): cone %d cells, %d en cand(s)\n",
+		          name.c_str(), slots, slot_w, GetSize(cone_cells), GetSize(en_cands));
+		ConstEval ce(module);
+		int64_t cone_est = GetSize(cone_cells) + 16;
+
+		for (auto &en : en_cands) {
+			if (walk_exhausted() || eval_exhausted())
+				break;
+			int n = GetSize(en.sig);
+			if (slots > n)
+				continue;
+			pool<SigBit> en_bits = sig_bit_pool(en.sig);
+			pool<SigBit> extra;
+			if (!cut_cone_extra_leaves(root, en_bits, GetSize(cone_cells) + 32, extra,
+			                           n * slot_w + 8))
+				continue;
+			SigSpec attr_sig;
+			int a = 0;
+			vector<FieldKey> attr_keys;
+			if (!group_lane_field(extra, n, attr_sig, a, &attr_keys))
+				continue;
+			if (a != slot_w)
+				continue;
+			pool<SigBit> allowed = en_bits;
+			for (auto bit : sig_bit_pool(attr_sig))
+				allowed.insert(bit);
+			pool<SigBit> hit;
+			pool<Cell *> cut_cells;
+			if (!cut_cone_walk(root, allowed, GetSize(cone_cells) + 32, &hit, &cut_cells,
+			                   &allowed, &leaf_bits, &cone_cells))
+				continue;
+			bool conflict = false;
+			for (auto bit : allowed) {
+				Cell *drv = bit_to_driver.at(bit, nullptr);
+				if (drv != nullptr && cut_cells.count(drv)) {
+					conflict = true;
+					break;
+				}
+			}
+			if (conflict)
+				continue;
+
+			for (int dir = 0; dir < 2; dir++) {
+				if (eval_exhausted())
+					break;
+				GatherRegion gr;
+				gr.en_sig = en.sig;
+				gr.n = n;
+				gr.nb = slots;
+				gr.msb_first = (dir == 1);
+				gr.attr_sig = attr_sig;
+				gr.slot_w = slot_w;
+				gr.attr_keys = attr_keys;
+				if (!fingerprint_gather_rooted(ce, root, gr, cone_est, name.c_str()))
+					continue;
+				gr.gather_sig = root;
+				gr.name = name;
+				gr.cut_cells = cut_cells;
+				find_anchor_driver(root, gr.anchor);
+				out = gr;
+				log_debug("  gather-root %s: MATCH n=%d nb=%d %s slot_w=%d en=%s\n",
+				          name.c_str(), n, gr.nb, gr.msb_first ? "MSB" : "LSB",
+				          slot_w, en.name.c_str());
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// ---- guard-mux peeling ----
+	// A gather is often buried under guard muxes (an FSM `case`, a per-slot
+	// `hit` mux) that select between the allocation branch and a hold/update
+	// branch. We descend into the mux inputs (a bounded DFS) and re-attempt
+	// the clean match on each inner sub-node; the guards stay intact and only
+	// the isolated allocation branch is re-driven.
+	int max_peel_attempts = 64;
+
+	int mux_num_sides(Cell *mux)
+	{
+		if (mux->type == ID($mux))
+			return 2;
+		if (mux->type == ID($bmux))
+			return 1 << GetSize(mux->getPort(ID::S)); // 2^S_WIDTH case entries
+		return 1 + GetSize(mux->getPort(ID::S)); // $pmux: default + cases
+	}
+
+	SigBit mux_side_bit(Cell *mux, int ypos, int side)
+	{
+		SigSpec a = mux->getPort(ID::A);
+		if (mux->type == ID($mux))
+			return side == 0 ? a[ypos] : mux->getPort(ID::B)[ypos];
+		if (mux->type == ID($bmux)) {
+			int ow = GetSize(mux->getPort(ID::Y));
+			return a[side * ow + ypos]; // A holds 2^S_WIDTH aligned case slices
+		}
+		if (side == 0)
+			return a[ypos]; // $pmux default branch
+		int ow = GetSize(a);
+		return mux->getPort(ID::B)[(side - 1) * ow + ypos];
+	}
+
+	// Build the candidate child buses one guard level below `node_bus`. The
+	// lowered netlist bit-blasts guards, so each output bit is driven by its
+	// own 1-bit $mux/$pmux (possibly with a per-slot select, e.g. hit[j]). For
+	// each descent side we collect that side's aligned input bit of every
+	// output bit's driver, preserving slot-major bit order. All bits must use
+	// muxes of the same arity, else the guard level is not uniform.
+	bool peel_children(const SigSpec &node_bus, vector<SigSpec> &children)
+	{
+		int nbits = GetSize(node_bus);
+		if (nbits < 1)
+			return false;
+		vector<Cell *> drv(nbits);
+		vector<int> yofs(nbits);
+		int nsides = -1;
+		for (int i = 0; i < nbits; i++) {
+			SigBit sb = sigmap(node_bus[i]);
+			Cell *c = bit_to_driver.at(sb, nullptr);
+			if (c == nullptr || !c->type.in(ID($mux), ID($pmux), ID($bmux)))
+				return false;
+			SigSpec y = sigmap(c->getPort(ID::Y));
+			int pos = -1;
+			for (int q = 0; q < GetSize(y); q++)
+				if (y[q] == sb) {
+					pos = q;
+					break;
+				}
+			if (pos < 0)
+				return false;
+			int ns = mux_num_sides(c);
+			if (ns > 9)
+				return false; // over-wide $pmux: too many descent options
+			if (nsides < 0)
+				nsides = ns;
+			else if (nsides != ns)
+				return false;
+			drv[i] = c;
+			yofs[i] = pos;
+		}
+		if (nsides < 2)
+			return false;
+		for (int side = 0; side < nsides; side++) {
+			SigSpec child;
+			for (int i = 0; i < nbits; i++)
+				child.append(mux_side_bit(drv[i], yofs[i], side));
+			children.push_back(child);
+		}
+		return true;
+	}
+
+	// Peel guard muxes (bounded DFS) and match the clean gather at each inner
+	// node. The first matching sub-node wins; guards above it are untouched.
+	bool match_gather_peeled(const GatherCand &cand, GatherRegion &out)
+	{
+		vector<std::pair<SigSpec, int>> stack;
+		stack.push_back({sigmap(cand.sig), 0});
+		pool<SigSpec> visited;
+		int attempts = 0;
+		while (!stack.empty()) {
+			if (walk_exhausted() || eval_exhausted())
+				break;
+			auto nd = stack.back();
+			stack.pop_back();
+			SigSpec bus = nd.first;
+			int depth = nd.second;
+			if (!visited.insert(bus).second)
+				continue;
+			if (root_claimed(bus))
+				continue;
+			if (attempts++ >= max_peel_attempts)
+				break;
+			std::string nm = depth == 0 ? cand.name
+			                            : stringf("%s/peel%d", cand.name.c_str(), depth);
+			if (match_gather_core(bus, cand.slots, cand.slot_w, nm, out))
+				return true;
+			// Entry-side-compacted gather (needs a per-slot FF-Q hold value).
+			if (GetSize(cand.hold_sig) == cand.slots * cand.slot_w &&
+			    match_gather_compacted(bus, cand.slots, cand.slot_w, nm, cand.hold_sig, out))
+				return true;
+			if (depth >= max_guard_peel)
+				continue;
+			vector<SigSpec> children;
+			if (!peel_children(bus, children))
+				continue;
+			log_debug("  peel %s depth %d: %d child branch(es)\n",
+			          cand.name.c_str(), depth, GetSize(children));
+			for (auto &ch : children)
+				if (sig_bus_ok(ch))
+					stack.push_back({sigmap(ch), depth + 1});
+		}
+		return false;
+	}
+
+	// Emit the log-depth exclusive scan + identity gather for a matched
+	// gather-rooted region and re-drive the gather output.
+	void emit_gather_region(const GatherRegion &gr)
+	{
+		Region rg;
+		rg.n = gr.n;
+		rg.nb = gr.nb;
+		rg.msb_first = gr.msb_first;
+		rg.exclusive = true;
+		rg.exclusive_and2 = false;
+		rg.en_sig = gr.en_sig;
+		rg.field_w = clog2_int(gr.nb + 1);
+		rg.anchor = gr.anchor;
+		if (rg.anchor == nullptr)
+			find_anchor_driver(gr.gather_sig, rg.anchor);
+
+		int cnt_w = clog2_int(rg.nb + 1);
+		vector<SigBit> leader, grant;
+		vector<SigSpec> slot, therm;
+		bool use_therm = rg.nb <= max_therm_nb;
+		if (use_therm)
+			emit_scan_exclusive_therm(rg, leader, therm, grant, slot, cnt_w);
+		else
+			emit_scan_exclusive_bin(rg, leader, slot, grant, cnt_w);
+
+		XbarCand xb;
+		xb.sig = gr.gather_sig;
+		xb.name = gr.name;
+		xb.nb = gr.nb;
+		xb.slot_w = gr.slot_w;
+		xb.attr_sig = gr.attr_sig;
+		xb.a = gr.slot_w;
+		xb.identity = true;
+		xb.anchor = rg.anchor;
+
+		SigSpec new_g = emit_exclusive_gather(rg, xb, grant, slot, cnt_w,
+		                                      use_therm ? &therm : nullptr);
+		int dn = connect_driven(gr.gather_sig, new_g, rg.anchor, "ffa_gather_dangling");
+		claim_region(gr.gather_sig, gr.cut_cells);
+		regions_rewritten++;
+		log("  %s: %s <- first_fit_alloc gather-rooted(en=%s, nb=%d, slot_w=%d, %s) "
+		    "[%d bit(s) re-driven]\n",
+		    log_id(module), gr.name.c_str(), log_signal(gr.en_sig), gr.nb, gr.slot_w,
+		    gr.msb_first ? "MSB-first" : "LSB-first", dn);
+	}
+
+	void run_gather_rooted()
+	{
+		if (!gather_root || module->has_processes_warn())
+			return;
+		vector<GatherCand> roots = collect_gather_roots();
+		log_debug("ffa: %d gather-root candidate(s) in %s\n", GetSize(roots), log_id(module));
+		for (auto &cand : roots) {
+			if (walk_exhausted() || eval_exhausted())
+				break;
+			if (root_claimed(cand.sig))
+				continue;
+			GatherRegion gr;
+			if (match_gather_peeled(cand, gr)) {
+				if (gr.compacted)
+					emit_gather_compacted(gr);
+				else
+					emit_gather_region(gr);
+				continue;
+			}
+		}
+	}
+
 	void run()
 	{
 		if (module->has_processes_warn())
@@ -2757,6 +4097,11 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 				    xb.name.c_str(), xb.nb, xb.slot_w, rg.n, xb.a, dn);
 			}
 		}
+
+		// Gather-rooted regions (no explicit dsel bus). Run after the dsel
+		// path so an exclusive gather that IS reachable from a dsel root is
+		// claimed there first and not re-attempted here.
+		run_gather_rooted();
 	}
 };
 
@@ -2793,8 +4138,24 @@ struct OptFirstFitAllocPass : public Pass {
 		log("emitted as linear $add cascades so a subsequent opt_parallel_prefix\n");
 		log("pass rebuilds them into shared log-depth networks.\n");
 		log("\n");
+		log("A first-fit allocator consumed only as a per-slot data gather (with\n");
+		log("no explicit per-lane rank bus), optionally buried under guard muxes\n");
+		log("(an FSM case / per-entry hit mux) or read through an entry-side\n");
+		log("compaction, is recognized by a gather-rooted anchor and rewritten\n");
+		log("into the same log-depth exclusive scan + identity gather.\n");
+		log("\n");
 		log("    -min-width N, -max-width N\n");
 		log("        lane-count range to consider (default 4..64).\n");
+		log("\n");
+		log("    -no-gather-root\n");
+		log("        disable the gather-rooted anchor (dsel-rooted matching only).\n");
+		log("\n");
+		log("    -gather-root\n");
+		log("        re-enable the gather-rooted anchor (default).\n");
+		log("\n");
+		log("    -max-therm N\n");
+		log("        max slot count for the thermometer prefix encoding (default 8);\n");
+		log("        wider scans fall back to a saturating binary count.\n");
 		log("\n");
 		log("    -walk-budget N, -eval-budget N, -attempt-budget N\n");
 		log("        per-module work limits for the candidate search.\n");
@@ -2806,15 +4167,34 @@ struct OptFirstFitAllocPass : public Pass {
 		log_header(design, "Executing OPT_FIRST_FIT_ALLOC pass (greedy first-fit allocator rewrite).\n");
 
 		int min_n = 4, max_n = 64;
+		int max_therm_nb = -1;
 		int64_t walk_budget = -1, eval_budget = -1, attempt_budget = -1;
+		bool gather_root = true;
+		bool dbg_compact = false;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
+			if (args[argidx] == "-no-gather-root" || args[argidx] == "-no_gather_root") {
+				gather_root = false;
+				continue;
+			}
+			if (args[argidx] == "-gather-root" || args[argidx] == "-gather_root") {
+				gather_root = true;
+				continue;
+			}
+			if (args[argidx] == "-dbg-compact") {
+				dbg_compact = true;
+				continue;
+			}
 			if ((args[argidx] == "-min-width" || args[argidx] == "-min_width") && argidx + 1 < args.size()) {
 				min_n = std::stoi(args[++argidx]);
 				continue;
 			}
 			if ((args[argidx] == "-max-width" || args[argidx] == "-max_width") && argidx + 1 < args.size()) {
 				max_n = std::stoi(args[++argidx]);
+				continue;
+			}
+			if ((args[argidx] == "-max-therm" || args[argidx] == "-max_therm") && argidx + 1 < args.size()) {
+				max_therm_nb = std::stoi(args[++argidx]);
 				continue;
 			}
 			if ((args[argidx] == "-walk-budget" || args[argidx] == "-walk_budget") && argidx + 1 < args.size()) {
@@ -2839,6 +4219,10 @@ struct OptFirstFitAllocPass : public Pass {
 			OptFirstFitAllocWorker worker(module);
 			worker.min_n = min_n;
 			worker.max_n = max_n;
+			worker.gather_root = gather_root;
+			worker.dbg_compact = dbg_compact;
+			if (max_therm_nb >= 0)
+				worker.max_therm_nb = max_therm_nb;
 			if (walk_budget > 0)
 				worker.walk_budget = walk_budget;
 			if (eval_budget > 0)
