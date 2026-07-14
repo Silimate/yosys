@@ -1,0 +1,299 @@
+# Tests for opt_first_fit_alloc, focused on the gather-rooted anchor (first-fit
+# allocators consumed only as a per-slot data gather, with no explicit dsel
+# index), plus a regression check that the original split-root path still fires.
+#
+# Each positive case has two blocks:
+#   * self-equivalence (equiv_opt -assert), which builds a gold/gate miter and
+#     discharges it by induction, so it covers the sequential FF-Q feedback, and
+#   * "rewrite fired" via logger -expect on the pass's own per-region log line.
+# The pass runs `clean -purge` after a successful rewrite (which strips the
+# private ffa_* marker nets), so the log line - not a wire-name select - is the
+# durable, path-discriminating proof that the intended anchor fired:
+#     clean identity gather : "... gather-rooted(en=...)"
+#     compacted gather      : "... gather-rooted-compacted(en=...)"
+#     original split-root    : "... first_fit_alloc(en=..., exclusive ...)"
+# Near-miss negatives assert "Rewrote 0 first-fit alloc region(s)".
+
+# ---------------------------------------------------------------------------
+# Clean identity gather (LSB-first, no guard, no compaction)
+# ---------------------------------------------------------------------------
+log -header "Basic identity gather: self-equivalence"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_basic.sv
+verific -import opt_first_fit_alloc_basic
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc
+design -reset
+log -pop
+
+log -header "Basic identity gather: rewrite fired (clean gather-root path)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_basic.sv
+verific -import opt_first_fit_alloc_basic
+proc; opt_clean
+logger -expect log "gather-rooted.en=" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Entry-side compaction + FF-Q hold (materialised static enable)
+# ---------------------------------------------------------------------------
+log -header "Entry-side compaction: self-equivalence"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_compact.sv
+verific -import opt_first_fit_alloc_compact
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc
+design -reset
+log -pop
+
+log -header "Entry-side compaction: rewrite fired (compacted path)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_compact.sv
+verific -import opt_first_fit_alloc_compact
+proc; opt_clean
+logger -expect log "gather-rooted-compacted" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+# -max-therm 0 forces both the lane- and entry-side prefix scans onto the
+# saturating binary count fallback (instead of the thermometer), which is the
+# path taken when nb > max_therm_nb. Must still rewrite and stay equivalent.
+log -header "Entry-side compaction: binary prefix fallback (-max-therm 0)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_compact.sv
+verific -import opt_first_fit_alloc_compact
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc -max-therm 0
+design -reset
+log -pop
+
+log -header "Entry-side compaction: binary prefix fallback rewrite fired"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_compact.sv
+verific -import opt_first_fit_alloc_compact
+proc; opt_clean
+logger -expect log "gather-rooted-compacted" 1
+opt_first_fit_alloc -max-therm 0
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Composite negated enable (!lhit & req_vld) + stride-2 data + compaction
+# (track_texel-shaped, lhit exposed as a port)
+# ---------------------------------------------------------------------------
+log -header "Strided composite enable: self-equivalence"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_strided.sv
+verific -import opt_first_fit_alloc_strided
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc
+design -reset
+log -pop
+
+log -header "Strided composite enable: rewrite fired (compacted path)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_strided.sv
+verific -import opt_first_fit_alloc_strided
+proc; opt_clean
+logger -expect log "gather-rooted-compacted" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Internally derived lhit (composite-enable eb path)
+# ---------------------------------------------------------------------------
+log -header "Derived lhit composite enable: self-equivalence"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_derived.sv
+verific -import opt_first_fit_alloc_derived
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc
+design -reset
+log -pop
+
+log -header "Derived lhit composite enable: rewrite fired (compacted path)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_derived.sv
+verific -import opt_first_fit_alloc_derived
+proc; opt_clean
+logger -expect log "gather-rooted-compacted" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Shared match[j][k] driving both hitv and lhit (closest track_texel mirror:
+# sel_rev + eb_rev + ent_gated reconstruction)
+# ---------------------------------------------------------------------------
+log -header "Shared match (track_texel mirror): self-equivalence"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_match.sv
+verific -import opt_first_fit_alloc_match
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc
+design -reset
+log -pop
+
+log -header "Shared match (track_texel mirror): rewrite fired (compacted path)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_match.sv
+verific -import opt_first_fit_alloc_match
+proc; opt_clean
+logger -expect log "gather-rooted-compacted" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# FSM `case` guard + per-entry hit branch peeling (S_ACCUM arm)
+# ---------------------------------------------------------------------------
+log -header "FSM/hit guard peeling: self-equivalence"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_fsm.sv
+verific -import opt_first_fit_alloc_fsm
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc
+design -reset
+log -pop
+
+log -header "FSM/hit guard peeling: rewrite fired (compacted path)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_fsm.sv
+verific -import opt_first_fit_alloc_fsm
+proc; opt_clean
+logger -expect log "gather-rooted-compacted" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Scaling stress (N=32 lanes -> NB=4 slots, compacted path): must rewrite and
+# stay within budget (no pathological blowup).
+# ---------------------------------------------------------------------------
+log -header "Scaling N=32: self-equivalence"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_scale.sv
+verific -import opt_first_fit_alloc_scale32
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc
+design -reset
+log -pop
+
+log -header "Scaling N=32: rewrite fired within budget"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_scale.sv
+verific -import opt_first_fit_alloc_scale32
+proc; opt_clean
+logger -expect log "gather-rooted-compacted" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# dsel-rooted regression: the original split-root path must keep firing (its
+# own log line, NOT a gather-rooted one), so the gather-root anchor does not
+# steal or double-claim dsel-shaped designs.
+# ---------------------------------------------------------------------------
+log -header "dsel-rooted: self-equivalence"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_dsel.sv
+verific -import opt_first_fit_alloc_dsel
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc
+design -reset
+log -pop
+
+log -header "dsel-rooted: original split-root path fires"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_dsel.sv
+verific -import opt_first_fit_alloc_dsel
+proc; opt_clean
+logger -expect log "first_fit_alloc.en=.en, exclusive" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Yosys read_verilog -sv frontend variant (packed flat ports): the gather-root
+# anchor must fire on the yosys lowering (memory -> registers) too.
+# ---------------------------------------------------------------------------
+log -header "Yosys frontend: self-equivalence"
+log -push
+design -reset
+read_verilog -sv opt_first_fit_alloc_frontend.v
+hierarchy -top opt_first_fit_alloc_yosys_basic
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc
+design -reset
+log -pop
+
+log -header "Yosys frontend: rewrite fired (clean gather-root path)"
+log -push
+design -reset
+read_verilog -sv opt_first_fit_alloc_frontend.v
+hierarchy -top opt_first_fit_alloc_yosys_basic
+proc; opt_clean
+logger -expect log "gather-rooted.en=" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Near-miss negatives: structurally gather-like but NOT a first-fit, so the
+# ConstEval fingerprint must reject them (no region rewritten).
+# ---------------------------------------------------------------------------
+log -header "Negative: diagonal masked read (reads own lane, not j-th enabled)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_negative.sv
+verific -import opt_first_fit_alloc_diag
+proc; opt_clean
+logger -expect log "Rewrote 0 first-fit alloc" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
+
+log -header "Negative: non-exclusive draw (no lpick chaining -> not first-fit)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_negative.sv
+verific -import opt_first_fit_alloc_noexcl
+proc; opt_clean
+logger -expect log "Rewrote 0 first-fit alloc" 1
+opt_first_fit_alloc
+logger -check-expected
+design -reset
+log -pop
