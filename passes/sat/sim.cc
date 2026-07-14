@@ -356,16 +356,25 @@ struct SimInstance
 				dirty_children.insert(new SimInstance(shared, scope + "." + cell->name.unescape(), mod, cell, this));
 			}
 
-			// With -bb, source each parent-side child-output wire from VCD
+			// With -bb, source each parent-side child-output wire from VCD.
+			// Prefer scope.<inst>.<port> (RTL hierarchy); fall back to the parent
+			// wire name when that path is absent.
 			if (mod != nullptr && shared->blackbox_children && shared->fst) {
 				for (auto &conn : cell->connections()) {
 					Wire *port = mod->wire(conn.first);
 					if (!port || !port->port_output) continue;
+					std::string child_path = scope + "." + cell->name.unescape() + "." +
+					                         port->name.unescape();
+					fstHandle child_id = shared->fst->getHandle(child_path);
 					for (auto bit : sigmap(conn.second)) {
 						if (bit.wire == nullptr) continue;
-						auto it = fst_handles.find(bit.wire);
-						if (it != fst_handles.end())
-							fst_inputs[bit.wire] = it->second;
+						if (child_id != 0)
+							fst_inputs[bit.wire] = child_id;
+						else {
+							auto it = fst_handles.find(bit.wire);
+							if (it != fst_handles.end())
+								fst_inputs[bit.wire] = it->second;
+						}
 					}
 				}
 			}
