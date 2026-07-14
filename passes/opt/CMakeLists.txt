@@ -92,6 +92,10 @@ yosys_pass(opt_argmax
 	opt_argmax.cc
 )
 
+yosys_pass(opt_maxcmp
+	opt_maxcmp.cc
+)
+
 yosys_pass(opt_parallel_prefix
 	opt_parallel_prefix.cc
 )

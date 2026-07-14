@@ -1,0 +1,193 @@
+# Tests for opt_maxcmp.
+#
+# For every design: equiv_opt -assert proves the rewrite is equivalent, and a
+# structural check confirms the pass fired (positive) or left the design alone
+# (negative). Designs are combinational with packed-vector ports so the
+# built-in Verilog frontend works and the miter is a plain combinational check.
+
+# ---- helper macro via a repeated pattern ---------------------------------
+# positive: prove equivalence, then confirm a maxcmp region was emitted.
+
+log -header "maxcmp_scatter: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_scatter
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_scatter: rewrite fired"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_scatter
+proc; opt
+opt_maxcmp
+select -assert-min 1 c:*_maxcmp_*
+
+log -header "maxcmp_bcast: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_bcast
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_bcast: rewrite fired"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_bcast
+proc; opt
+opt_maxcmp
+select -assert-min 1 c:*_maxcmp_*
+
+log -header "maxcmp_tree: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_tree
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_tree: rewrite fired"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_tree
+proc; opt
+opt_maxcmp
+select -assert-min 1 c:*_maxcmp_*
+
+log -header "maxcmp_min: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_min
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_min: rewrite fired"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_min
+proc; opt
+opt_maxcmp
+select -assert-min 1 c:*_maxcmp_*
+
+log -header "maxcmp_allbelow: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_allbelow
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_allbelow: rewrite fired"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_allbelow
+proc; opt
+opt_maxcmp
+select -assert-min 1 c:*_maxcmp_*
+
+log -header "maxcmp_allabove: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_allabove
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_allabove: rewrite fired"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_allabove
+proc; opt
+opt_maxcmp
+select -assert-min 1 c:*_maxcmp_*
+
+log -header "maxcmp_signed: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_signed
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_signed: rewrite fired"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_signed
+proc; opt
+opt_maxcmp
+select -assert-min 1 c:*_maxcmp_*
+
+log -header "maxcmp_sigthr: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_sigthr
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_sigthr: rewrite fired"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_sigthr
+proc; opt
+opt_maxcmp
+select -assert-min 1 c:*_maxcmp_*
+
+log -header "maxcmp_multibit: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_multibit
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_multibit: rewrite fired (both ports)"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_multibit
+proc; opt
+opt_maxcmp
+select -assert-min 2 c:*_maxcmp_cmp*
+
+log -header "maxcmp_wide: equivalence"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_wide
+proc; opt
+equiv_opt -assert opt_maxcmp
+
+log -header "maxcmp_wide: rewrite fired"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top maxcmp_wide
+proc; opt
+opt_maxcmp
+select -assert-min 1 c:*_maxcmp_*
+
+# ---- negatives: must not rewrite (and stay equivalent trivially) ----------
+
+log -header "nomatch_sum: no rewrite"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top nomatch_sum
+proc; opt
+opt_maxcmp
+select -assert-count 0 c:*_maxcmp_*
+
+log -header "nomatch_xor: no rewrite"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top nomatch_xor
+proc; opt
+opt_maxcmp
+select -assert-count 0 c:*_maxcmp_*
+
+log -header "nomatch_xorcmp: no rewrite"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top nomatch_xorcmp
+proc; opt
+opt_maxcmp
+select -assert-count 0 c:*_maxcmp_*
+
+log -header "nomatch_range: no rewrite"
+design -reset
+read_verilog -sv opt_maxcmp.sv
+hierarchy -top nomatch_range
+proc; opt
+opt_maxcmp
+select -assert-count 0 c:*_maxcmp_*
