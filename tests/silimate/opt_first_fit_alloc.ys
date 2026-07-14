@@ -64,6 +64,31 @@ logger -check-expected
 design -reset
 log -pop
 
+# -max-therm 0 forces both the lane- and entry-side prefix scans onto the
+# saturating binary count fallback (instead of the thermometer), which is the
+# path taken when nb > max_therm_nb. Must still rewrite and stay equivalent.
+log -header "Entry-side compaction: binary prefix fallback (-max-therm 0)"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_compact.sv
+verific -import opt_first_fit_alloc_compact
+proc; opt_clean
+equiv_opt -assert opt_first_fit_alloc -max-therm 0
+design -reset
+log -pop
+
+log -header "Entry-side compaction: binary prefix fallback rewrite fired"
+log -push
+design -reset
+verific -sv opt_first_fit_alloc_compact.sv
+verific -import opt_first_fit_alloc_compact
+proc; opt_clean
+logger -expect log "gather-rooted-compacted" 1
+opt_first_fit_alloc -max-therm 0
+logger -check-expected
+design -reset
+log -pop
+
 # ---------------------------------------------------------------------------
 # Composite negated enable (!lhit & req_vld) + stride-2 data + compaction
 # (track_texel-shaped, lhit exposed as a port)

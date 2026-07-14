@@ -2282,7 +2282,7 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 				return;
 			if (!seen.insert(s).second)
 				return;
-			cands.push_back({sig, nm, slots, slot_w});
+			cands.push_back({sig, nm, slots, slot_w, SigSpec()});
 		};
 
 		std::map<std::string, vector<std::pair<int, Cell *>>> ff_groups;
@@ -2893,7 +2893,7 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 		if (rg.anchor == nullptr)
 			find_anchor_driver(gr.gather_sig, rg.anchor);
 		Cell *anchor = rg.anchor;
-		Cell *cell = anchor;
+		Cell *cell = anchor;  // NEW_ID2_SUFFIX expands to cell->module->uniquify(...)
 		int cnt_w = clog2_int(rg.nb + 1);
 
 		// Build the lane enable from the composite terms (or use the single
@@ -2953,6 +2953,9 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 			int sj = gr.sel_rev ? (rg.nb - 1 - j) : j;
 			act[j] = gr.sel_compl ? emit_not(anchor, sel_s[sj]) : SigBit(sel_s[sj]);
 		}
+		// Entry-side exclusive prefix: thermometer for small nb, else a
+		// saturating binary count so wide nb can't emit O(nb^2) prefix logic.
+		bool ent_use_therm = rg.nb <= max_therm_nb;
 		vector<SigBit> act_p(rg.nb);
 		vector<int> ent_of_p(rg.nb);
 		for (int p = 0; p < rg.nb; p++) {
@@ -2960,11 +2963,19 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 			ent_of_p[p] = j;
 			act_p[p] = act[j];
 		}
-		vector<SigSpec> ent_therm_p;
-		emit_prefix_therm_log(anchor, act_p, rg.nb, ent_therm_p);
-		vector<SigSpec> ent_therm(rg.nb);
-		for (int p = 0; p < rg.nb; p++)
-			ent_therm[ent_of_p[p]] = ent_therm_p[p];
+		vector<SigSpec> ent_therm(rg.nb), ent_slot(rg.nb);
+		if (ent_use_therm) {
+			vector<SigSpec> ent_therm_p;
+			emit_prefix_therm_log(anchor, act_p, rg.nb, ent_therm_p);
+			for (int p = 0; p < rg.nb; p++)
+				ent_therm[ent_of_p[p]] = ent_therm_p[p];
+		} else {
+			vector<SigSpec> ent_slot_p;
+			SigSpec ent_total;
+			emit_prefix_count_sat_log(anchor, act_p, cnt_w, rg.nb, ent_slot_p, ent_total);
+			for (int p = 0; p < rg.nb; p++)
+				ent_slot[ent_of_p[p]] = ent_slot_p[p];
+		}
 
 		SigSpec hold_s = sigmap(gr.hold_sig);
 		SigSpec out;
@@ -2972,7 +2983,9 @@ struct OptFirstFitAllocWorker : CutRegionWorker {
 			SigSpec cases, sels;
 			vector<SigBit> valid_terms;
 			for (int m = 0; m < rg.nb; m++) {
-				SigBit eqm = emit_therm_eq(anchor, ent_therm[j], m, rg.nb);
+				SigBit eqm = ent_use_therm
+				             ? emit_therm_eq(anchor, ent_therm[j], m, rg.nb)
+				             : emit_eq_const(anchor, ent_slot[j], m, cnt_w);
 				sels.append(eqm);
 				cases.append(slot_data.extract(m * gr.slot_w, gr.slot_w));
 				valid_terms.push_back(emit_and(anchor, eqm, slot_valid[m]));
@@ -4137,6 +4150,13 @@ struct OptFirstFitAllocPass : public Pass {
 		log("    -no-gather-root\n");
 		log("        disable the gather-rooted anchor (dsel-rooted matching only).\n");
 		log("\n");
+		log("    -gather-root\n");
+		log("        re-enable the gather-rooted anchor (default).\n");
+		log("\n");
+		log("    -max-therm N\n");
+		log("        max slot count for the thermometer prefix encoding (default 8);\n");
+		log("        wider scans fall back to a saturating binary count.\n");
+		log("\n");
 		log("    -walk-budget N, -eval-budget N, -attempt-budget N\n");
 		log("        per-module work limits for the candidate search.\n");
 		log("\n");
@@ -4147,6 +4167,7 @@ struct OptFirstFitAllocPass : public Pass {
 		log_header(design, "Executing OPT_FIRST_FIT_ALLOC pass (greedy first-fit allocator rewrite).\n");
 
 		int min_n = 4, max_n = 64;
+		int max_therm_nb = -1;
 		int64_t walk_budget = -1, eval_budget = -1, attempt_budget = -1;
 		bool gather_root = true;
 		bool dbg_compact = false;
@@ -4170,6 +4191,10 @@ struct OptFirstFitAllocPass : public Pass {
 			}
 			if ((args[argidx] == "-max-width" || args[argidx] == "-max_width") && argidx + 1 < args.size()) {
 				max_n = std::stoi(args[++argidx]);
+				continue;
+			}
+			if ((args[argidx] == "-max-therm" || args[argidx] == "-max_therm") && argidx + 1 < args.size()) {
+				max_therm_nb = std::stoi(args[++argidx]);
 				continue;
 			}
 			if ((args[argidx] == "-walk-budget" || args[argidx] == "-walk_budget") && argidx + 1 < args.size()) {
@@ -4196,6 +4221,8 @@ struct OptFirstFitAllocPass : public Pass {
 			worker.max_n = max_n;
 			worker.gather_root = gather_root;
 			worker.dbg_compact = dbg_compact;
+			if (max_therm_nb >= 0)
+				worker.max_therm_nb = max_therm_nb;
 			if (walk_budget > 0)
 				worker.walk_budget = walk_budget;
 			if (eval_budget > 0)
