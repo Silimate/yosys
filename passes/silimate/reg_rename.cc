@@ -85,7 +85,7 @@ struct RegRenameInstance {
 		for (auto cell : module->cells()) {
 
 			// Skip non-register cells
-			if (!RTLIL::builtin_ff_cell_types().count(cell->type)) {
+			if (!StaticCellTypes::categories.is_ff(cell->type)) {
 				continue;
 			}
 
