@@ -25,6 +25,7 @@
 #include <deque>
 #include <dlfcn.h>
 #include <fstream>
+#include <iomanip>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN

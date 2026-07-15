@@ -20,6 +20,7 @@
 
 #include "kernel/fstdata.h"
 #include "kernel/yosys.h"
+#include "kernel/newcelltypes.h"
 #include "passes/silimate/reg_rename.h"
 
 USING_YOSYS_NAMESPACE
