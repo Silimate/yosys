@@ -1347,8 +1347,7 @@ struct SimInstance
 			// Overwrite simulation register state with the ground truth
 			did_something |= set_state(wire, vcd_val);
 		}
-		// Sync memory contents from the waveform each cycle too; otherwise they
-		// only get initial state and drift when write timing differs (e.g. `#1`).
+		// Sync memory contents from the waveform each cycle.
 		for (auto cell : module->cells())
 		{
 			if (cell->is_mem_cell()) {
@@ -1619,6 +1618,30 @@ struct SimWorker : SimShared
 				log("\n-- ph3 --\n");
 
 			t->update_ph3(gclk);
+		}
+	}
+
+	// Combo settle with sequential state frozen (no $ff/$dff/mem clock latch).
+	void settle_frozen()
+	{
+		for (auto t : tops) {
+			while (1)
+			{
+				if (debug)
+					log("\n-- ph1 (settle) --\n");
+
+				t->update_ph1();
+
+				if (debug)
+					log("\n-- ph2 (settle) --\n");
+
+				if (!t->update_ph2(false, true))
+					break;
+			}
+
+			if (debug)
+				log("\n-- ph3 (settle) --\n");
+			t->update_ph3(false);
 		}
 	}
 
@@ -1899,11 +1922,9 @@ struct SimWorker : SimShared
 				bool diverged = false;
 				for (auto t : tops)
 					diverged |= t->setRegisters(time);
-				// Propagate combinationally only, freezing all FF state
-				// (gclk=false skips $ff, stable_past_update=true skips the $dff
-				// clock-edge latch). A normal step here would re-latch FFs from D
-				// and revert the register overwrite we just applied.
-				if (diverged) update(false, /*stable_past_update=*/true);
+				// Combo-only settle so we don't re-latch FFs from D and undo
+				// the overwrite we just applied.
+				if (diverged) settle_frozen();
 			}
 
 			register_output_step(time);
