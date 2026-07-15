@@ -730,7 +730,6 @@ struct CxxrtlSimPass : public Pass {
 		double cycles_total = ((double)duration * real_timescale / clk_period) * 2.0;
 
 		dict<Wire*, SignalActivity*> wire_activities;
-		IdString unused_bits_id = RTLIL::escape_id("unused_bits");
 		int unresolved_names = 0;
 		for (auto &sig : signals) {
 			if (sig.wire == nullptr) {
@@ -745,20 +744,12 @@ struct CxxrtlSimPass : public Pass {
 			Wire *wire = wire_activity.first;
 			SignalActivity &act = *wire_activity.second;
 			int width = std::min(wire->width, (int)act.width);
-			pool<int> unused_bits;
-			if (wire->has_attribute(unused_bits_id)) {
-				std::stringstream bits(wire->get_string_attribute(unused_bits_id));
-				int bit;
-				while (bits >> bit)
-					unused_bits.insert(bit);
-			}
+			// Count every bit (including unused/dead output bits) so activity/duty
+			// matches the sim pass ground truth, which does not special-case them.
 			std::string activity_str, duty_str;
 			for (int i = 0; i < width; i++) {
-				double activity = 0.0, duty = 0.0;
-				if (!unused_bits.count(i)) {
-					activity = cycles_total > 0 ? act.toggle_counts[i] / cycles_total : 0.0;
-					duty = duration > 0 ? (double)act.high_times[i] / (double)duration : 0.0;
-				}
+				double activity = cycles_total > 0 ? act.toggle_counts[i] / cycles_total : 0.0;
+				double duty = duration > 0 ? (double)act.high_times[i] / (double)duration : 0.0;
 				total_activity += activity;
 				total_duty += duty;
 				total_bits++;

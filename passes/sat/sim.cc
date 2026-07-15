@@ -570,12 +570,12 @@ struct SimInstance
 		}
 	}
 
-	void set_memory_state(IdString memid, Const addr, Const data)
+	bool set_memory_state(IdString memid, Const addr, Const data)
 	{
-		set_memory_state(memid, addr.as_int(), data);
+		return set_memory_state(memid, addr.as_int(), data);
 	}
 
-	void set_memory_state(IdString memid, int addr, Const data)
+	bool set_memory_state(IdString memid, int addr, Const data)
 	{
 		auto &state = mem_database[memid];
 
@@ -589,6 +589,8 @@ struct SimInstance
 
 		if (dirty)
 			dirty_memories.insert(memid);
+
+		return dirty;
 	}
 
 	void set_memory_state_bit(IdString memid, int offset, State data)
@@ -1345,6 +1347,16 @@ struct SimInstance
 			// Overwrite simulation register state with the ground truth
 			did_something |= set_state(wire, vcd_val);
 		}
+		// Sync memory contents from the waveform each cycle too; otherwise they
+		// only get initial state and drift when write timing differs (e.g. `#1`).
+		for (auto cell : module->cells())
+		{
+			if (cell->is_mem_cell()) {
+				std::string memid = cell->parameters.at(ID::MEMID).decode_string();
+				for (auto &data : fst_memories[memid])
+					did_something |= set_memory_state(memid, Const(data.first), fst_value(data.second));
+			}
+		}
 		// Apply to all child modules; mark dirty so parents re-propagate.
 		for (auto child : children)
 			if (child.second->setRegisters(time)) {
@@ -1583,7 +1595,7 @@ struct SimWorker : SimShared
 		}
 	}
 
-	void update(bool gclk)
+	void update(bool gclk, bool stable_past_update = false)
 	{
 		if (gclk)
 			step += 1;
@@ -1599,7 +1611,7 @@ struct SimWorker : SimShared
 				if (debug)
 					log("\n-- ph2 --\n");
 
-				if (!t->update_ph2(gclk))
+				if (!t->update_ph2(gclk, stable_past_update))
 					break;
 			}
 
@@ -1887,7 +1899,11 @@ struct SimWorker : SimShared
 				bool diverged = false;
 				for (auto t : tops)
 					diverged |= t->setRegisters(time);
-				if (diverged) update(true);
+				// Propagate combinationally only, freezing all FF state
+				// (gclk=false skips $ff, stable_past_update=true skips the $dff
+				// clock-edge latch). A normal step here would re-latch FFs from D
+				// and revert the register overwrite we just applied.
+				if (diverged) update(false, /*stable_past_update=*/true);
 			}
 
 			register_output_step(time);
