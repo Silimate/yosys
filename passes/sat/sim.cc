@@ -247,6 +247,8 @@ struct SimInstance
 	dict<std::pair<IdString, int>, Const> trace_mem_init_database;
 	dict<Wire*, fstHandle> fst_handles;
 	dict<Wire*, fstHandle> fst_inputs;
+	// Bit-accurate FST drives for -bb child outputs
+	std::vector<std::pair<SigSpec, fstHandle>> fst_input_sigs;
 	dict<IdString, dict<int,fstHandle>> fst_memories;
 
 	// Helper function to set wire state from array element handles
@@ -356,21 +358,24 @@ struct SimInstance
 				dirty_children.insert(new SimInstance(shared, scope + "." + cell->name.unescape(), mod, cell, this));
 			}
 
-			// With -bb, source each parent-side child-output wire from VCD.
-			// Prefer scope.<inst>.<port> (RTL hierarchy); fall back to the parent
-			// wire name when that path is absent.
+			// With -bb, source each parent-side child-output from VCD.
 			if (mod != nullptr && shared->blackbox_children && shared->fst) {
 				for (auto &conn : cell->connections()) {
 					Wire *port = mod->wire(conn.first);
 					if (!port || !port->port_output) continue;
+					SigSpec dest = sigmap(conn.second);
+					if (dest.empty()) continue;
+					// Prefer scope.<inst>.<port> (RTL hierarchy)
 					std::string child_path = scope + "." + cell->name.unescape() + "." +
 					                         port->name.unescape();
 					fstHandle child_id = shared->fst->getHandle(child_path);
-					for (auto bit : sigmap(conn.second)) {
-						if (bit.wire == nullptr) continue;
-						if (child_id != 0)
-							fst_inputs[bit.wire] = child_id;
-						else {
+					if (child_id != 0) {
+						// Full SigSpec so bit-blasted ports get the right FST bit.
+						fst_input_sigs.emplace_back(dest, child_id);
+					} else {
+						// Fall back to parent wire name when inst.port is absent.
+						for (auto bit : dest) {
+							if (bit.wire == nullptr) continue;
 							auto it = fst_handles.find(bit.wire);
 							if (it != fst_handles.end())
 								fst_inputs[bit.wire] = it->second;
@@ -565,12 +570,12 @@ struct SimInstance
 		}
 	}
 
-	void set_memory_state(IdString memid, Const addr, Const data)
+	bool set_memory_state(IdString memid, Const addr, Const data)
 	{
-		set_memory_state(memid, addr.as_int(), data);
+		return set_memory_state(memid, addr.as_int(), data);
 	}
 
-	void set_memory_state(IdString memid, int addr, Const data)
+	bool set_memory_state(IdString memid, int addr, Const data)
 	{
 		auto &state = mem_database[memid];
 
@@ -584,6 +589,8 @@ struct SimInstance
 
 		if (dirty)
 			dirty_memories.insert(memid);
+
+		return dirty;
 	}
 
 	void set_memory_state_bit(IdString memid, int offset, State data)
@@ -1309,8 +1316,12 @@ struct SimInstance
 			}
 		}
 
+		// Mark children dirty when their state changes so parents re-propagate.
 		for (auto child : children)
-			did_something |= child.second->setInitState();
+			if (child.second->setInitState()) {
+				dirty_children.insert(child.second);
+				did_something = true;
+			}
 		return did_something;
 	}
 
@@ -1336,9 +1347,21 @@ struct SimInstance
 			// Overwrite simulation register state with the ground truth
 			did_something |= set_state(wire, vcd_val);
 		}
-		// Apply to all child modules
+		// Sync memory contents from the waveform each cycle.
+		for (auto cell : module->cells())
+		{
+			if (cell->is_mem_cell()) {
+				std::string memid = cell->parameters.at(ID::MEMID).decode_string();
+				for (auto &data : fst_memories[memid])
+					did_something |= set_memory_state(memid, Const(data.first), fst_value(data.second));
+			}
+		}
+		// Apply to all child modules; mark dirty so parents re-propagate.
 		for (auto child : children)
-			did_something |= child.second->setRegisters(time);
+			if (child.second->setRegisters(time)) {
+				dirty_children.insert(child.second);
+				did_something = true;
+			}
 		return did_something;
 	}
 
@@ -1418,6 +1441,14 @@ struct SimInstance
 	bool setInputs()
 	{
 		bool did_something = false;
+		for (auto &item : fst_input_sigs) {
+			Const value = fst_value(item.second);
+			if (GetSize(value) < GetSize(item.first))
+				continue;
+			if (GetSize(value) > GetSize(item.first))
+				value = value.extract(0, GetSize(item.first));
+			did_something |= set_state(item.first, value);
+		}
 		for(auto &item : fst_inputs) {
 			did_something |= set_state(item.first, fst_value(item.second));
 		}
@@ -1587,6 +1618,30 @@ struct SimWorker : SimShared
 				log("\n-- ph3 --\n");
 
 			t->update_ph3(gclk);
+		}
+	}
+
+	// Combo settle with sequential state frozen (no $ff/$dff/mem clock latch).
+	void settle_frozen()
+	{
+		for (auto t : tops) {
+			while (1)
+			{
+				if (debug)
+					log("\n-- ph1 (settle) --\n");
+
+				t->update_ph1();
+
+				if (debug)
+					log("\n-- ph2 (settle) --\n");
+
+				if (!t->update_ph2(false, true))
+					break;
+			}
+
+			if (debug)
+				log("\n-- ph3 (settle) --\n");
+			t->update_ph3(false);
 		}
 	}
 
@@ -1867,7 +1922,9 @@ struct SimWorker : SimShared
 				bool diverged = false;
 				for (auto t : tops)
 					diverged |= t->setRegisters(time);
-				if (diverged) update(true);
+				// Combo-only settle so we don't re-latch FFs from D and undo
+				// the overwrite we just applied.
+				if (diverged) settle_frozen();
 			}
 
 			register_output_step(time);
