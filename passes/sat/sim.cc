@@ -1594,7 +1594,7 @@ struct SimWorker : SimShared
 		}
 	}
 
-	void update(bool gclk, bool stable_past_update = false)
+	void update(bool gclk)
 	{
 		if (gclk)
 			step += 1;
@@ -1610,7 +1610,7 @@ struct SimWorker : SimShared
 				if (debug)
 					log("\n-- ph2 --\n");
 
-				if (!t->update_ph2(gclk, stable_past_update))
+				if (!t->update_ph2(gclk))
 					break;
 			}
 
