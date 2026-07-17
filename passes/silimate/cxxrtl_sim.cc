@@ -171,6 +171,10 @@ struct CxxrtlSimPass : public Pass {
 		log("    -reg\n");
 		log("        overwrite register states from the waveform every sample.\n");
 		log("\n");
+		log("    -fast\n");
+		log("        filtered waveform replay: only decompress primary inputs plus\n");
+		log("        registers/memories (for init; mid-run overwrite only with -reg).\n");
+		log("\n");
 		log("    -log-interval <n>\n");
 		log("        log progress every <n> samples.\n");
 		log("\n");
@@ -467,6 +471,7 @@ struct CxxrtlSimPass : public Pass {
 		double start_time = 0, stop_time = -1;
 		int log_interval = 0;
 		bool reg_overwrite = false;
+		bool fast = false;
 		bool debug = false;
 
 		// Argument parsing
@@ -533,6 +538,10 @@ struct CxxrtlSimPass : public Pass {
 			}
 			if (args[argidx] == "-reg") {
 				reg_overwrite = true;
+				continue;
+			}
+			if (args[argidx] == "-fast") {
+				fast = true;
 				continue;
 			}
 			if (args[argidx] == "-d") {
@@ -785,7 +794,23 @@ struct CxxrtlSimPass : public Pass {
 		}
 
 		std::vector<fstHandle> no_clocks;
-		fst.reconstructAllAtTimes(no_clocks, startCount, stopCount, INT_MAX, [&](uint64_t time) {
+		// -fast: only decompress inputs + regs (seed) + memory rows. Combo nets
+		// are not in the mask; CXXRTL recomputes them. -reg still overwrites
+		// regs each sample from the same masked handles.
+		std::vector<fstHandle> fac_mask;
+		if (fast) {
+			for (auto *sig : seed_sigs)
+				if (sig->fst_handle != 0)
+					fac_mask.push_back(sig->fst_handle);
+			for (auto &memory : memories)
+				for (auto &row_handle : memory.fst_handles)
+					if (row_handle.second != 0)
+						fac_mask.push_back(row_handle.second);
+			log("FST filtered replay (-fast): %d handles (inputs + regs/mems%s).\n",
+			    GetSize(fac_mask), reg_overwrite ? ", -reg" : "");
+		}
+
+		auto cosim_step = [&](uint64_t time) {
 			if (log_interval > 0 && sample_count > 0 && sample_count % log_interval == 0) {
 				log("Completed %d samples at %lu%s\n", sample_count, (unsigned long)time, fst.getTimescaleString());
 				log_flush();
@@ -831,7 +856,12 @@ struct CxxrtlSimPass : public Pass {
 			first_sample = false;
 			max_time = time;
 			sample_count++;
-		});
+		};
+
+		if (fast)
+			fst.reconstructAllAtTimesFiltered(no_clocks, fac_mask, startCount, stopCount, INT_MAX, cosim_step);
+		else
+			fst.reconstructAllAtTimes(no_clocks, startCount, stopCount, INT_MAX, cosim_step);
 
 		// Close out high times for bits still high at the end
 		for (auto &act : activities)
