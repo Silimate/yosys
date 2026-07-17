@@ -1438,6 +1438,21 @@ struct SimInstance
 		return issue_count;
 	}
 
+	void collectFstHandles(std::vector<fstHandle> &out) const
+	{
+		for (auto &kv : fst_inputs)
+			if (kv.second) out.push_back(kv.second);
+		for (auto &kv : fst_handles)
+			if (kv.second) out.push_back(kv.second);
+		for (auto &p : fst_input_sigs)
+			if (p.second) out.push_back(p.second);
+		for (auto &mem : fst_memories)
+			for (auto &kv : mem.second)
+				if (kv.second) out.push_back(kv.second);
+		for (auto &child : children)
+			child.second->collectFstHandles(out);
+	}
+
 	bool setInputs()
 	{
 		bool did_something = false;
@@ -1885,6 +1900,11 @@ struct SimWorker : SimShared
 		bool all_samples = fst_clock.empty();
 		unsigned int end_cycle = cycles_set ? numcycles*2 : INT_MAX;
 
+		// Only decompress FST facilities this cosim will actually read.
+		std::vector<fstHandle> fac_mask = fst_clock;
+		for (auto t : tops)
+			t->collectFstHandles(fac_mask);
+
 		fst->reconstructAllAtTimes(fst_clock, startCount, stopCount, end_cycle, [&](uint64_t time) {
 
 			// Log progress every log_interval
@@ -1936,7 +1956,7 @@ struct SimWorker : SimShared
 			if (status)
 				log_error("Signal difference\n");
 			cycle++;
-		});
+		}, fac_mask);
 
 		log("Co-simulation complete: %d %s at %lu%s\n",
 			cycle,

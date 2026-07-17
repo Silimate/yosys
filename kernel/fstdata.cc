@@ -285,7 +285,8 @@ void FstData::reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_faci
 	last_data[pnt_facidx] =  std::string((const char *)pnt_value);
 }
 
-void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t start, uint64_t end, unsigned int end_cycle, CallbackFunction cb)
+void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t start, uint64_t end, unsigned int end_cycle, CallbackFunction cb,
+		const std::vector<fstHandle> &fac_mask)
 {
 	clk_signals = signal;
 	callback = cb;
@@ -299,8 +300,27 @@ void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t sta
 	past_time = start_time;
 	all_samples = clk_signals.empty();
 
-	fstReaderSetUnlimitedTimeRange(ctx);
-	fstReaderSetFacProcessMaskAll(ctx);
+	// Skip FST blocks outside the requested window when a mask is in use.
+	if (fac_mask.empty())
+		fstReaderSetUnlimitedTimeRange(ctx);
+	else
+		fstReaderSetLimitTimeRange(ctx, start, end);
+
+	if (fac_mask.empty()) {
+		fstReaderSetFacProcessMaskAll(ctx);
+	} else {
+		fstReaderClrFacProcessMaskAll(ctx);
+		auto add = [&](fstHandle h) {
+			if (h != 0)
+				fstReaderSetFacProcessMask(ctx, h);
+		};
+		for (auto h : fac_mask)
+			add(h);
+		// Clocks must stay masked even if the caller omitted them from fac_mask.
+		for (auto h : clk_signals)
+			add(h);
+	}
+
 	fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
 	if (last_time!=end_time && curr_cycle <= last_cycle) {
 		past_data = last_data;
