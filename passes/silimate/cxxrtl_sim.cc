@@ -141,10 +141,16 @@ struct CxxrtlSimPass : public Pass {
 		log("and annotate per-bit $ACKT/$DUTY activity onto the wires of the current design \n");
 		log("\n");
 		log("    -so <file.so>\n");
-		log("        precompiled evaluator (see cxxrtl_compile).\n");
+		log("        precompiled evaluator.\n");
 		log("\n");
 		log("    -module <name>\n");
 		log("        the design module the evaluator was emitted from.\n");
+		log("\n");
+		log("    -instance <cell>=<module>:<scope>\n");
+		log("    -instance <module>:<scope>\n");
+		log("        cut mode: map a wrapper cell (or module-named cell) in a fused\n");
+		log("        evaluator to a design module and FST scope. Repeat once per\n");
+		log("        batch member. Incompatible with -module/-scope.\n");
 		log("\n");
 		log("    -r <file.fst|file.vcd>\n");
 		log("        input waveform; VCD is converted via vcd2fst (required).\n");
@@ -354,6 +360,34 @@ struct CxxrtlSimPass : public Pass {
 		}
 	}
 
+	// Split a fused-cut CXXRTL name into wrapper cell (`c0`) + signal remainder.
+	// write_cxxrtl_cut_evaluator names wrapper ports `cN.port` (dot in the
+	// IdString), which CXXRTL exposes as flat `cN.port` — not `cN port`.
+	// Also accept space-separated hierarchy from true cell-internal signals.
+	static bool split_cell_prefix(const std::string &name, std::string &cell, std::string &rest)
+	{
+		size_t sp = name.find(' ');
+		if (sp != std::string::npos) {
+			cell = name.substr(0, sp);
+			rest = name.substr(sp + 1);
+			return true;
+		}
+		// Flat wrapper port: c12.clock / c12.io_q / c12.child.port
+		if (name.size() >= 3 && name[0] == 'c' && isdigit((unsigned char)name[1])) {
+			size_t i = 1;
+			while (i < name.size() && isdigit((unsigned char)name[i]))
+				i++;
+			if (i < name.size() && name[i] == '.') {
+				cell = name.substr(0, i);
+				rest = name.substr(i + 1);
+				return true;
+			}
+		}
+		cell = name;
+		rest.clear();
+		return false;
+	}
+
 	void collect_signals(
 		// CXXRTL knobs
 		cxxrtl_handle handle,
@@ -387,6 +421,39 @@ struct CxxrtlSimPass : public Pass {
 		}
 	}
 
+	// Like collect_signals, but each CXXRTL name is rooted at a wrapper cell
+	// (`c0 foo`) mapped to a design module via -instance.
+	void collect_signals_cut(
+		cxxrtl_handle handle,
+		fn_enum_signals enum_signals,
+		Design *design,
+		const dict<std::string, Module*> &cell_to_module,
+		std::vector<DesignSignal> &signals,
+		std::deque<SignalActivity> &activities,
+		std::vector<DesignMemory> &memories
+	) {
+		EnumeratedObjects objects;
+		enum_signals(handle, &objects, keep_object);
+		memories = std::move(objects.memories);
+
+		dict<uintptr_t, SignalActivity*> seen;
+		for (auto &r : objects.signals) {
+			DesignSignal sig;
+			sig.name = r.name;
+			sig.object = r.object;
+			sig.fst_handle = 0;
+			sig.activity = find_or_add_activity(r.object, activities, seen);
+			sig.wire = nullptr;
+
+			std::string cell, rest;
+			split_cell_prefix(sig.name, cell, rest);
+			auto it = cell_to_module.find(cell);
+			if (it != cell_to_module.end() && !rest.empty())
+				sig.wire = resolve_wire(design, it->second, rest);
+			signals.push_back(std::move(sig));
+		}
+	}
+
 	// Pass entry point
 	void execute(std::vector<std::string> args, Design *design) override
 	{
@@ -394,6 +461,8 @@ struct CxxrtlSimPass : public Pass {
 
 		// Initialize variable defaults
 		std::string so_path, wave_path, scope, module_name, vcd_path;
+		// cut mode: wrapper cell -> (design module name, FST scope)
+		std::vector<std::tuple<std::string, std::string, std::string>> instances;
 		double clk_period_override = 0;
 		double start_time = 0, stop_time = -1;
 		int log_interval = 0;
@@ -409,6 +478,29 @@ struct CxxrtlSimPass : public Pass {
 			}
 			if (args[argidx] == "-module" && argidx+1 < args.size()) {
 				module_name = args[++argidx];
+				continue;
+			}
+			if (args[argidx] == "-instance" && argidx+1 < args.size()) {
+				std::string spec = args[++argidx];
+				std::string cell, mod, inst_scope;
+				size_t eq = spec.find('=');
+				std::string rest = spec;
+				if (eq != std::string::npos) {
+					cell = spec.substr(0, eq);
+					rest = spec.substr(eq + 1);
+				}
+				size_t colon = rest.find(':');
+				if (colon == std::string::npos)
+					log_cmd_error("Invalid -instance '%s'; expected [cell=]module:scope.\n",
+					              spec.c_str());
+				mod = rest.substr(0, colon);
+				inst_scope = rest.substr(colon + 1);
+				if (cell.empty())
+					cell = mod;
+				if (cell.empty() || mod.empty() || inst_scope.empty())
+					log_cmd_error("Invalid -instance '%s'; expected [cell=]module:scope.\n",
+					              spec.c_str());
+				instances.emplace_back(cell, mod, inst_scope);
 				continue;
 			}
 			if (args[argidx] == "-r" && argidx+1 < args.size()) {
@@ -457,10 +549,34 @@ struct CxxrtlSimPass : public Pass {
 		if (wave_path.empty())
 			log_cmd_error("-r <waveform> is required.\n");
 
-		// The annotation root, explicit module or default to top.
+		bool cut_mode = !instances.empty();
 		bool module_mode = !module_name.empty();
-		Module *top;
-		if (module_mode) {
+		if (cut_mode && (module_mode || !scope.empty()))
+			log_cmd_error("Cut mode (-instance) cannot be combined with -module/-scope.\n");
+
+		// The annotation root, explicit module or default to top (non-cut mode).
+		Module *top = nullptr;
+		dict<std::string, Module*> cell_to_module;
+		dict<std::string, std::string> cell_to_scope;
+		std::vector<Module*> cut_modules;
+		if (cut_mode) {
+			for (auto &inst : instances) {
+				const std::string &cell = std::get<0>(inst);
+				const std::string &mod_name = std::get<1>(inst);
+				const std::string &inst_scope = std::get<2>(inst);
+				Module *mod = design->module(RTLIL::escape_id(mod_name));
+				if (mod == nullptr)
+					log_cmd_error("Module '%s' not found in design.\n", mod_name.c_str());
+				if (cell_to_module.count(cell))
+					log_cmd_error("Duplicate -instance cell '%s'.\n", cell.c_str());
+				cell_to_module[cell] = mod;
+				cell_to_scope[cell] = inst_scope;
+				cut_modules.push_back(mod);
+				log("Cut instance cell '%s' -> module '%s' scope \"%s\"\n",
+				    cell.c_str(), mod_name.c_str(), inst_scope.c_str());
+			}
+			top = cut_modules.front();
+		} else if (module_mode) {
 			top = design->module(RTLIL::escape_id(module_name));
 			if (top == nullptr)
 				log_cmd_error("Module '%s' not found in design.\n", module_name.c_str());
@@ -492,19 +608,25 @@ struct CxxrtlSimPass : public Pass {
 		std::vector<DesignMemory> memories;                    // memory state restored at the first sample
 
 		// Populate tables
-		collect_signals(handle, enum_signals, design, top, signals, activities, memories);
+		if (cut_mode)
+			collect_signals_cut(handle, enum_signals, design, cell_to_module,
+			                    signals, activities, memories);
+		else
+			collect_signals(handle, enum_signals, design, top, signals, activities, memories);
 		log("Collected %d signals and %d unique wire activities.\n", GetSize(signals), GetSize(activities));
 
 		// Open waveform to drive signals
 		FstData fst(wave_path);
 		double real_timescale = pow(10.0, fst.getScale());
-		if (scope.empty()) {
-			scope = fst.autoScope(top);
-			if (scope.empty())
-				log_cmd_error("No scope found for module '%s'. Please specify -scope.\n",
-				              RTLIL::unescape_id(top->name).c_str());
+		if (!cut_mode) {
+			if (scope.empty()) {
+				scope = fst.autoScope(top);
+				if (scope.empty())
+					log_cmd_error("No scope found for module '%s'. Please specify -scope.\n",
+					              RTLIL::unescape_id(top->name).c_str());
+			}
+			log("Using scope: \"%s\"\n", scope.c_str());
 		}
-		log("Using scope: \"%s\"\n", scope.c_str());
 
 		int found_inputs = 0, n_inputs = 0;
 		int found_regs = 0, n_regs = 0;
@@ -513,9 +635,9 @@ struct CxxrtlSimPass : public Pass {
 		std::vector<DesignSignal*> reg_sigs;
 		pool<cxxrtl_outline> outlines;
 		for (auto &sig : signals) {
-			// Per-module evaluators expose cut child outputs as additional inputs.
+			// Per-module / cut evaluators expose cut child outputs as additional inputs.
 			bool is_input = (sig.object->flags & CXXRTL_INPUT) != 0 &&
-			                (module_mode ||
+			                (module_mode || cut_mode ||
 			                 (sig.wire != nullptr && sig.wire->port_input &&
 			                  sig.wire->module == top));
 			bool is_register = (sig.object->flags & CXXRTL_DRIVEN_SYNC) != 0 &&
@@ -523,8 +645,19 @@ struct CxxrtlSimPass : public Pass {
 			if (sig.object->type == CXXRTL_OUTLINE && sig.object->outline != nullptr)
 				outlines.insert(sig.object->outline);
 
-			std::string fst_name = waveform_name(scope, sig.name);
-			sig.fst_handle = fst.getHandle(fst_name);
+			std::string fst_name;
+			if (cut_mode) {
+				std::string cell, rest;
+				split_cell_prefix(sig.name, cell, rest);
+				auto it = cell_to_scope.find(cell);
+				if (it == cell_to_scope.end() || rest.empty())
+					fst_name.clear();
+				else
+					fst_name = waveform_name(it->second, rest);
+			} else {
+				fst_name = waveform_name(scope, sig.name);
+			}
+			sig.fst_handle = fst_name.empty() ? 0 : fst.getHandle(fst_name);
 
 			if (is_input) {
 				n_inputs++;
@@ -532,14 +665,14 @@ struct CxxrtlSimPass : public Pass {
 					found_inputs++;
 				else
 					log_warning("Input port '%s' not found in waveform; left at its initial value.\n",
-					            fst_name.c_str());
+					            fst_name.empty() ? sig.name.c_str() : fst_name.c_str());
 			} else if (reg_overwrite && is_register) {
 				n_regs++;
 				if (sig.fst_handle != 0)
 					found_regs++;
 				else if (debug)
 					log_warning("Register '%s' not found in waveform; not overwritten.\n",
-					            fst_name.c_str());
+					            fst_name.empty() ? sig.name.c_str() : fst_name.c_str());
 			}
 
 			if (sig.fst_handle == 0)
@@ -559,7 +692,18 @@ struct CxxrtlSimPass : public Pass {
 
 		int memory_words = 0, matched_memory_words = 0;
 		for (auto &memory : memories) {
-			memory.fst_handles = fst.getMemoryHandles(waveform_name(scope, memory.name));
+			std::string mem_fst;
+			if (cut_mode) {
+				std::string cell, rest;
+				split_cell_prefix(memory.name, cell, rest);
+				auto it = cell_to_scope.find(cell);
+				if (it != cell_to_scope.end() && !rest.empty())
+					mem_fst = waveform_name(it->second, rest);
+			} else {
+				mem_fst = waveform_name(scope, memory.name);
+			}
+			if (!mem_fst.empty())
+				memory.fst_handles = fst.getMemoryHandles(mem_fst);
 			memory_words += memory.object->depth;
 			for (auto &row_handle : memory.fst_handles) {
 				if (row_handle.first < 0)
@@ -576,10 +720,8 @@ struct CxxrtlSimPass : public Pass {
 
 		// If no inputs are found, we must error as we cannot drive any signals.
 		if (n_inputs > 0 && found_inputs == 0) {
-			if (module_mode) {
-				log_warning("No input ports of module '%s' matched in the waveform "
-				            "(scope \"%s\"); skipping annotation.\n",
-				            module_name.c_str(), scope.c_str());
+			if (module_mode || cut_mode) {
+				log_warning("No input ports matched in the waveform; skipping annotation.\n");
 				destroy_handle(handle);
 				dlclose(so);
 				return;
@@ -722,9 +864,17 @@ struct CxxrtlSimPass : public Pass {
 		double frequency = 1.0 / clk_period;
 		std::stringstream ss;
 		ss << std::setprecision(4) << real_timescale;
-		top->set_string_attribute("$FREQUENCY", std::to_string(frequency));
-		top->set_string_attribute("$DURATION", std::to_string(duration));
-		top->set_string_attribute("$TIMESCALE", ss.str());
+		auto set_mod_timing = [&](Module *mod) {
+			mod->set_string_attribute("$FREQUENCY", std::to_string(frequency));
+			mod->set_string_attribute("$DURATION", std::to_string(duration));
+			mod->set_string_attribute("$TIMESCALE", ss.str());
+		};
+		if (cut_mode) {
+			for (Module *mod : cut_modules)
+				set_mod_timing(mod);
+		} else {
+			set_mod_timing(top);
+		}
 
 		double total_activity = 0, total_duty = 0;
 		uint64_t total_bits = 0;

@@ -59,9 +59,6 @@ yosys_pass(opt_timing_balance
 yosys_pass(cone_partition
 	cone_partition.cc
 )
-yosys_pass(cxxrtl_compile
-	cxxrtl_compile.cc
-)
 yosys_pass(cxxrtl_sim
 	cxxrtl_sim.cc
 	REQUIRES
