@@ -285,8 +285,7 @@ void FstData::reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_faci
 	last_data[pnt_facidx] =  std::string((const char *)pnt_value);
 }
 
-void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t start, uint64_t end, unsigned int end_cycle, CallbackFunction cb,
-		const std::vector<fstHandle> &fac_mask)
+void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t start, uint64_t end, unsigned int end_cycle, CallbackFunction cb)
 {
 	clk_signals = signal;
 	callback = cb;
@@ -300,26 +299,46 @@ void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t sta
 	past_time = start_time;
 	all_samples = clk_signals.empty();
 
-	// Skip FST blocks outside the requested window when a mask is in use.
-	if (fac_mask.empty())
-		fstReaderSetUnlimitedTimeRange(ctx);
-	else
-		fstReaderSetLimitTimeRange(ctx, start, end);
-
-	if (fac_mask.empty()) {
-		fstReaderSetFacProcessMaskAll(ctx);
-	} else {
-		fstReaderClrFacProcessMaskAll(ctx);
-		auto add = [&](fstHandle h) {
-			if (h != 0)
-				fstReaderSetFacProcessMask(ctx, h);
-		};
-		for (auto h : fac_mask)
-			add(h);
-		// Clocks must stay masked even if the caller omitted them from fac_mask.
-		for (auto h : clk_signals)
-			add(h);
+	fstReaderSetUnlimitedTimeRange(ctx);
+	fstReaderSetFacProcessMaskAll(ctx);
+	fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
+	if (last_time!=end_time && curr_cycle <= last_cycle) {
+		past_data = last_data;
+		callback(last_time);
+		curr_cycle++;
 	}
+	if (curr_cycle <= last_cycle) {
+		past_data = last_data;
+		callback(end_time);
+		curr_cycle++;
+	}
+}
+
+void FstData::reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, const std::vector<fstHandle> &fac_mask,
+		uint64_t start, uint64_t end, unsigned int end_cycle, CallbackFunction cb)
+{
+	clk_signals = clk_signal;
+	callback = cb;
+	start_time = start;
+	end_time = end;
+	curr_cycle = 0;
+	last_cycle = end_cycle;
+	last_data.clear();
+	last_time = start_time;
+	past_data.clear();
+	past_time = start_time;
+	all_samples = clk_signals.empty();
+
+	fstReaderSetLimitTimeRange(ctx, start, end);
+	fstReaderClrFacProcessMaskAll(ctx);
+	auto add = [&](fstHandle h) {
+		if (h != 0)
+			fstReaderSetFacProcessMask(ctx, h);
+	};
+	for (auto h : fac_mask)
+		add(h);
+	for (auto h : clk_signals)
+		add(h);
 
 	fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
 	if (last_time!=end_time && curr_cycle <= last_cycle) {

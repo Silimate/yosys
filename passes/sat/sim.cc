@@ -1559,6 +1559,7 @@ struct SimWorker : SimShared
 	std::string summary_filename;
 	std::string scope;
 	bool reg_overwrite = false;
+	bool fast = false;
 
 	~SimWorker()
 	{
@@ -1900,12 +1901,16 @@ struct SimWorker : SimShared
 		bool all_samples = fst_clock.empty();
 		unsigned int end_cycle = cycles_set ? numcycles*2 : INT_MAX;
 
-		// Only decompress FST facilities this cosim will actually read.
-		std::vector<fstHandle> fac_mask = fst_clock;
-		for (auto t : tops)
-			t->collectFstHandles(fac_mask);
+		// -fast: only decompress handles mapped for this cosim (not the whole FST).
+		std::vector<fstHandle> fac_mask;
+		if (fast) {
+			fac_mask = fst_clock;
+			for (auto t : tops)
+				t->collectFstHandles(fac_mask);
+			log("FST filtered replay (-fast): %d mapped handles.\n", GetSize(fac_mask));
+		}
 
-		fst->reconstructAllAtTimes(fst_clock, startCount, stopCount, end_cycle, [&](uint64_t time) {
+		auto cosim_step = [&](uint64_t time) {
 
 			// Log progress every log_interval
 			if (log_interval > 0 && cycle > 0 && cycle % log_interval == 0) {
@@ -1956,7 +1961,12 @@ struct SimWorker : SimShared
 			if (status)
 				log_error("Signal difference\n");
 			cycle++;
-		}, fac_mask);
+		};
+
+		if (fast)
+			fst->reconstructAllAtTimesFiltered(fst_clock, fac_mask, startCount, stopCount, end_cycle, cosim_step);
+		else
+			fst->reconstructAllAtTimes(fst_clock, startCount, stopCount, end_cycle, cosim_step);
 
 		log("Co-simulation complete: %d %s at %lu%s\n",
 			cycle,
@@ -3332,6 +3342,10 @@ struct SimPass : public Pass {
 		log("    -reg\n");
 		log("        overwrite register state from VCD file every cycle\n");
 		log("\n");
+		log("    -fast\n");
+		log("        FST/VCD cosim speed mode. If enabled, only sample on signals\n");
+		log("        that matter in the design.\n");
+		log("\n");
 		log("    -normxz\n");
 		log("        normalize x/z to 0 before values participate in simulation and\n");
 		log("        when computing -activity, matching CXXRTL's two-state behavior\n");
@@ -3551,6 +3565,10 @@ struct SimPass : public Pass {
 			}
 			if (args[argidx] == "-reg") {
 				reg_overwrite = true;
+				continue;
+			}
+			if (args[argidx] == "-fast") {
+				worker.fast = true;
 				continue;
 			}
 			if (args[argidx] == "-bb") {

@@ -50,11 +50,10 @@ class FstData
 	std::vector<FstVar>& getVars() { return vars; };
 
 	void reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_facidx, const unsigned char *pnt_value, uint32_t plen);
-	// clk_signal: handles used to decide when to fire the callback (empty = every sample).
-	// fac_mask: FST facilities to decompress; clocks are always added. Empty mask keeps the
-	// legacy "process all facilities" path for other callers.
-	void reconstructAllAtTimes(std::vector<fstHandle> &clk_signal, uint64_t start_time, uint64_t end_time,
-			unsigned int end_cycle, CallbackFunction cb, const std::vector<fstHandle> &fac_mask = {});
+	void reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t start_time, uint64_t end_time, unsigned int end_cycle, CallbackFunction cb);
+	// Filtered replay: only decompress fac_mask (+ clk_signal).
+	void reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, const std::vector<fstHandle> &fac_mask,
+			uint64_t start_time, uint64_t end_time, unsigned int end_cycle, CallbackFunction cb);
 
 	std::string valueOf(fstHandle signal);
 	fstHandle getHandle(std::string name);
