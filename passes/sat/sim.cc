@@ -1438,6 +1438,21 @@ struct SimInstance
 		return issue_count;
 	}
 
+	void collectFstHandles(std::vector<fstHandle> &out) const
+	{
+		for (auto &kv : fst_inputs)
+			if (kv.second) out.push_back(kv.second);
+		for (auto &kv : fst_handles)
+			if (kv.second) out.push_back(kv.second);
+		for (auto &p : fst_input_sigs)
+			if (p.second) out.push_back(p.second);
+		for (auto &mem : fst_memories)
+			for (auto &kv : mem.second)
+				if (kv.second) out.push_back(kv.second);
+		for (auto &child : children)
+			child.second->collectFstHandles(out);
+	}
+
 	bool setInputs()
 	{
 		bool did_something = false;
@@ -1544,6 +1559,7 @@ struct SimWorker : SimShared
 	std::string summary_filename;
 	std::string scope;
 	bool reg_overwrite = false;
+	bool fast = false;
 
 	~SimWorker()
 	{
@@ -1885,7 +1901,15 @@ struct SimWorker : SimShared
 		bool all_samples = fst_clock.empty();
 		unsigned int end_cycle = cycles_set ? numcycles*2 : INT_MAX;
 
-		fst->reconstructAllAtTimes(fst_clock, startCount, stopCount, end_cycle, [&](uint64_t time) {
+		// -fast: only decompress handles mapped for this cosim (not the whole FST).
+		std::vector<fstHandle> fac_mask;
+		if (fast) {
+			for (auto t : tops)
+				t->collectFstHandles(fac_mask);
+			log("FST filtered replay (-fast): %d mapped handles.\n", GetSize(fac_mask));
+		}
+
+		auto cosim_step = [&](uint64_t time) {
 
 			// Log progress every log_interval
 			if (log_interval > 0 && cycle > 0 && cycle % log_interval == 0) {
@@ -1936,7 +1960,12 @@ struct SimWorker : SimShared
 			if (status)
 				log_error("Signal difference\n");
 			cycle++;
-		});
+		};
+
+		if (fast)
+			fst->reconstructAllAtTimesFiltered(fst_clock, fac_mask, startCount, stopCount, end_cycle, cosim_step);
+		else
+			fst->reconstructAllAtTimes(fst_clock, startCount, stopCount, end_cycle, cosim_step);
 
 		log("Co-simulation complete: %d %s at %lu%s\n",
 			cycle,
@@ -3312,6 +3341,11 @@ struct SimPass : public Pass {
 		log("    -reg\n");
 		log("        overwrite register state from VCD file every cycle\n");
 		log("\n");
+		log("    -fast\n");
+		log("        FST/VCD cosim: decompress only handles mapped for the active\n");
+		log("        instance(s). Time range stays unlimited so -start matches the\n");
+		log("        non-fast initial state for stable pre-start signals.\n");
+		log("\n");
 		log("    -normxz\n");
 		log("        normalize x/z to 0 before values participate in simulation and\n");
 		log("        when computing -activity, matching CXXRTL's two-state behavior\n");
@@ -3531,6 +3565,10 @@ struct SimPass : public Pass {
 			}
 			if (args[argidx] == "-reg") {
 				reg_overwrite = true;
+				continue;
+			}
+			if (args[argidx] == "-fast") {
+				worker.fast = true;
 				continue;
 			}
 			if (args[argidx] == "-bb") {

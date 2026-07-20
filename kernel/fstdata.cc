@@ -314,6 +314,49 @@ void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t sta
 	}
 }
 
+void FstData::reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, const std::vector<fstHandle> &fac_mask,
+		uint64_t start, uint64_t end, unsigned int end_cycle, CallbackFunction cb)
+{
+	clk_signals = clk_signal;
+	callback = cb;
+	start_time = start;
+	end_time = end;
+	curr_cycle = 0;
+	last_cycle = end_cycle;
+	last_data.clear();
+	last_time = start_time;
+	past_data.clear();
+	past_time = start_time;
+	all_samples = clk_signals.empty();
+
+	// Need pre-start VCs so stable signals are not x at -start.
+	fstReaderSetUnlimitedTimeRange(ctx);
+	// Only decompress mapped DUT handles (+ clocks); skip the rest of the dump.
+	fstReaderClrFacProcessMaskAll(ctx);
+	auto add = [&](fstHandle h) {
+		if (h != 0)
+			fstReaderSetFacProcessMask(ctx, h);
+	};
+	for (auto h : fac_mask)
+		add(h);
+	for (auto h : clk_signals)
+		add(h);
+
+	fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
+
+	// Flush final sample(s) if the last VC was before end_time / end_cycle.
+	if (last_time!=end_time && curr_cycle <= last_cycle) {
+		past_data = last_data;
+		callback(last_time);
+		curr_cycle++;
+	}
+	if (curr_cycle <= last_cycle) {
+		past_data = last_data;
+		callback(end_time);
+		curr_cycle++;
+	}
+}
+
 std::string FstData::valueOf(fstHandle signal)
 {
 	if (past_data.find(signal) == past_data.end()) {
