@@ -227,6 +227,32 @@ struct RegRenameInstance {
 
 		// Delete the old unused wires
 		module->remove(wireRemoveCache);
+
+		// Drop leftover alias/X assigns onto claimed bits.
+		if (!claimed_bits.empty()) {
+			std::vector<RTLIL::SigSig> kept;
+			bool dropped = false;
+			// Rebuild connection list, omitting bits that flops now own.
+			for (auto &conn : module->connections()) {
+				RTLIL::SigSpec new_lhs, new_rhs;
+				for (int i = 0; i < GetSize(conn.first); i++) {
+					SigBit lb = conn.first[i];
+					// Alias/opt left an assign (often to X) on the restored Q bit.
+					if (lb.wire && claimed_bits.count(lb)) {
+						dropped = true;
+						continue;
+					}
+					new_lhs.append(lb);
+					new_rhs.append(conn.second[i]);
+				}
+				// Keep any remaining (non-claimed) slice of this assign.
+				if (GetSize(new_lhs))
+					kept.push_back(RTLIL::SigSig(new_lhs, new_rhs));
+			}
+			// Only rewrite the module if we actually removed something.
+			if (dropped)
+				module->new_connections(kept);
+		}
 	}
 
 	void process_all(dict<std::string, RegInfo> &vcd_reg_widths)
