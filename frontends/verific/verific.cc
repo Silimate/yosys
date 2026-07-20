@@ -118,7 +118,9 @@ bool verific_import_pending;
 string verific_error_msg;
 int verific_sva_fsm_limit;
 bool verific_opt; // SILIMATE: enable Verific optimizations
-bool verific_no_split_complex_ports; // SILIMATE: disable splitting of complex ports
+bool verific_no_split_complex_ports; // SILIMATE: disable splitting of all complex ports (structs + arrays)
+bool verific_no_split_struct_ports; // SILIMATE: keep struct/record ports flat
+bool verific_no_split_array_ports; // SILIMATE: keep multi-dimensional array ports flat
 
 #ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
 vector<string> verific_incdirs, verific_libdirs, verific_libexts;
@@ -3334,6 +3336,66 @@ void verific_cleanup()
 	verific_import_pending = false;
 }
 
+// SILIMATE: classify a complex portbus exactly the way Verific's Netlist::ChangePortBusStructures
+// does, so struct and multi-dimensional-array ports can be split independently.
+enum VerificPortBusClass { VPB_OTHER = 0, VPB_STRUCT, VPB_ARRAY };
+
+static VerificPortBusClass verific_classify_portbus(Netlist *nl, PortBus *portbus)
+{
+	// Interface ports resolve their type via a composite name lookup (mirrors the stock splitter).
+	unsigned is_intf = portbus->GetAtt(" interface_port") != 0;
+	const TypeRange *tr = nl->GetTypeRange(portbus->Name(), 0 /* exhaustive */, is_intf);
+	if (!tr)
+		return VPB_OTHER;
+	if (tr->IsTypeScalar())
+		return VPB_OTHER;
+	if (tr->IsTypeArray())
+		return tr->GetNext() ? VPB_ARRAY : VPB_OTHER; // only multi-dim arrays get split
+	return VPB_STRUCT; // struct / union / record / interface
+}
+
+// SILIMATE: split only the requested classes of complex ports. Verific couples struct and array
+// splitting under one switch (ChangePortBusStructures). To keep e.g. packed structs flat while
+// still splitting unpacked arrays (matching how simulators dump VCDs), temporarily hide the buses
+// we want to keep flat, run the stock splitter on the rest, then restore them. The naming of split
+// children is left entirely to Verific, so it is identical to the coupled path.
+static void verific_selective_split_portbuses(Netlist *top, bool split_structs, bool split_arrays)
+{
+	if (!split_structs && !split_arrays)
+		return; // keep everything flat
+	if (split_structs && split_arrays) {
+		top->ChangePortBusStructures(1 /* hierarchical */);
+		return;
+	}
+
+	Set netlists(POINTER_HASH);
+	top->Hierarchy(netlists, 1 /* top -> bottom */);
+
+	SetIter si;
+	Netlist *nl;
+	FOREACH_SET_ITEM(&netlists, si, &nl) {
+		if (nl->IsOperator() || nl->IsPrimitive())
+			continue;
+
+		// Collect the buses to keep flat first; both Remove() and the splitter mutate the map.
+		std::vector<PortBus*> keep_flat;
+		MapIter mi;
+		PortBus *portbus;
+		FOREACH_PORTBUS_OF_NETLIST(nl, mi, portbus) {
+			VerificPortBusClass cls = verific_classify_portbus(nl, portbus);
+			if ((cls == VPB_STRUCT && !split_structs) ||
+			    (cls == VPB_ARRAY && !split_arrays))
+				keep_flat.push_back(portbus);
+		}
+
+		for (PortBus *pb : keep_flat)
+			nl->Remove(pb);
+		nl->ChangePortBusStructures(0 /* this netlist only */);
+		for (PortBus *pb : keep_flat)
+			nl->Add(pb);
+	}
+}
+
 std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
 {
 	verific_sva_fsm_limit = 16;
@@ -3365,9 +3427,12 @@ std::string verific_import(Design *design, const std::map<std::string,std::strin
 	if (!verific_error_msg.empty())
 		log_error("%s\n", verific_error_msg);
 
-	if (!verific_no_split_complex_ports)
-		for (auto nl : nl_todo)
-			nl.second->ChangePortBusStructures(1 /* hierarchical */);
+	// SILIMATE: the legacy -no_split_complex_ports flag forces both classes flat; the finer-grained
+	// -no_split_struct_ports / -no_split_array_ports flags gate each class independently.
+	bool no_split_struct = verific_no_split_struct_ports || verific_no_split_complex_ports;
+	bool no_split_array = verific_no_split_array_ports || verific_no_split_complex_ports;
+	for (auto nl : nl_todo)
+		verific_selective_split_portbuses(nl.second, !no_split_struct, !no_split_array);
 
 	VerificExtNets worker;
 	for (auto nl : nl_todo)
@@ -3602,6 +3667,12 @@ struct VerificPass : public Pass {
 		log("\n");
 		log("  -no-split-complex-ports\n");
 		log("    Complex ports (structs or arrays) are not split and remain packed as a single port.\n");
+		log("\n");
+		log("  -no-split-struct-ports\n");
+		log("    Struct/record ports are not split and remain packed as a single port (arrays still split).\n");
+		log("\n");
+		log("  -no-split-array-ports\n");
+		log("    Multi-dimensional array ports are not split and remain packed as a single port (structs still split).\n");
 		log("\n");
 #ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
 		log("  -autocover\n");
@@ -4052,6 +4123,16 @@ struct VerificPass : public Pass {
 
 		if (GetSize(args) > argidx && args[argidx] == "-no_split_complex_ports") {
 			verific_no_split_complex_ports = true;
+			goto check_error;
+		}
+
+		if (GetSize(args) > argidx && args[argidx] == "-no_split_struct_ports") {
+			verific_no_split_struct_ports = true;
+			goto check_error;
+		}
+
+		if (GetSize(args) > argidx && args[argidx] == "-no_split_array_ports") {
+			verific_no_split_array_ports = true;
 			goto check_error;
 		}
 
@@ -4595,7 +4676,7 @@ struct VerificPass : public Pass {
 			bool mode_names = false, mode_verific = false;
 			bool mode_autocover = false, mode_fullinit = false;
 			bool flatten = false, extnets = false, mode_cells = false;
-			bool split_complex_ports = true;
+			bool split_struct_ports = true, split_array_ports = true;
 			string dumpfile;
 			string ppfile;
 			Map parameters(STRING_HASH);
@@ -4614,7 +4695,16 @@ struct VerificPass : public Pass {
 					continue;
 				}
 				if (args[argidx] == "-no-split-complex-ports") {
-					split_complex_ports = false;
+					split_struct_ports = false;
+					split_array_ports = false;
+					continue;
+				}
+				if (args[argidx] == "-no-split-struct-ports") {
+					split_struct_ports = false;
+					continue;
+				}
+				if (args[argidx] == "-no-split-array-ports") {
+					split_array_ports = false;
 					continue;
 				}
 				if (args[argidx] == "-extnets") {
@@ -4749,10 +4839,8 @@ struct VerificPass : public Pass {
 					worker.run(nl.second);
 			}
 
-			if (split_complex_ports) {
-				for (auto nl : nl_todo)
-					nl.second->ChangePortBusStructures(1 /* hierarchical */);
-			}
+			for (auto nl : nl_todo)
+				verific_selective_split_portbuses(nl.second, split_struct_ports, split_array_ports);
 
 #ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
 			if (!dumpfile.empty()) {

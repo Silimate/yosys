@@ -27,7 +27,9 @@ YOSYS_NAMESPACE_BEGIN
 extern int verific_verbose;
 
 extern bool verific_opt; // SILIMATE: enable Verific optimizations
-extern bool verific_no_split_complex_ports; // SILIMATE: disable splitting of complex ports
+extern bool verific_no_split_complex_ports; // SILIMATE: disable splitting of all complex ports (structs + arrays)
+extern bool verific_no_split_struct_ports; // SILIMATE: keep struct/record ports flat
+extern bool verific_no_split_array_ports; // SILIMATE: keep multi-dimensional array ports flat
 
 extern bool verific_import_pending;
 extern std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top = std::string());
