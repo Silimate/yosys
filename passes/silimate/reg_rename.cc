@@ -231,26 +231,25 @@ struct RegRenameInstance {
 		// Drop leftover alias/X assigns onto claimed bits.
 		if (!claimed_bits.empty()) {
 			std::vector<RTLIL::SigSig> kept;
-			bool dropped = false;
+			bool changed = false;
 			// Rebuild connection list, omitting bits that flops now own.
 			for (auto &conn : module->connections()) {
-				RTLIL::SigSpec new_lhs, new_rhs;
+				RTLIL::SigSpec lhs, rhs; // lhs = driven, rhs = driver
 				for (int i = 0; i < GetSize(conn.first); i++) {
-					SigBit lb = conn.first[i];
 					// Alias/opt left an assign (often to X) on the restored Q bit.
-					if (lb.wire && claimed_bits.count(lb)) {
-						dropped = true;
+					if (claimed_bits.count(conn.first[i])) {
+						changed = true;
 						continue;
 					}
-					new_lhs.append(lb);
-					new_rhs.append(conn.second[i]);
+					lhs.append(conn.first[i]);
+					rhs.append(conn.second[i]);
 				}
 				// Keep any remaining (non-claimed) slice of this assign.
-				if (GetSize(new_lhs))
-					kept.push_back(RTLIL::SigSig(new_lhs, new_rhs));
+				if (GetSize(lhs))
+					kept.emplace_back(lhs, rhs);
 			}
 			// Only rewrite the module if we actually removed something.
-			if (dropped)
+			if (changed)
 				module->new_connections(kept);
 		}
 	}
