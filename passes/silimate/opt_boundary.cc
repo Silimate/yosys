@@ -88,12 +88,6 @@ struct BoundaryConeWorker {
 		failed = setup_failed;
 	}
 
-	// Keep parent-side cells/wires from a successful attempt; reset maps for the next bit.
-	void commit()
-	{
-		clear_copy_state();
-	}
-
 	SigSpec materialize(SigSpec sig)
 	{
 		SigSpec result;
@@ -388,7 +382,7 @@ struct OptBoundaryPass : Pass {
 						if (no_disconnect && worker.copied_cell_count == 0) {
 							log_debug("opt_boundary: skipping zero-cell bypass for %s[%d] on %s in -no_disconnect mode\n",
 									log_id(port), i, log_id(instance));
-							worker.commit();
+							worker.rollback();
 							continue;
 						}
 
@@ -407,7 +401,7 @@ struct OptBoundaryPass : Pass {
 						else
 							log("Bypassed cone driving %s[%d] of instance '%s' (type '%s') in '%s'\n",
 									log_id(port), i, log_id(instance), log_id(instance->type), log_id(parent));
-						worker.commit();
+						worker.clear_copy_state();
 					}
 
 					if (changed_port)
