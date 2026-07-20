@@ -40,6 +40,7 @@ struct BoundaryConeWorker {
 	pool<Cell*> active_cells;
 	int copied_cell_count = 0;
 	int materialized_bit_count = 0;
+	bool setup_failed = false;
 	bool failed = false;
 
 	BoundaryConeWorker(Module *child, Module *parent, Cell *instance, int max_cells, int max_bits)
@@ -52,7 +53,7 @@ struct BoundaryConeWorker {
 				continue;
 			SigSpec conn = instance->connections_.at(wire->name);
 			if (GetSize(conn) != wire->width) {
-				failed = true;
+				setup_failed = true;
 				continue;
 			}
 			for (int i = 0; i < wire->width; i++)
@@ -70,6 +71,21 @@ struct BoundaryConeWorker {
 						bit_driver[child_sigmap(bit)] = cell;
 			}
 		}
+
+		failed = setup_failed;
+	}
+
+	// Drop per-attempt copy state but keep bit_driver/input_map for reuse across bits.
+	void clear_copy_state()
+	{
+		created_cells.clear();
+		created_wires.clear();
+		copied_cells.clear();
+		copied_bits.clear();
+		active_cells.clear();
+		copied_cell_count = 0;
+		materialized_bit_count = 0;
+		failed = setup_failed;
 	}
 
 	SigSpec materialize(SigSpec sig)
@@ -173,12 +189,7 @@ struct BoundaryConeWorker {
 			parent->remove(*it);
 		for (auto it = created_wires.rbegin(); it != created_wires.rend(); ++it)
 			parent->remove(pool<Wire*>{*it});
-		created_cells.clear();
-		created_wires.clear();
-		copied_cells.clear();
-		copied_bits.clear();
-		copied_cell_count = 0;
-		materialized_bit_count = 0;
+		clear_copy_state();
 	}
 };
 
@@ -322,6 +333,9 @@ struct OptBoundaryPass : Pass {
 					continue;
 				}
 
+				// Build bit_driver/input_map once per instance; reset only copy state between bits.
+				BoundaryConeWorker worker(child, parent, instance, max_cells, max_bits);
+
 				for (auto &conn : instance->connections_) {
 					Wire *port = child->wire(conn.first);
 					if (port == nullptr || !port->port_output || port->port_input)
@@ -346,7 +360,6 @@ struct OptBoundaryPass : Pass {
 							continue;
 						}
 
-						BoundaryConeWorker worker(child, parent, instance, max_cells, max_bits);
 						SigBit replacement = worker.materialize(SigBit(port, i));
 						if (worker.failed) {
 							log_debug("opt_boundary: failed to materialize %s[%d] of instance %s after inspecting %d bits; rolling back\n",
@@ -369,9 +382,11 @@ struct OptBoundaryPass : Pass {
 						if (no_disconnect && worker.copied_cell_count == 0) {
 							log_debug("opt_boundary: skipping zero-cell bypass for %s[%d] on %s in -no_disconnect mode\n",
 									log_id(port), i, log_id(instance));
+							worker.rollback();
 							continue;
 						}
 
+						int copied_cells = worker.copied_cell_count;
 						if (!no_disconnect) {
 							parent->connect(conn.second[i], replacement);
 							Wire *dummy = parent->addWire(NEW_ID_SUFFIX("opt_boundary_output"));
@@ -380,12 +395,13 @@ struct OptBoundaryPass : Pass {
 						}
 						did_something = true;
 
-						if (worker.copied_cell_count > 0)
+						if (copied_cells > 0)
 							log("Copied %d cells from cone driving %s[%d] of instance '%s' (type '%s') into '%s'\n",
-									worker.copied_cell_count, log_id(port), i, log_id(instance), log_id(instance->type), log_id(parent));
+									copied_cells, log_id(port), i, log_id(instance), log_id(instance->type), log_id(parent));
 						else
 							log("Bypassed cone driving %s[%d] of instance '%s' (type '%s') in '%s'\n",
 									log_id(port), i, log_id(instance), log_id(instance->type), log_id(parent));
+						worker.clear_copy_state();
 					}
 
 					if (changed_port)
