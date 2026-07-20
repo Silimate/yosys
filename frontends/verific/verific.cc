@@ -3337,7 +3337,14 @@ void verific_cleanup()
 }
 
 // SILIMATE: classify a complex portbus exactly the way Verific's Netlist::ChangePortBusStructures
-// does, so struct and multi-dimensional-array ports can be split independently.
+// does, so struct and multi-dimensional-array ports can be split independently. Classification is
+// purely by TypeRange, mirroring the stock splitter's predicate: a scalar is never split; a type
+// range that is an array with a further dimension (GetNext()) is treated as an array; anything else
+// (struct, union, record, or a non-array interface bundle) is treated as struct-like. Note this is
+// deliberately TypeRange-based, not attribute-based: a *multi-dimensional interface array* has an
+// array TypeRange and so classifies as VPB_ARRAY -- exactly as the stock splitter would treat it.
+// Keeping classification identical to the stock predicate is what guarantees the split class ends
+// up byte-for-byte identical to the coupled path.
 enum VerificPortBusClass { VPB_OTHER = 0, VPB_STRUCT, VPB_ARRAY };
 
 static VerificPortBusClass verific_classify_portbus(Netlist *nl, PortBus *portbus)
@@ -3351,14 +3358,26 @@ static VerificPortBusClass verific_classify_portbus(Netlist *nl, PortBus *portbu
 		return VPB_OTHER;
 	if (tr->IsTypeArray())
 		return tr->GetNext() ? VPB_ARRAY : VPB_OTHER; // only multi-dim arrays get split
-	return VPB_STRUCT; // struct / union / record / interface
+	return VPB_STRUCT; // struct / union / record / non-array interface bundle
 }
 
 // SILIMATE: split only the requested classes of complex ports. Verific couples struct and array
 // splitting under one switch (ChangePortBusStructures). To keep e.g. packed structs flat while
-// still splitting unpacked arrays (matching how simulators dump VCDs), temporarily hide the buses
-// we want to keep flat, run the stock splitter on the rest, then restore them. The naming of split
-// children is left entirely to Verific, so it is identical to the coupled path.
+// still splitting unpacked arrays (matching how simulators dump VCDs), we temporarily hide the
+// buses we want to keep flat across the *entire hierarchy*, run the unmodified stock hierarchical
+// splitter (ChangePortBusStructures(1)) on everything that remains, then restore the hidden buses.
+//
+// Using the same atomic hierarchical call as the coupled (both-split) case is deliberate: the real
+// splitting -- including parent-instance port-connection fixups and split-child naming -- is done
+// entirely by stock Verific code, so the only difference from "split everything" is that fewer
+// buses are present in the portbus maps when it runs. This avoids any per-netlist ordering concern.
+//
+// Hide/restore relies on Netlist::Remove(PortBus*) being non-destructive, verified against Verific's
+// implementation: Remove() only unregisters the bus from the netlist's portbus map and clears the
+// bus's owner backpointer -- it does not free the PortBus and does not touch the underlying Ports or
+// their PortRefs (parent-instance connections). Netlist::Add(PortBus*) requires the bus to have no
+// owner (which Remove() cleared), so Remove()->Add() is the intended round-trip that leaves the bus
+// grouping exactly as it was.
 static void verific_selective_split_portbuses(Netlist *top, bool split_structs, bool split_arrays)
 {
 	if (!split_structs && !split_arrays)
@@ -3368,32 +3387,32 @@ static void verific_selective_split_portbuses(Netlist *top, bool split_structs, 
 		return;
 	}
 
+	// Collect every bus to keep flat across the whole hierarchy before touching anything, so the
+	// single hierarchical splitter call below sees a consistent design.
 	Set netlists(POINTER_HASH);
 	top->Hierarchy(netlists, 1 /* top -> bottom */);
 
+	std::vector<std::pair<Netlist*, PortBus*>> keep_flat;
 	SetIter si;
 	Netlist *nl;
 	FOREACH_SET_ITEM(&netlists, si, &nl) {
 		if (nl->IsOperator() || nl->IsPrimitive())
 			continue;
-
-		// Collect the buses to keep flat first; both Remove() and the splitter mutate the map.
-		std::vector<PortBus*> keep_flat;
 		MapIter mi;
 		PortBus *portbus;
 		FOREACH_PORTBUS_OF_NETLIST(nl, mi, portbus) {
 			VerificPortBusClass cls = verific_classify_portbus(nl, portbus);
 			if ((cls == VPB_STRUCT && !split_structs) ||
 			    (cls == VPB_ARRAY && !split_arrays))
-				keep_flat.push_back(portbus);
+				keep_flat.push_back(std::make_pair(nl, portbus));
 		}
-
-		for (PortBus *pb : keep_flat)
-			nl->Remove(pb);
-		nl->ChangePortBusStructures(0 /* this netlist only */);
-		for (PortBus *pb : keep_flat)
-			nl->Add(pb);
 	}
+
+	for (auto &it : keep_flat)
+		it.first->Remove(it.second);
+	top->ChangePortBusStructures(1 /* hierarchical, atomic -- same stock path as the coupled case */);
+	for (auto &it : keep_flat)
+		it.first->Add(it.second);
 }
 
 std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
