@@ -1904,7 +1904,6 @@ struct SimWorker : SimShared
 		// -fast: only decompress handles mapped for this cosim (not the whole FST).
 		std::vector<fstHandle> fac_mask;
 		if (fast) {
-			fac_mask = fst_clock;
 			for (auto t : tops)
 				t->collectFstHandles(fac_mask);
 			log("FST filtered replay (-fast): %d mapped handles.\n", GetSize(fac_mask));
@@ -3343,8 +3342,9 @@ struct SimPass : public Pass {
 		log("        overwrite register state from VCD file every cycle\n");
 		log("\n");
 		log("    -fast\n");
-		log("        FST/VCD cosim speed mode. If enabled, only sample on signals\n");
-		log("        that matter in the design.\n");
+		log("        FST/VCD cosim: decompress only handles mapped for the active\n");
+		log("        instance(s). Time range stays unlimited so -start matches the\n");
+		log("        non-fast initial state for stable pre-start signals.\n");
 		log("\n");
 		log("    -normxz\n");
 		log("        normalize x/z to 0 before values participate in simulation and\n");

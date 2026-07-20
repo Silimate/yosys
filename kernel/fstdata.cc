@@ -329,7 +329,9 @@ void FstData::reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, 
 	past_time = start_time;
 	all_samples = clk_signals.empty();
 
-	fstReaderSetLimitTimeRange(ctx, start, end);
+	// Need pre-start VCs so stable signals are not x at -start.
+	fstReaderSetUnlimitedTimeRange(ctx);
+	// Only decompress mapped DUT handles (+ clocks); skip the rest of the dump.
 	fstReaderClrFacProcessMaskAll(ctx);
 	auto add = [&](fstHandle h) {
 		if (h != 0)
@@ -341,6 +343,8 @@ void FstData::reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, 
 		add(h);
 
 	fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
+
+	// Flush final sample(s) if the last VC was before end_time / end_cycle.
 	if (last_time!=end_time && curr_cycle <= last_cycle) {
 		past_data = last_data;
 		callback(last_time);
