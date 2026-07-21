@@ -335,6 +335,9 @@ struct OptBoundaryPass : Pass {
 			// Wires from rolled-back cones are collected here and removed in one batch below.
 			std::vector<Wire*> dead_wires;
 
+			// Tracks whether the parent module was mutated.
+			bool parent_changed = false;
+
 			for (auto instance : parent->cells().to_vector()) {
 				if (instance->has_keep_attr()) {
 					log_debug("opt_boundary: skipping kept instance %s in %s\n", log_id(instance), log_id(parent));
@@ -417,6 +420,7 @@ struct OptBoundaryPass : Pass {
 							changed_port = true;
 						}
 						did_something = true;
+						parent_changed = true;
 
 						if (copied_cells > 0)
 							log("Copied %d cells from cone driving %s[%d] of instance '%s' (type '%s') into '%s'\n",
@@ -435,6 +439,10 @@ struct OptBoundaryPass : Pass {
 			// Single whole-module scan to drop all rolled-back wires for this parent.
 			if (!dead_wires.empty())
 				parent->remove(pool<Wire*>(dead_wires.begin(), dead_wires.end()));
+
+			// Invalidate child info cache if we mutated this parent.
+			if (parent_changed)
+				child_info_cache.erase(parent);
 		}
 
 		if (did_something)
