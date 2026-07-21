@@ -63,13 +63,15 @@ struct BoundaryConeWorker {
 	std::vector<Wire*> created_wires;
 	std::vector<Cell*> created_cells;
 	pool<Cell*> active_cells;
+	std::vector<Wire*> &dead_wires; // parent-scope stash of rolled-back wires, removed in one batch
 	int copied_cell_count = 0;
 	int materialized_bit_count = 0;
 	bool setup_failed = false;
 	bool failed = false;
 
-	BoundaryConeWorker(Module *child, Module *parent, Cell *instance, const ChildConeInfo &info, int max_cells, int max_bits)
-		: child(child), parent(parent), info(info), max_cells(max_cells), max_bits(max_bits)
+	BoundaryConeWorker(Module *child, Module *parent, Cell *instance, const ChildConeInfo &info,
+			std::vector<Wire*> &dead_wires, int max_cells, int max_bits)
+		: child(child), parent(parent), info(info), max_cells(max_cells), max_bits(max_bits), dead_wires(dead_wires)
 	{
 		for (auto wire : child->wires()) {
 			if (!wire->port_input || wire->port_output)
@@ -200,9 +202,7 @@ struct BoundaryConeWorker {
 	{
 		for (auto it = created_cells.rbegin(); it != created_cells.rend(); ++it)
 			parent->remove(*it);
-		// Batch wire removal to avoid bit-level blowup.
-		if (!created_wires.empty())
-			parent->remove(pool<Wire*>(created_wires.begin(), created_wires.end()));
+		dead_wires.insert(dead_wires.end(), created_wires.begin(), created_wires.end());
 		clear_copy_state();
 	}
 };
@@ -332,6 +332,9 @@ struct OptBoundaryPass : Pass {
 
 			ParentUsage parent_usage(parent, design);
 
+			// Wires from rolled-back cones are collected here and removed in one batch below.
+			std::vector<Wire*> dead_wires;
+
 			for (auto instance : parent->cells().to_vector()) {
 				if (instance->has_keep_attr()) {
 					log_debug("opt_boundary: skipping kept instance %s in %s\n", log_id(instance), log_id(parent));
@@ -354,7 +357,7 @@ struct OptBoundaryPass : Pass {
 				// instance-specific input_map is built per instance here.
 				if (!child_info_cache.count(child))
 					child_info_cache[child] = ChildConeInfo(child);
-				BoundaryConeWorker worker(child, parent, instance, child_info_cache.at(child), max_cells, max_bits);
+				BoundaryConeWorker worker(child, parent, instance, child_info_cache.at(child), dead_wires, max_cells, max_bits);
 
 				for (auto &conn : instance->connections_) {
 					Wire *port = child->wire(conn.first);
@@ -428,6 +431,10 @@ struct OptBoundaryPass : Pass {
 						conn.second = new_conn;
 				}
 			}
+
+			// Single whole-module scan to drop all rolled-back wires for this parent.
+			if (!dead_wires.empty())
+				parent->remove(pool<Wire*>(dead_wires.begin(), dead_wires.end()));
 		}
 
 		if (did_something)
