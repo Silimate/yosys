@@ -380,6 +380,7 @@ RTLIL::Const::Const(long long int val) // default width 32
 
 RTLIL::Const::Const(long long int val, int width)
 {
+	log_assert(width >= 0 && width < RTLIL::WIDTH_LIMIT);
 	flags = RTLIL::CONST_FLAG_NONE;
 	if ((width & 7) == 0) {
 		new ((void*)&str_) std::string();
@@ -408,6 +409,7 @@ RTLIL::Const::Const(long long int val, int width)
 
 RTLIL::Const::Const(RTLIL::State bit, int width)
 {
+	log_assert(width >= 0 && width < RTLIL::WIDTH_LIMIT);
 	flags = RTLIL::CONST_FLAG_NONE;
 	new ((void*)&bits_) bitvectype();
 	tag = backing_tag::bits;
@@ -3199,6 +3201,7 @@ void RTLIL::Module::fixup_ports()
 
 RTLIL::Wire *RTLIL::Module::addWire(RTLIL::IdString name, int width)
 {
+	log_assert(width >= 0 && width < RTLIL::WIDTH_LIMIT);
 	RTLIL::Wire *wire = new RTLIL::Wire;
 	wire->name = std::move(name);
 	wire->width = width;

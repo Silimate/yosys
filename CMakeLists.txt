@@ -53,8 +53,11 @@ option(YOSYS_WITHOUT_ZLIB "Disable zlib integration" OFF)
 option(YOSYS_WITHOUT_LIBFFI "Disable libffi integration" OFF)
 option(YOSYS_WITHOUT_READLINE "Disable readline integration" ON)
 option(YOSYS_WITHOUT_EDITLINE "Disable editline integration" OFF)
+option(YOSYS_WITHOUT_SLANG "Disable Slang integration" OFF)
 option(YOSYS_WITHOUT_TCL "Disable Tcl integration" OFF)
 option(YOSYS_WITH_PYTHON "Enable Python integration" OFF)
+
+option(YOSYS_USE_BUNDLED_LIBS "Use bundled third-party libraries" OFF)
 
 set(YOSYS_VERIFIC_DIR "" CACHE FILEPATH "Path to the Verific source code (empty to disable)")
 set(YOSYS_VERIFIC_COMPONENTS "" CACHE STRING
@@ -125,7 +128,7 @@ if (YOSYS_ENABLE_COVERAGE)
 	if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
 	elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-instr-generate -fcoverage-mapping")
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-instr-generate -fcoverage-mapping -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-inline -fno-inline-small-functions -fno-default-inline")
 	else()
 		message(FATAL_ERROR "Code coverage is not supported on ${CMAKE_CXX_COMPILER_ID} compiler")
 	endif()
@@ -310,6 +313,7 @@ condition(YOSYS_ENABLE_EDITLINE editline_FOUND AND NOT YOSYS_WITHOUT_EDITLINE AN
 condition(YOSYS_ENABLE_TCL tcl_FOUND AND libtommath_FOUND AND NOT YOSYS_WITHOUT_TCL)
 condition(YOSYS_ENABLE_PYTHON Python3Devel_FOUND AND PyosysEnv_FOUND AND YOSYS_WITH_PYTHON)
 condition(YOSYS_ENABLE_VERIFIC YOSYS_VERIFIC_DIR AND zlib_FOUND)
+condition(YOSYS_ENABLE_SLANG NOT YOSYS_WITHOUT_SLANG)
 
 include(SilimateVerific)
 
