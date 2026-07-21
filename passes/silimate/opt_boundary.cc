@@ -25,13 +25,38 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+// Child-only cone data that is independent of the parent instance, so it can be
+// built once per child module and reused across all of its instances.
+struct ChildConeInfo {
+	SigMap sigmap;
+	dict<SigBit, Cell*> bit_driver; // canonical child bit -> cell that drives it
+
+	ChildConeInfo() {}
+
+	ChildConeInfo(Module *child) : sigmap(child)
+	{
+		for (auto cell : child->cells()) {
+			// Only evaluable, non-kept cells can be safely copied into the parent.
+			if (!yosys_celltypes.cell_evaluable(cell->type) || cell->has_keep_attr())
+				continue;
+			for (auto &conn : cell->connections()) {
+				if (!yosys_celltypes.cell_output(cell->type, conn.first))
+					continue;
+				// Map each driven bit to its driver.
+				for (auto bit : conn.second)
+					if (bit.is_wire())
+						bit_driver[sigmap(bit)] = cell;
+			}
+		}
+	}
+};
+
 struct BoundaryConeWorker {
 	Module *child, *parent;
-	SigMap child_sigmap;
+	const ChildConeInfo &info;
 	int max_cells;
 	int max_bits;
 
-	dict<SigBit, Cell*> bit_driver;
 	dict<SigBit, SigBit> input_map;
 	dict<SigBit, SigBit> copied_bits;
 	dict<Cell*, Cell*> copied_cells;
@@ -43,8 +68,8 @@ struct BoundaryConeWorker {
 	bool setup_failed = false;
 	bool failed = false;
 
-	BoundaryConeWorker(Module *child, Module *parent, Cell *instance, int max_cells, int max_bits)
-		: child(child), parent(parent), child_sigmap(child), max_cells(max_cells), max_bits(max_bits)
+	BoundaryConeWorker(Module *child, Module *parent, Cell *instance, const ChildConeInfo &info, int max_cells, int max_bits)
+		: child(child), parent(parent), info(info), max_cells(max_cells), max_bits(max_bits)
 	{
 		for (auto wire : child->wires()) {
 			if (!wire->port_input || wire->port_output)
@@ -57,25 +82,13 @@ struct BoundaryConeWorker {
 				continue;
 			}
 			for (int i = 0; i < wire->width; i++)
-				input_map[child_sigmap(SigBit(wire, i))] = conn[i];
-		}
-
-		for (auto cell : child->cells()) {
-			if (!yosys_celltypes.cell_evaluable(cell->type) || cell->has_keep_attr())
-				continue;
-			for (auto &conn : cell->connections()) {
-				if (!yosys_celltypes.cell_output(cell->type, conn.first))
-					continue;
-				for (auto bit : conn.second)
-					if (bit.is_wire())
-						bit_driver[child_sigmap(bit)] = cell;
-			}
+				input_map[info.sigmap(SigBit(wire, i))] = conn[i];
 		}
 
 		failed = setup_failed;
 	}
 
-	// Drop per-attempt copy state but keep bit_driver/input_map for reuse across bits.
+	// Drop per-attempt copy state but keep input_map (and the shared child info) for reuse across bits.
 	void clear_copy_state()
 	{
 		created_cells.clear();
@@ -105,7 +118,7 @@ struct BoundaryConeWorker {
 
 	SigBit materialize(SigBit bit)
 	{
-		bit = child_sigmap(bit);
+		bit = info.sigmap(bit);
 
 		if (!bit.is_wire())
 			return bit;
@@ -116,12 +129,12 @@ struct BoundaryConeWorker {
 		if (copied_bits.count(bit))
 			return copied_bits.at(bit);
 
-		if (!bit_driver.count(bit)) {
+		if (!info.bit_driver.count(bit)) {
 			failed = true;
 			return RTLIL::Sx;
 		}
 
-		Cell *driver = bit_driver.at(bit);
+		Cell *driver = info.bit_driver.at(bit);
 		if (active_cells.count(driver) || copied_cell_count >= max_cells) {
 			failed = true;
 			return RTLIL::Sx;
@@ -159,7 +172,7 @@ struct BoundaryConeWorker {
 				new_connections[conn.first] = mapped;
 				for (int i = 0; i < GetSize(conn.second); i++) {
 					if (conn.second[i].is_wire())
-						copied_bits[child_sigmap(conn.second[i])] = mapped[i];
+						copied_bits[info.sigmap(conn.second[i])] = mapped[i];
 				}
 				continue;
 			}
@@ -187,8 +200,9 @@ struct BoundaryConeWorker {
 	{
 		for (auto it = created_cells.rbegin(); it != created_cells.rend(); ++it)
 			parent->remove(*it);
-		for (auto it = created_wires.rbegin(); it != created_wires.rend(); ++it)
-			parent->remove(pool<Wire*>{*it});
+		// Batch wire removal to avoid bit-level blowup.
+		if (!created_wires.empty())
+			parent->remove(pool<Wire*>(created_wires.begin(), created_wires.end()));
 		clear_copy_state();
 	}
 };
@@ -307,6 +321,9 @@ struct OptBoundaryPass : Pass {
 			log_cmd_error("The -max_bits value must be positive.\n");
 
 		bool did_something = false;
+		// bit_driver/sigmap depend only on the child module, so cache them across
+		// all instances (and parents) instead of rebuilding per instance.
+		dict<Module*, ChildConeInfo> child_info_cache;
 		for (auto parent : design->selected_modules(RTLIL::SELECT_WHOLE_ONLY, RTLIL::SB_UNBOXED_CMDERR)) {
 			if (protected_module(parent)) {
 				log_debug("opt_boundary: skipping protected parent module %s\n", log_id(parent));
@@ -333,8 +350,11 @@ struct OptBoundaryPass : Pass {
 					continue;
 				}
 
-				// Build bit_driver/input_map once per instance; reset only copy state between bits.
-				BoundaryConeWorker worker(child, parent, instance, max_cells, max_bits);
+				// bit_driver/sigmap are reused from the child cache; only the
+				// instance-specific input_map is built per instance here.
+				if (!child_info_cache.count(child))
+					child_info_cache[child] = ChildConeInfo(child);
+				BoundaryConeWorker worker(child, parent, instance, child_info_cache.at(child), max_cells, max_bits);
 
 				for (auto &conn : instance->connections_) {
 					Wire *port = child->wire(conn.first);
