@@ -931,3 +931,183 @@ select -assert-count 1 top/t:m
 
 design -reset
 log -pop
+
+log -header "Overlapping cones: instances share parent inputs"
+log -push
+design -reset
+# u0 and u1 both read a,b, so their copied cones overlap on the same parent inputs.
+# Expect: both leaf boundaries gone, one $and per instance (2 total, unique names).
+read_verilog <<EOF
+module leaf(input a, input b, output y);
+  assign y = a & b;
+endmodule
+
+module top(input a, input b, output y0, output y1);
+  leaf u0(.a(a), .b(b), .y(y0));
+  leaf u1(.a(a), .b(b), .y(y1));
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_expr
+opt_clean
+design -save start
+flatten
+design -save gold
+design -load start
+opt_boundary
+opt_clean
+select -assert-count 0 top/t:leaf
+select -assert-count 2 top/t:$and
+flatten
+design -save gate
+
+design -reset
+design -copy-from gold -as gold A:top
+design -copy-from gate -as gate A:top
+rename -hide
+equiv_make gold gate equiv
+equiv_simple equiv
+equiv_status -assert equiv
+
+design -reset
+log -pop
+
+log -header "Overlapping cones: chained instances"
+log -push
+design -reset
+# u1 consumes u0's output t, so the two copied cones overlap/chain through net t.
+# Expect: both leaf boundaries gone, 2 $and copied and wired in series.
+read_verilog <<EOF
+module leaf(input a, input b, output y);
+  assign y = a & b;
+endmodule
+
+module top(input a, input b, input c, output y);
+  wire t;
+  leaf u0(.a(a), .b(b), .y(t));
+  leaf u1(.a(t), .b(c), .y(y));
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_expr
+opt_clean
+design -save start
+flatten
+design -save gold
+design -load start
+opt_boundary
+opt_clean
+select -assert-count 0 top/t:leaf
+select -assert-count 2 top/t:$and
+flatten
+design -save gate
+
+design -reset
+design -copy-from gold -as gold A:top
+design -copy-from gate -as gate A:top
+rename -hide
+equiv_make gold gate equiv
+equiv_simple equiv
+equiv_status -assert equiv
+
+design -reset
+log -pop
+
+log -header "Overlapping cones: shared sub-cone within one instance"
+log -push
+design -reset
+# x and y both use t=a&b, so their cones overlap on t; each output copies its own cone,
+# so t is duplicated rather than shared. Expect: 0 leaf, 2 $and (dup), 1 $xor, 1 $or.
+read_verilog <<EOF
+module leaf(input a, input b, input c, output x, output y);
+  wire t = a & b;
+  assign x = t ^ c;
+  assign y = t | c;
+endmodule
+
+module top(input a, input b, input c, output x, output y);
+  leaf u(.a(a), .b(b), .c(c), .x(x), .y(y));
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_expr
+opt_clean
+design -save start
+flatten
+design -save gold
+design -load start
+opt_boundary
+opt_clean
+select -assert-count 0 top/t:leaf
+select -assert-count 2 top/t:$and
+select -assert-count 1 top/t:$xor
+select -assert-count 1 top/t:$or
+flatten
+design -save gate
+
+design -reset
+design -copy-from gold -as gold A:top
+design -copy-from gate -as gate A:top
+rename -hide
+equiv_make gold gate equiv
+equiv_simple equiv
+equiv_status -assert equiv
+
+design -reset
+log -pop
+
+log -header "Modified module is reoptimized as a child (cache invalidation)"
+log -push
+design -reset
+# q_mid gets l_leaf's cone in one pass, which makes q_mid itself optimizable as a child.
+# A parent visited after that (p_pre) bubbles q_mid up too -- only if q_mid's stale
+# child-cone cache is invalidated. Expect: p_pre optimized (0 q_mid, 1 $and); r_post,
+# visited before q_mid changed, keeps its q_mid instance.
+read_verilog <<EOF
+module p_pre(input a, input b, output y);
+  q_mid u(.a(a), .b(b), .y(y));
+endmodule
+
+module q_mid(input a, input b, output y);
+  l_leaf u(.a(a), .b(b), .y(y));
+endmodule
+
+module r_post(input a, input b, output y);
+  q_mid u(.a(a), .b(b), .y(y));
+endmodule
+
+module l_leaf(input a, input b, output y);
+  assign y = a & b;
+endmodule
+EOF
+proc
+opt_expr
+opt_clean
+design -save start
+flatten
+design -save gold
+design -load start
+opt_boundary
+opt_clean
+
+select -assert-count 1 r_post/t:q_mid
+select -assert-count 0 r_post/t:$and
+
+select -assert-count 0 p_pre/t:q_mid
+select -assert-count 1 p_pre/t:$and
+flatten
+design -save gate
+
+design -reset
+design -copy-from gold -as gold p_pre
+design -copy-from gate -as gate p_pre
+rename -hide
+equiv_make gold gate equiv
+equiv_simple equiv
+equiv_status -assert equiv
+
+design -reset
+log -pop
