@@ -2181,7 +2181,6 @@ struct AbcPass : public Pass {
 		g_arg = design->scratchpad_get_string("abc.g", g_arg);
 		config.abc_node_retention = design->scratchpad_get_bool("abc.node_retention", false);
 		config.abc_max_node_retention_origins = design->scratchpad_get_int("abc.max_node_retention_origins", 5);
-		config.fast_mode = design->scratchpad_get_bool("abc.fast", false);
 
 		bool dff_mode = design->scratchpad_get_bool("abc.dff", false);
 		std::string clk_str;
