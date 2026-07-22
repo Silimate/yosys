@@ -426,7 +426,7 @@ struct OptBoundaryPass : Pass {
 							log("Copied %d cells from cone driving %s[%d] of instance '%s' (type '%s') into '%s'\n",
 									copied_cells, log_id(port), i, log_id(instance), log_id(instance->type), log_id(parent));
 						else
-							log("Bypassed cone driving %s[%d] of instance '%s' (type '%s') in '%s'\n",
+							log_debug("Bypassed cone driving %s[%d] of instance '%s' (type '%s') in '%s'\n",
 									log_id(port), i, log_id(instance), log_id(instance->type), log_id(parent));
 						worker.clear_copy_state();
 					}
