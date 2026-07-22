@@ -53,7 +53,7 @@ option(YOSYS_WITHOUT_ZLIB "Disable zlib integration" OFF)
 option(YOSYS_WITHOUT_LIBFFI "Disable libffi integration" OFF)
 option(YOSYS_WITHOUT_READLINE "Disable readline integration" ON)
 option(YOSYS_WITHOUT_EDITLINE "Disable editline integration" OFF)
-option(YOSYS_WITHOUT_SLANG "Disable Slang integration" OFF)
+option(YOSYS_WITHOUT_SLANG "Disable Slang integration" ON)
 option(YOSYS_WITHOUT_TCL "Disable Tcl integration" OFF)
 option(YOSYS_WITH_PYTHON "Enable Python integration" OFF)
 
