@@ -53,6 +53,7 @@ struct ChildConeInfo {
 
 struct BoundaryConeWorker {
 	Module *child, *parent;
+	Cell *cell;
 	const ChildConeInfo &info;
 	int max_cells;
 	int max_bits;
@@ -71,7 +72,8 @@ struct BoundaryConeWorker {
 
 	BoundaryConeWorker(Module *child, Module *parent, Cell *instance, const ChildConeInfo &info,
 			std::vector<Wire*> &dead_wires, int max_cells, int max_bits)
-		: child(child), parent(parent), info(info), max_cells(max_cells), max_bits(max_bits), dead_wires(dead_wires)
+		: child(child), parent(parent), cell(instance), info(info), max_cells(max_cells), max_bits(max_bits),
+		  dead_wires(dead_wires)
 	{
 		for (auto wire : child->wires()) {
 			if (!wire->port_input || wire->port_output)
@@ -168,7 +170,7 @@ struct BoundaryConeWorker {
 			}
 
 			if (yosys_celltypes.cell_output(driver->type, conn.first)) {
-				Wire *wire = parent->addWire(NEW_ID_SUFFIX("opt_boundary"), GetSize(conn.second));
+				Wire *wire = parent->addWire(NEW_ID2, GetSize(conn.second));
 				created_wires.push_back(wire);
 				SigSpec mapped = wire;
 				new_connections[conn.first] = mapped;
@@ -187,7 +189,7 @@ struct BoundaryConeWorker {
 			failed = true;
 
 		if (!failed) {
-			Cell *copy = parent->addCell(NEW_ID_SUFFIX("opt_boundary"), driver);
+			Cell *copy = parent->addCell(NEW_ID2, driver);
 			for (auto &conn : new_connections)
 				copy->setPort(conn.first, conn.second);
 			copied_cells[driver] = copy;
@@ -415,7 +417,8 @@ struct OptBoundaryPass : Pass {
 						int copied_cells = worker.copied_cell_count;
 						if (!no_disconnect) {
 							parent->connect(conn.second[i], replacement);
-							Wire *dummy = parent->addWire(NEW_ID_SUFFIX("opt_boundary_output"));
+							Cell *cell = instance;
+							Wire *dummy = parent->addWire(NEW_ID2_SUFFIX("boundary_dangling"));
 							new_conn[i] = SigBit(dummy, 0);
 							changed_port = true;
 						}
@@ -426,7 +429,7 @@ struct OptBoundaryPass : Pass {
 							log("Copied %d cells from cone driving %s[%d] of instance '%s' (type '%s') into '%s'\n",
 									copied_cells, log_id(port), i, log_id(instance), log_id(instance->type), log_id(parent));
 						else
-							log("Bypassed cone driving %s[%d] of instance '%s' (type '%s') in '%s'\n",
+							log_debug("Bypassed cone driving %s[%d] of instance '%s' (type '%s') in '%s'\n",
 									log_id(port), i, log_id(instance), log_id(instance->type), log_id(parent));
 						worker.clear_copy_state();
 					}
