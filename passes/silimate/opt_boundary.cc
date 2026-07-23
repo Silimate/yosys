@@ -418,7 +418,7 @@ struct OptBoundaryPass : Pass {
 						if (!no_disconnect) {
 							parent->connect(conn.second[i], replacement);
 							Cell *cell = instance;
-							Wire *dummy = parent->addWire(NEW_ID2);
+							Wire *dummy = parent->addWire(NEW_ID2_SUFFIX("boundary_dangling"));
 							new_conn[i] = SigBit(dummy, 0);
 							changed_port = true;
 						}
