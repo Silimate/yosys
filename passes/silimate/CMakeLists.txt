@@ -59,6 +59,26 @@ yosys_pass(opt_timing_balance
 yosys_pass(cone_partition
 	cone_partition.cc
 )
+yosys_pass(kepler_lec
+	kepler_lec.cc
+	DATA_DIR
+		silimate
+	DATA_FILES
+		kepler/yosys_primitives.py
+	REQUIRES
+		hierarchy
+		flatten
+		async2sync
+		dffunmap
+		ffnormpol
+		zinit
+		setundef
+		techmap
+		simplemap
+		aigmap
+		opt_clean
+		autoname
+)
 yosys_pass(clkmerge
 	clkmerge.cc
 )
