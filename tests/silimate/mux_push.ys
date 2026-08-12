@@ -566,6 +566,60 @@ select -assert-count 1 @add_fanin @mux_cells %i
 select -assert-count 3 t:$add
 
 design -reset
+
+# An operator that drives one of its own inputs is a one-cell cycle, and pushing
+# it hands the copies a mux that feeds them straight back.
+read_verilog <<EOF
+module top (
+  input wire s,
+  input wire [7:0] a,
+  input wire [7:0] b,
+  output wire [7:0] y
+);
+  wire [7:0] m = s ? b : a;
+  wire [7:0] t;
+  assign t = m + t;
+  assign y = t;
+endmodule
+EOF
+proc
+muxpush -limit 1 -types $add
+select -assert-count 1 t:$add
+
+design -reset
+
+# A cell bridging two loops is on neither, so it still pushes: reaching a cycle
+# and being reached by one is not the same as lying on one.
+read_verilog <<EOF
+module top (
+  input wire s1,
+  input wire [7:0] a1,
+  input wire [7:0] c1,
+  input wire s2,
+  input wire [7:0] c2,
+  input wire sb,
+  input wire [7:0] bb,
+  input wire [7:0] cb,
+  output wire [7:0] y
+);
+  wire [7:0] m1, t1;
+  assign m1 = s1 ? t1 : a1;
+  assign t1 = m1 + c1;
+  wire [7:0] mb = sb ? bb : t1;
+  wire [7:0] tb;
+  assign tb = mb + cb;
+  wire [7:0] m2, t2;
+  assign m2 = s2 ? t2 : tb;
+  assign t2 = m2 + c2;
+  assign y = t2;
+endmodule
+EOF
+proc
+muxpush -limit 1 -types $add
+# The bridge adder split in two; the adder on each loop stayed put
+select -assert-count 4 t:$add
+
+design -reset
 log -pop
 
 
