@@ -498,6 +498,77 @@ design -reset
 log -pop
 
 
+log -header "Negative case: a combinational cycle through an arm is left alone"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire s,
+  input wire [7:0] a,
+  input wire [7:0] c,
+  input wire [7:0] q,
+  output wire [7:0] y
+);
+  wire [7:0] m;
+  wire [7:0] t;
+  assign m = s ? t : a;
+  assign t = m + c;
+  assign y = q;
+endmodule
+EOF
+proc
+
+# t feeds the mux arm and the mux drives t, both at fanout 1. Pushing here just
+# re-creates that shape one adder larger, so the pass keeps finding a candidate
+# and never terminates -- with or without -timing. `check` is not asserted: the
+# combinational loop is the point of the case.
+muxpush -limit 1 -types $add
+select -assert-count 1 t:$add
+select -set add_fanin t:$add %ci*
+select -set mux_cells t:$mux t:$ternary
+select -assert-count 1 @add_fanin @mux_cells %i
+
+muxpush -limit 1 -types $add -timing
+select -assert-count 1 t:$add
+
+design -reset
+
+# The guard is scoped to the cycle itself, not to everything the cycle reaches:
+# the same mux/adder shape strictly downstream of a loop has nothing leading back
+# to it, so its pushes still march toward the outputs and stop. Left in place,
+# this also shows the case above is a cycle being declined rather than every mux
+# that feeds an adder at fanout 1.
+read_verilog <<EOF
+module top (
+  input wire sx,
+  input wire [7:0] ax,
+  input wire [7:0] cx,
+  input wire s,
+  input wire [7:0] b,
+  input wire [7:0] c,
+  output wire [7:0] y
+);
+  wire [7:0] mx;
+  wire [7:0] tx;
+  assign mx = sx ? tx : ax;
+  assign tx = mx + cx;
+  wire [7:0] m = s ? b : tx;
+  assign y = m + c;
+endmodule
+EOF
+proc
+muxpush -limit 1 -types $add
+# The downstream adder pushed, so only its speculated copies read the mux
+select -set add_fanin t:$add %ci*
+select -set mux_cells t:$mux t:$ternary
+select -assert-count 1 @add_fanin @mux_cells %i
+# ...and the adder on the cycle was left alone
+select -assert-count 3 t:$add
+
+design -reset
+log -pop
+
+
 log -header "-slack-margin rejects a negative allowance (ends the script, keep last)"
 log -push
 design -reset

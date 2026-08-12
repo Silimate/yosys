@@ -73,6 +73,8 @@ struct OptMuxPushWorker
   dict<SigBit, RTLIL::Cell*> driver_map;
   dict<SigBit, int> fanout_map;
   dict<SigBit, std::vector<RTLIL::Cell*>> consumer_map;
+  pool<RTLIL::Cell*> cyclic_cells;
+  bool cyclic_valid;
   dict<SigBit, int> arrival_cache;
   pool<SigBit> arrival_active;
   dict<SigBit, int> depart_cache;
@@ -89,7 +91,8 @@ struct OptMuxPushWorker
   OptMuxPushWorker(RTLIL::Design *design, RTLIL::Module *module,
       const pool<IdString> &target_types, int fanout_limit, bool timing_guard,
       int slack_margin, bool recover_folded) :
-      design(design), module(module), sigmap(module), module_depth(0),
+      design(design), module(module), sigmap(module), cyclic_valid(false),
+      module_depth(0),
       target_types(target_types), fanout_limit(fanout_limit),
       timing_guard(timing_guard), slack_margin(slack_margin),
       recover_folded(recover_folded), total_count(0)
@@ -447,6 +450,113 @@ struct OptMuxPushWorker
         fanout_map[bit]++;
       }
     }
+
+    cyclic_valid = false;
+  }
+
+  // True when `cell` sits on a combinational cycle, where a push re-creates the
+  // shape the matcher found one cell larger -- the new mux drives the operand
+  // that feeds the arm -- so run() would never run out of candidates. A cell
+  // merely downstream of a cycle is safe: nothing leads back to it, so its
+  // pushes still march toward the outputs and stop. Ask last: this is the only
+  // guard costing a graph traversal, and it is built lazily so a design that
+  // never reaches it pays nothing.
+  bool is_cyclic(RTLIL::Cell *cell)
+  {
+    if (!cyclic_valid) {
+      find_cyclic_cells();
+      cyclic_valid = true;
+    }
+    return cyclic_cells.count(cell) != 0;
+  }
+
+  // Combinational neighbours of a cell: the drivers of its inputs, or the
+  // consumers of the bits it really drives. Deduplicated, so a Kahn walk
+  // discharges each edge exactly once even where an operand repeats a bit.
+  // Registers end a combinational path, so they are neither.
+  void comb_neighbors(RTLIL::Cell *cell, bool upstream, std::vector<RTLIL::Cell*> &adj)
+  {
+    adj.clear();
+    if (upstream) {
+      for (auto &conn : cell->connections())
+        if (cell->input(conn.first))
+          for (auto &bit : sigmap(conn.second)) {
+            auto it = driver_map.find(bit);
+            if (it != driver_map.end() && it->second != nullptr &&
+                it->second != cell && !it->second->is_builtin_ff())
+              adj.push_back(it->second);
+          }
+    } else {
+      std::vector<RTLIL::SigBit> outs;
+      cell_outputs(cell, outs);
+      for (auto &bit : outs) {
+        auto it_drv = driver_map.find(bit);
+        if (it_drv == driver_map.end() || it_drv->second != cell)
+          continue;
+        auto it_cons = consumer_map.find(bit);
+        if (it_cons == consumer_map.end())
+          continue;
+        for (auto cons : it_cons->second)
+          if (cons != cell && !cons->is_builtin_ff())
+            adj.push_back(cons);
+      }
+    }
+    std::sort(adj.begin(), adj.end());
+    adj.erase(std::unique(adj.begin(), adj.end()), adj.end());
+  }
+
+  // Cells a Kahn ordering cannot place, counting `upstream` neighbours as the
+  // in-degree. Run with the edges it leaves the cycles and everything behind
+  // them; run against the edges it leaves the cycles and everything ahead.
+  void kahn_unplaceable(bool upstream, pool<RTLIL::Cell*> &out)
+  {
+    dict<RTLIL::Cell*, int> indeg;
+    std::vector<RTLIL::Cell*> ready, adj;
+
+    for (auto cell : module->cells()) {
+      if (cell->is_builtin_ff())
+        continue;
+      comb_neighbors(cell, upstream, adj);
+      indeg[cell] = GetSize(adj);
+      if (adj.empty())
+        ready.push_back(cell);
+    }
+
+    while (!ready.empty()) {
+      RTLIL::Cell *cell = ready.back();
+      ready.pop_back();
+      comb_neighbors(cell, !upstream, adj);
+      for (auto next : adj) {
+        auto it = indeg.find(next);
+        if (it != indeg.end() && --it->second == 0)
+          ready.push_back(it->first);
+      }
+    }
+
+    out.clear();
+    for (auto &it : indeg)
+      if (it.second > 0)
+        out.insert(it.first);
+  }
+
+  // A cell is on a cycle exactly when neither ordering can place it: one leaves
+  // the cycles plus what follows them, the other the cycles plus what precedes.
+  void find_cyclic_cells()
+  {
+    cyclic_cells.clear();
+
+    // The acyclic design, which is nearly all of them, stops after one walk
+    pool<RTLIL::Cell*> behind;
+    kahn_unplaceable(true, behind);
+    if (behind.empty())
+      return;
+
+    pool<RTLIL::Cell*> ahead;
+    kahn_unplaceable(false, ahead);
+    for (auto cell : behind)
+      if (ahead.count(cell))
+        cyclic_cells.insert(cell);
+    log_debug("    %d combinational cells lie on a cycle.\n", GetSize(cyclic_cells));
   }
 
   bool sig_has_keep(const RTLIL::SigSpec &sig)
@@ -584,6 +694,8 @@ struct OptMuxPushWorker
             RTLIL::SigSpec arm_b = force_bit(in_sig, sel, true);
             if (!should_push(cell, it.first, arm_a, arm_b))
               continue;
+            if (is_cyclic(cell))
+              continue;
             candidates.push_back({cell, nullptr, it.first, arm_a, arm_b, sel});
             break;
           }
@@ -604,6 +716,8 @@ struct OptMuxPushWorker
           if (!fanout_within_limit(mux_out))
             continue;
           if (!should_push(cell, it.first, arm_a, arm_b))
+            continue;
+          if (is_cyclic(cell))
             continue;
 
           // Only push one mux per operator per iteration
