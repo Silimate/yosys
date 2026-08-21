@@ -43,17 +43,29 @@ void sink_index_module(Module *module)
           sink_drivers[bit] = cell;
 }
 
-// Cheap pre-filter for the sink pattern: a constant amount is already folded by
-// -combine, so without a variable shifter there is nothing for -sink to match.
-bool has_variable_shift(Module *module)
+// Cheap pre-filter for the patterns that need a barrel: a constant amount is
+// already folded by -combine, so without a variable shifter of one of `types`
+// there is nothing to match. -sink and -fuse rewrite a left shift, -push a
+// right one, so each passes the types it can actually use.
+bool has_variable_shift(Module *module, const pool<IdString> &types)
 {
   for (auto cell : module->selected_cells())
-    if (cell->type == ID($shl) && !cell->getPort(ID::B).is_fully_const())
+    if (types.count(cell->type) && !cell->getPort(ID::B).is_fully_const())
       return true;
   return false;
 }
 
 int min_shift_amount(SigSpec amt, int depth = 3);
+
+// Largest value an amount can take, discounting constant-zero high bits. -1 when
+// the range is too wide to enumerate, which every caller treats as a refusal.
+int max_shift_amount(SigSpec amt)
+{
+  int w = GetSize(amt);
+  while (w > 0 && amt[w - 1] == State::S0)
+    w--;
+  return w > 20 ? -1 : (1 << w) - 1;
+}
 
 // Lower bound on `chunk`, which must be the complete output of `drv`. Only
 // unsigned "var + const" is understood; anything else contributes nothing.
@@ -210,15 +222,6 @@ struct GatherFuser
     return inner;
   }
 
-  // Largest value an amount can take, discounting constant-zero high bits
-  int max_amount(SigSpec amt)
-  {
-    int w = GetSize(amt);
-    while (w > 0 && amt[w - 1] == State::S0)
-      w--;
-    return w > 20 ? -1 : (1 << w) - 1;
-  }
-
   void fuse(Cell *outer, Cell *inner, int rot, int mod)
   {
     SigSpec x = sigmap(inner->getPort(ID::A));
@@ -282,7 +285,7 @@ struct GatherFuser
       // A gather that can shift past its source zero-fills there, where the
       // rotate would instead wrap the table back around
       int wo = cell->getParam(ID::Y_WIDTH).as_int();
-      int amax = max_amount(sigmap(cell->getPort(ID::B)));
+      int amax = max_shift_amount(sigmap(cell->getPort(ID::B)));
       if (amax < 0 || wo - 1 + amax >= GetSize(cell->getPort(ID::A)))
         continue;
       if (wo + mod - 1 > max_src_bits)
@@ -292,6 +295,288 @@ struct GatherFuser
       return true;
     }
     return false;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// -push: push a variable right shift through a per-bit merge, so the barrel
+// feeding one side of the merge composes with it
+//
+//   ((S ? b : a) >> s)[j]  ===>  (S >> s)[j] ? (b >> s)[j] : (a >> s)[j]
+//
+// which holds bit by bit because all four shifts drop the same positions and
+// zero-fill the rest. On its own that trades one barrel for three, so it only
+// fires when a side is itself a variable right shift, which then composes into
+// a single barrel over a padded source:
+//
+//   a[i] = (x >> g)[i - k]  ===>  a >> s  =  {x, k'0} >> (g + s)
+//
+// leaving one barrel where the chain had two, the width of the merge apart. An
+// address mapper puts exactly this shape together: a bit-select farm (which
+// opt_vps lowers to a barrel), a merge, and a shift, which -combine cannot pair
+// up because the merge sits between them. The other side and the select word
+// pick up a barrel each, but in a mapper both are fed by configuration rather
+// than by the data path.
+//
+// muxpush does the word-level version of this move, but not this one: a merge
+// whose select differs per bit is not one $mux to hoist, and the rewrite needs
+// the select word shifted alongside the data, which a hoisted mux cannot say.
+//
+// Two places where the composed source is not `a` shifted, and the rewrite has
+// to say so:
+//
+//   - It is wider, so where `a >> s` would zero-fill -- past the top of the
+//     merge -- it keeps delivering bits of x instead. The select is oriented so
+//     that a 1 picks the composed side, which puts the other side's own zero
+//     fill there.
+//   - Its low k positions are pad, not the bits `a` held below x, so the output
+//     bits that read them keep the merge instead.
+// ---------------------------------------------------------------------------
+struct MergePusher
+{
+  Module *module;
+  SigMap sigmap;
+  dict<SigBit, Cell *> drivers;
+  dict<SigBit, int> readers; // reader count, to tell a private merge from a shared one
+  int max_offset;
+  int pushed = 0;
+
+  // One accepted rewrite: `outer` shifts `merged`, one of whose sides is
+  // `inner`'s output raised by k. `other` is the side that keeps its own
+  // shifter, and `sel` selects `inner`'s side when it is 1 -- inverted from the
+  // mux's own select when the match landed on the A side, which a mux reads on 0.
+  struct Candidate {
+    Cell *outer = nullptr, *inner = nullptr;
+    SigSpec merged, other, sel;
+    int k = 0, amt_bits = 0;
+    int levels = 0;  // mux levels the removed barrel costs, which is what to maximize
+    bool invert = false;
+  };
+
+  MergePusher(Module *module, int max_offset)
+    : module(module), sigmap(module), max_offset(max_offset)
+  {
+    for (auto cell : module->cells())
+      for (auto &conn : cell->connections()) {
+        if (cell->output(conn.first)) {
+          for (auto bit : sigmap(conn.second))
+            drivers[bit] = cell;
+          continue;
+        }
+        for (auto bit : sigmap(conn.second))
+          readers[bit]++;
+      }
+    // A module connection is a reader this pass cannot rewrite either
+    for (auto &conn : module->connections())
+      for (auto bit : sigmap(conn.second))
+        readers[bit]++;
+  }
+
+  // Read `word` as a bitwise merge: every bit driven by its own 1-bit $mux, read
+  // by nothing but the shift being pushed, so that consuming the muxes does not
+  // leave the merge alive beside its replacement.
+  bool match_merge(const SigSpec &word, SigSpec &a, SigSpec &b, SigSpec &s)
+  {
+    for (auto bit : word) {
+      auto it = drivers.find(bit);
+      if (it == drivers.end() || it->second->type != ID($mux))
+        return false;
+      Cell *mux = it->second;
+      if (mux->getParam(ID::WIDTH).as_int() != 1 || sigmap(mux->getPort(ID::Y)) != bit)
+        return false;
+      if (readers.at(bit) != 1)
+        return false;
+      a.append(sigmap(mux->getPort(ID::A)));
+      b.append(sigmap(mux->getPort(ID::B)));
+      s.append(sigmap(mux->getPort(ID::S)));
+    }
+    return !word.empty();
+  }
+
+  bool is_plain_shr(Cell *cell)
+  {
+    return cell->type == ID($shr) && !cell->getPort(ID::B).is_fully_const() &&
+           !cell->getParam(ID::A_SIGNED).as_bool() && !cell->getParam(ID::B_SIGNED).as_bool();
+  }
+
+  // Read `word` as a variable right shift's output raised by a constant, so
+  // word[i] == shift.Y[i - k] for every i the composed barrel has to serve
+  Cell *match_raised_shift(const SigSpec &word, int &k)
+  {
+    int w = GetSize(word);
+    auto it = drivers.find(word[w - 1]);
+    if (it == drivers.end() || !is_plain_shr(it->second))
+      return nullptr;
+    Cell *shift = it->second;
+
+    SigSpec y = sigmap(shift->getPort(ID::Y));
+    dict<SigBit, int> index;
+    for (int i = 0; i < GetSize(y); i++)
+      index.emplace(y[i], i);
+
+    auto top = index.find(word[w - 1]);
+    if (top == index.end())
+      return nullptr;
+    k = (w - 1) - top->second;
+    if (k < 0 || w - k > GetSize(y))
+      return nullptr;
+
+    // Every position from k up has to be the shift's own bit, or the composed
+    // barrel would serve a value the merge never held there
+    for (int i = k; i < w; i++) {
+      auto at = index.find(word[i]);
+      if (at == index.end() || at->second != i - k)
+        return nullptr;
+    }
+    return shift;
+  }
+
+  // `sig` shifted right by the outer amount, into a fresh `width`-bit wire
+  SigSpec shift_by_amount(Cell *outer, const SigSpec &sig, int width, const char *tag,
+                          const std::string &src)
+  {
+    Wire *y = module->addWire(NEW_ID_SUFFIX(tag), width);
+    module->addShr(NEW_ID_SUFFIX(tag), sig, sigmap(outer->getPort(ID::B)), SigSpec(y), false,
+                   src);
+    return SigSpec(y);
+  }
+
+  void push(const Candidate &c)
+  {
+    Cell *outer = c.outer;
+    // Drive the bits the cell itself drives, not their sigmap representatives,
+    // which an alias elsewhere in the module can move off this wire
+    SigSpec out = outer->getPort(ID::Y);
+    int wo = GetSize(out);
+    std::string src = cell_src(outer);
+
+    // Padding the source by k lines the barrel up with the merge's indices,
+    // which keeps the composed amount a plain sum of the two amounts
+    SigSpec source(State::S0, c.k);
+    source.append(sigmap(c.inner->getPort(ID::A)));
+    Wire *amt = module->addWire(NEW_ID_SUFFIX("shift_push_amt"), c.amt_bits);
+    module->addAdd(NEW_ID_SUFFIX("shift_push_add"), sigmap(c.inner->getPort(ID::B)),
+                   sigmap(outer->getPort(ID::B)), SigSpec(amt), false, src);
+    Wire *taken = module->addWire(NEW_ID_SUFFIX("shift_push_a"), wo);
+    module->addShr(NEW_ID_SUFFIX("shift_push_a_shr"), source, SigSpec(amt), SigSpec(taken),
+                   false, src);
+
+    // The other side shifts on its own, and so does the select, oriented to pick
+    // the composed side on a 1. Past the top of the merge, where every shift
+    // zero-fills, the select is then 0 and the mux reads the other side's fill
+    // rather than the composed source, which has none there.
+    SigSpec other = shift_by_amount(outer, c.other, wo, "shift_push_b", src);
+    SigSpec picked = c.sel;
+    if (c.invert) {
+      Wire *inv = module->addWire(NEW_ID_SUFFIX("shift_push_sn"), GetSize(c.sel));
+      module->addNot(NEW_ID_SUFFIX("shift_push_not"), c.sel, SigSpec(inv), false, src);
+      picked = SigSpec(inv);
+    }
+    SigSpec sel = shift_by_amount(outer, picked, wo, "shift_push_s", src);
+
+    // Output bits landing in the source's pad get the merge instead. Both words
+    // are one shift of a k-bit word, so they cost no depth of their own:
+    // (~0 >> s)[j] is 1 exactly when j + s < k, and (merged[k-1:0] >> s)[j] is
+    // the merge bit j + s that belongs there.
+    SigSpec keep, from_merge;
+    if (c.k > 0) {
+      keep = shift_by_amount(outer, Const(State::S1, c.k), c.k, "shift_push_keep", src);
+      from_merge = shift_by_amount(outer, c.merged.extract(0, c.k), c.k, "shift_push_low", src);
+    }
+
+    for (int j = 0; j < wo; j++) {
+      bool patch = j < c.k;
+      SigBit y = patch ? SigBit(module->addWire(NEW_ID_SUFFIX("shift_push_y"))) : out[j];
+      module->addMux(NEW_ID_SUFFIX("shift_push_mux"), other[j], SigSpec(taken, j), sel[j], y,
+                     src);
+      if (patch)
+        module->addMux(NEW_ID_SUFFIX("shift_push_low_mux"), y, from_merge[j], keep[j], out[j],
+                       src);
+    }
+
+    log("  shift push: %s through a %d-bit merge onto %s (offset %d)\n", log_id(outer->name),
+        GetSize(c.merged), log_id(c.inner->name), c.k);
+    module->remove(outer);
+    pushed++;
+  }
+
+  bool reject(Cell *cell, const char *why)
+  {
+    log_debug("  %s: no push, %s\n", log_id(cell->name), why);
+    return false;
+  }
+
+  bool collect(Cell *cell, Candidate &c)
+  {
+    if (!is_plain_shr(cell) || cell->get_bool_attribute(ID::keep))
+      return false;
+
+    // The rewrite drives Y from muxes instead, which needs Y to be a net this
+    // pass may redrive: not a constant, an input port, or a kept probe
+    for (auto bit : cell->getPort(ID::Y))
+      if (!bit.wire || bit.wire->port_input || bit.wire->get_bool_attribute(ID::keep))
+        return reject(cell, "its output is not this pass's to redrive");
+
+    c.outer = cell;
+    c.merged = sigmap(cell->getPort(ID::A));
+    SigSpec a, b, s;
+    if (!match_merge(c.merged, a, b, s))
+      return reject(cell, "its source is not a merge of 1-bit muxes it alone reads");
+
+    // Without a barrel to compose with, pushing would just triple this one
+    c.inner = match_raised_shift(b, c.k);
+    c.other = a;
+    c.sel = s;
+    c.invert = false;
+    if (!c.inner) {
+      c.inner = match_raised_shift(a, c.k);
+      c.other = b;
+      c.invert = true;
+    }
+    if (!c.inner || c.inner == cell)
+      return reject(cell, "neither side of the merge is a variable right shift");
+
+    int outer_max = max_shift_amount(sigmap(cell->getPort(ID::B)));
+    int inner_max = max_shift_amount(sigmap(c.inner->getPort(ID::B)));
+    if (outer_max < 0 || inner_max < 0)
+      return reject(cell, "an amount range is too wide to compose");
+
+    // Each padded position costs an output bit that keeps the merge, in place of
+    // the barrel this removes, so bound the offset and require the merge to be
+    // wide enough for the removed barrel to be the deeper of the two. The width
+    // test also rules out a 1-bit "barrel", which is an AND, not a shifter, and
+    // bounds the recursion: the merge a push leaves behind is only k bits wide.
+    if (c.k > max_offset)
+      return reject(cell, "the merge sits further above the inner shift than the limit");
+    if (GetSize(c.merged) <= 2 * std::max(c.k, 1))
+      return reject(cell, "the merge is too narrow to pay for the offset");
+
+    // Wide enough that the composed amount cannot wrap at either extreme
+    c.amt_bits = clog2_int(inner_max + outer_max + 1);
+
+    // A barrel is one mux level per bit of amount range, so that is the depth
+    // this rewrite buys, independent of how wide the shifted word is
+    c.levels = clog2_int(outer_max + 1);
+    return true;
+  }
+
+  // Push at most one shift, so the caller reindexes before looking for more
+  bool run()
+  {
+    Candidate best;
+    for (auto cell : module->selected_cells()) {
+      Candidate c;
+      if (!collect(cell, c))
+        continue;
+      // A push consumes the barrel it lands on, so candidates can exclude each
+      // other; taking the deepest barrel first is what makes the choice pay
+      if (!best.outer || c.levels > best.levels)
+        best = c;
+    }
+    if (!best.outer)
+      return false;
+    push(best);
+    return true;
   }
 };
 
@@ -677,6 +962,27 @@ struct OptShiftPass : public Pass {
     log("      refuse a -fuse rewrite whose repeated source would exceed n\n");
     log("      bits (default 4096).\n");
     log("\n");
+    log("  -push\n");
+    log("      Push a variable right shift through a per-bit merge, so it can\n");
+    log("      compose with the barrel feeding one side of that merge, which\n");
+    log("      -combine cannot do with the merge sitting between them:\n");
+    log("        ((S ? b : a) >> s)[j]\n");
+    log("          ===>  (S >> s)[j] ? (b >> s)[j] : (a >> s)[j]\n");
+    log("        where a[i] = (x >> g)[i - k], so (a >> s) = {x, k'0} >> (g + s)\n");
+    log("      Two barrels on the data path become one; b and S pick up barrels\n");
+    log("      of their own, which is why this only fires when a side really is\n");
+    log("      a variable shift, and why the deepest barrel goes first when\n");
+    log("      several match. The composed source is wider than a, so the\n");
+    log("      select is oriented to pick the composed side on a 1: past the\n");
+    log("      top of the merge, where a >> s would zero-fill, the mux then\n");
+    log("      reads b's fill instead of more of x. Output bits below k keep\n");
+    log("      the merge, since the composed source is pad rather than a there.\n");
+    log("\n");
+    log("  -max_push_offset n\n");
+    log("      refuse a -push rewrite whose merge sits more than n bits above\n");
+    log("      the inner shift, since each of those bits keeps a merge\n");
+    log("      (default 8).\n");
+    log("\n");
     log("  -descale\n");
     log("      Collapse a scale-down round trip around a variable right shift,\n");
     log("      so one carry chain is left instead of two bracketing the shifter:\n");
@@ -694,7 +1000,7 @@ struct OptShiftPass : public Pass {
     log("  -max_iters n\n");
     log("      max number of pass iterations to run.\n");
     log("\n");
-    log("If none of -combine, -expand, -sink, -fuse or -descale is given,\n");
+    log("If none of -combine, -expand, -sink, -fuse, -push or -descale is given,\n");
     log("combine and expand are run.\n");
     log("\n");
   }
@@ -706,8 +1012,10 @@ struct OptShiftPass : public Pass {
     bool run_expand = false;
     bool run_sink = false;
     bool run_fuse = false;
+    bool run_push = false;
     bool run_descale = false;
     int max_fuse_bits = 4096;
+    int max_push_offset = 8;
     int max_iters = 10000;
     int descale_count = 0;
 
@@ -729,12 +1037,20 @@ struct OptShiftPass : public Pass {
         run_fuse = true;
         continue;
       }
+      if (args[argidx] == "-push") {
+        run_push = true;
+        continue;
+      }
       if (args[argidx] == "-descale") {
         run_descale = true;
         continue;
       }
       if (args[argidx] == "-max_fuse_bits" && argidx + 1 < args.size()) {
         max_fuse_bits = std::stoi(args[++argidx]);
+        continue;
+      }
+      if (args[argidx] == "-max_push_offset" && argidx + 1 < args.size()) {
+        max_push_offset = std::stoi(args[++argidx]);
         continue;
       }
       if (args[argidx] == "-max_iters" && argidx + 1 < args.size()) {
@@ -745,7 +1061,7 @@ struct OptShiftPass : public Pass {
     }
     extra_args(args, argidx, design);
 
-    if (!run_combine && !run_expand && !run_sink && !run_fuse && !run_descale) {
+    if (!run_combine && !run_expand && !run_sink && !run_push && !run_fuse && !run_descale) {
       run_combine = true;
       run_expand = true;
     }
@@ -755,6 +1071,7 @@ struct OptShiftPass : public Pass {
       log_cmd_error("opt_shift: -expand and -sink are inverses, pick one.\n");
 
     int total_fused = 0;
+    int total_pushed = 0;
     for (auto module : design->selected_modules())
     {
       // A process can read the nets -descale redirects, and it is not in the
@@ -775,17 +1092,23 @@ struct OptShiftPass : public Pass {
         }
         // Indexing the drivers and every $add is only worth it once we know a
         // variable-amount shifter exists; most modules have none and skip it
-        if (run_sink && has_variable_shift(module)) {
+        if (run_sink && has_variable_shift(module, {ID($shl)})) {
           sink_index_module(module);
           peepopt_sink_pm pm(module);
           pm.setup(module->selected_cells());
           pm.run_sink_shifts();
         }
         // Same pre-filter: a gather only fuses with a variable-amount shifter
-        if (run_fuse && has_variable_shift(module)) {
+        if (run_fuse && has_variable_shift(module, {ID($shl)})) {
           GatherFuser fuser(module, max_fuse_bits);
           did_something |= fuser.run();
           total_fused += fuser.fused;
+        }
+        // Same pre-filter: a merge only pushes onto a variable-amount shifter
+        if (run_push && has_variable_shift(module, {ID($shr)})) {
+          MergePusher pusher(module, max_push_offset);
+          did_something |= pusher.run();
+          total_pushed += pusher.pushed;
         }
         if (descale_module)
           descale_count += run_descale_shifts(module);
@@ -794,6 +1117,8 @@ struct OptShiftPass : public Pass {
 
     if (run_fuse)
       log("Fused %d gather(s) with the shift feeding them.\n", total_fused);
+    if (run_push)
+      log("Pushed %d shift(s) through a merge onto the shift below it.\n", total_pushed);
     if (run_descale)
       log("Collapsed %d scale-down round trip(s) into window-carry logic.\n", descale_count);
   }

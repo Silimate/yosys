@@ -1,0 +1,310 @@
+log -header "Variable shift over a per-bit merge: it composes with the barrel below"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [15:0] x,
+  input wire [3:0]  g,
+  input wire [3:0]  s,
+  input wire [15:0] c,
+  input wire [15:0] z,
+  output wire [15:0] y
+);
+  wire [15:0] inner = x >> g;
+  // A merge whose select differs per bit, which is what keeps muxpush from
+  // hoisting it: there is no one \$mux over the word to move
+  wire [15:0] merged;
+  genvar i;
+  generate for (i = 0; i < 16; i = i + 1) begin : merge
+    assign merged[i] = c[i] ? inner[i] : z[i];
+  end endgenerate
+  assign y = merged >> s;
+endmodule
+EOF
+prep -top top
+check -assert
+select -assert-count 2 t:$shr
+equiv_opt -assert opt_shift -push
+design -load postopt
+opt_clean
+# the composed amount, which no other rewrite in this pass emits
+select -assert-count 1 t:$add
+# one barrel over the padded source, plus one each for the other side and the
+# select word -- the two barrels the merge sat between are now one
+select -assert-count 3 t:$shr
+select -assert-count 0 t:$not
+design -reset
+log -pop
+
+
+
+log -header "Merge raised above the shifter: the padded low bits keep the merge"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [15:0] x,
+  input wire [3:0]  g,
+  input wire [3:0]  s,
+  input wire [15:0] c,
+  input wire [15:0] z,
+  input wire [1:0]  w,
+  output wire [15:0] y
+);
+  wire [15:0] inner = x >> g;
+  wire [15:0] merged;
+  genvar i;
+  generate for (i = 0; i < 2; i = i + 1) begin : low
+    assign merged[i] = c[i] ? w[i] : z[i];
+  end endgenerate
+  // placed two bits up, so the composed barrel reads a source padded by two
+  generate for (i = 2; i < 16; i = i + 1) begin : high
+    assign merged[i] = c[i] ? inner[i-2] : z[i];
+  end endgenerate
+  assign y = merged >> s;
+endmodule
+EOF
+prep -top top
+check -assert
+equiv_opt -assert opt_shift -push
+design -load postopt
+opt_clean
+select -assert-count 1 t:$add
+# the three above, plus the two 2-bit shifts that rebuild the merge where the
+# padded source has nothing to offer
+select -assert-count 5 t:$shr
+design -reset
+log -pop
+
+
+
+log -header "Shifter on the taken-on-zero side: the select is inverted to match"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [15:0] x,
+  input wire [3:0]  g,
+  input wire [3:0]  s,
+  input wire [15:0] c,
+  input wire [15:0] z,
+  output wire [15:0] y
+);
+  wire [15:0] inner = x >> g;
+  wire [15:0] merged;
+  genvar i;
+  generate for (i = 0; i < 16; i = i + 1) begin : merge
+    assign merged[i] = c[i] ? z[i] : inner[i];
+  end endgenerate
+  assign y = merged >> s;
+endmodule
+EOF
+prep -top top
+check -assert
+equiv_opt -assert opt_shift -push
+design -load postopt
+opt_clean
+select -assert-count 1 t:$add
+# a 1 has to pick the composed side, so the select word is inverted first
+select -assert-count 1 t:$not
+design -reset
+log -pop
+
+
+
+log -header "Negative: no barrel under the merge, so pushing would triple the one above"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [15:0] v,
+  input wire [3:0]  s,
+  input wire [15:0] c,
+  input wire [15:0] z,
+  output wire [15:0] y
+);
+  wire [15:0] merged;
+  genvar i;
+  generate for (i = 0; i < 16; i = i + 1) begin : merge
+    assign merged[i] = c[i] ? v[i] : z[i];
+  end endgenerate
+  assign y = merged >> s;
+endmodule
+EOF
+prep -top top
+check -assert
+equiv_opt -assert opt_shift -push
+design -load postopt
+select -assert-count 1 t:$shr
+select -assert-count 0 t:$add
+design -reset
+log -pop
+
+
+
+log -header "Negative: constant inner amount is rewiring, which -combine already folds"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [15:0] x,
+  input wire [3:0]  s,
+  input wire [15:0] c,
+  input wire [15:0] z,
+  output wire [15:0] y
+);
+  wire [15:0] inner = x >> 3;
+  wire [15:0] merged;
+  genvar i;
+  generate for (i = 0; i < 16; i = i + 1) begin : merge
+    assign merged[i] = c[i] ? inner[i] : z[i];
+  end endgenerate
+  assign y = merged >> s;
+endmodule
+EOF
+prep -top top
+check -assert
+equiv_opt -assert opt_shift -push
+design -load postopt
+select -assert-count 0 t:$add
+design -reset
+log -pop
+
+
+
+log -header "Negative: signed operands are outside the unsigned rewrite"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire signed [15:0] x,
+  input wire [3:0]  g,
+  input wire [3:0]  s,
+  input wire [15:0] c,
+  input wire signed [15:0] z,
+  output wire signed [15:0] y
+);
+  wire signed [15:0] inner = x >>> g;
+  wire signed [15:0] merged;
+  genvar i;
+  generate for (i = 0; i < 16; i = i + 1) begin : merge
+    assign merged[i] = c[i] ? inner[i] : z[i];
+  end endgenerate
+  assign y = merged >>> s;
+endmodule
+EOF
+prep -top top
+check -assert
+equiv_opt -assert opt_shift -push
+design -load postopt
+select -assert-count 0 t:$add
+design -reset
+log -pop
+
+
+
+log -header "Negative: a merge with another reader would survive beside its replacement"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [15:0] x,
+  input wire [3:0]  g,
+  input wire [3:0]  s,
+  input wire [15:0] c,
+  input wire [15:0] z,
+  output wire [15:0] y,
+  output wire [15:0] m
+);
+  wire [15:0] inner = x >> g;
+  wire [15:0] merged;
+  genvar i;
+  generate for (i = 0; i < 16; i = i + 1) begin : merge
+    assign merged[i] = c[i] ? inner[i] : z[i];
+  end endgenerate
+  assign y = merged >> s;
+  // the merge is read outside the shift, so removing the shift saves nothing
+  assign m = merged;
+endmodule
+EOF
+prep -top top
+check -assert
+equiv_opt -assert opt_shift -push
+design -load postopt
+select -assert-count 0 t:$add
+design -reset
+log -pop
+
+
+
+log -header "Negative: a merge too narrow for its offset spends more than it saves"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [7:0]  x,
+  input wire [2:0]  g,
+  input wire [1:0]  s,
+  input wire [3:0]  c,
+  input wire [3:0]  z,
+  input wire [1:0]  w,
+  output wire [3:0] y
+);
+  wire [7:0] inner = x >> g;
+  wire [3:0] merged;
+  genvar i;
+  generate for (i = 0; i < 2; i = i + 1) begin : low
+    assign merged[i] = c[i] ? w[i] : z[i];
+  end endgenerate
+  // half the merge would keep a mux of its own, which is the whole saving
+  generate for (i = 2; i < 4; i = i + 1) begin : high
+    assign merged[i] = c[i] ? inner[i-2] : z[i];
+  end endgenerate
+  assign y = merged >> s;
+endmodule
+EOF
+prep -top top
+check -assert
+equiv_opt -assert opt_shift -push
+design -load postopt
+select -assert-count 0 t:$add
+design -reset
+log -pop
+
+
+
+log -header "-max_push_offset bounds how far the merge may sit above the shifter"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [31:0] x,
+  input wire [4:0]  g,
+  input wire [4:0]  s,
+  input wire [31:0] c,
+  input wire [31:0] z,
+  input wire [9:0]  w,
+  output wire [31:0] y
+);
+  wire [31:0] inner = x >> g;
+  wire [31:0] merged;
+  genvar i;
+  generate for (i = 0; i < 10; i = i + 1) begin : low
+    assign merged[i] = c[i] ? w[i] : z[i];
+  end endgenerate
+  generate for (i = 10; i < 32; i = i + 1) begin : high
+    assign merged[i] = c[i] ? inner[i-10] : z[i];
+  end endgenerate
+  assign y = merged >> s;
+endmodule
+EOF
+prep -top top
+check -assert
+# ten bits of pad is over the default limit of eight
+opt_shift -push
+select -assert-count 0 t:$add
+equiv_opt -assert opt_shift -push -max_push_offset 10
+design -load postopt
+select -assert-count 1 t:$add
+design -reset
+log -pop
