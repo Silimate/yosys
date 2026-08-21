@@ -1006,6 +1006,49 @@ select -assert-count 1364 t:$add r:A_WIDTH=12 %i
 design -reset
 log -pop
 
+# Test C6: -min-bits declines narrowings smaller than it asks for.
+#
+# The later pattern matchers read a cell's output as a whole word, so a rewrite that
+# trims a bit or two off one reader can cost a compressor level or a peephole that was
+# worth far more than the bits. A flow that runs such matchers after this pass needs to
+# be able to price the rewrite. Here each of the mul's two ports drops 32 bits to 5, so
+# 54 is exactly affordable and 55 is not.
+log -header "C6: -min-bits prices the rewrite in operand bits"
+log -push
+design -reset
+read_verilog <<EOF
+module top(
+  input  wire [3:0] ma,
+  input  wire [3:0] mb,
+  input  wire       sa,
+  input  wire       sb,
+  output wire signed [31:0] y
+);
+  wire signed [31:0] wa = sa ? -$signed({1'b0, ma}) : $signed({1'b0, ma});
+  wire signed [31:0] wb = sb ? -$signed({1'b0, mb}) : $signed({1'b0, mb});
+  assign y = wa * wb;
+endmodule
+EOF
+proc
+opt -full
+design -save wide
+
+# Exactly affordable: both operand ports still come down
+opt_signif -types $mul -min-bits 54
+select -assert-count 1 t:$mul r:A_WIDTH=5 r:B_WIDTH=5 %i %i
+
+# One bit dearer than the rewrite is worth: left alone
+design -load wide
+opt_signif -types $mul -min-bits 55
+select -assert-count 1 t:$mul r:A_WIDTH=32 r:B_WIDTH=32 %i %i
+
+# The default takes it, so raising the bar is the only thing that declines it
+design -load wide
+opt_signif -types $mul
+select -assert-count 1 t:$mul r:A_WIDTH=5 %i
+design -reset
+log -pop
+
 # ============================================================================
 # Group D: Carrying ranges across registers (-cross-flops)
 # ============================================================================
@@ -1405,5 +1448,550 @@ splitcells -blast t:$sdff
 select -assert-count 8 t:$sdff
 opt_signif -cross-flops
 select -assert-count 1 t:$mul r:A_WIDTH=6 %i
+design -reset
+log -pop
+
+# Test D9: constants wider than the interval arithmetic.
+#
+# A cleared pipeline register and a zeroed mux arm are both words of the datapath's
+# own width, so in a wide datapath both are wider than the arithmetic can hold. Their
+# value is still 0, and refusing them by width loses the register for the two shapes
+# real RTL always has: a reset and a special-value mux. What still has to be refused
+# is a constant whose value genuinely needs those bits, which the third design pins.
+log -header "D9: a wide constant is read by value, not by width"
+log -push
+design -reset
+read_verilog <<EOF
+module top(
+  input  wire clk,
+  input  wire rst,
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  reg signed [127:0] t;
+  always @(posedge clk or posedge rst)
+    if (rst) t <= 128'b0;
+    else t <= a * b;
+  assign y = t * c;
+endmodule
+EOF
+proc
+opt -full
+splitcells -blast t:$adff
+check -assert
+select -assert-count 128 t:$adff
+opt_signif -cross-flops
+select -assert-count 1 t:$mul r:A_WIDTH=8 %i
+
+# The same register behind a special-value mux, the arm being a full-width zero
+design -reset
+read_verilog <<EOF
+module top(
+  input  wire clk,
+  input  wire z,
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  wire signed [127:0] p = a * b;
+  wire signed [127:0] m = z ? 128'sb0 : p;
+  reg signed [127:0] t;
+  always @(posedge clk) t <= m;
+  assign y = t * c;
+endmodule
+EOF
+proc
+opt -full
+splitcells -blast t:$dff
+check -assert
+opt_signif -cross-flops
+select -assert-count 1 t:$mul r:A_WIDTH=8 %i
+
+# Negative control: a reset value that genuinely needs the whole word keeps it
+design -reset
+read_verilog <<EOF
+module top(
+  input  wire clk,
+  input  wire rst,
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  reg signed [127:0] t;
+  always @(posedge clk or posedge rst)
+    if (rst) t <= 128'sh4000_0000_0000_0000_0000_0000_0000_0000;
+    else t <= a * b;
+  assign y = t * c;
+endmodule
+EOF
+proc
+opt -full
+splitcells -blast t:$adff
+check -assert
+opt_signif -cross-flops
+select -assert-count 1 t:$mul r:A_WIDTH=128 %i
+design -reset
+log -pop
+
+# Test E1: a lane written as its own module.
+#
+# This is how datapath RTL is actually written, and a per-module analysis gets nothing
+# from it: the term arrives at the reader as a port of the declared datapath width. The
+# module's own inputs bound what it can put there, so analyzing it once answers for every
+# instance. The registered variant needs -cross-flops on top, since the term is a pipeline
+# register in the shape a real lane has.
+log -header "E1: an instance's output word is bounded by the module it instantiates"
+log -push
+design -reset
+read_verilog <<EOF
+module lane(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  output wire signed [127:0] y
+);
+  assign y = a * b;
+endmodule
+
+module top(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  wire signed [127:0] t;
+  lane u (.a(a), .b(b), .y(t));
+  assign y = t * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+check -assert
+opt_signif
+select -assert-count 1 t:$mul r:A_WIDTH=8 %i
+
+# The same shape with the term registered, which is what a pipelined lane emits
+design -reset
+read_verilog <<EOF
+module lane(
+  input  wire clk,
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  output wire signed [127:0] y
+);
+  reg signed [127:0] t;
+  always @(posedge clk) t <= a * b;
+  assign y = t;
+endmodule
+
+module top(
+  input  wire clk,
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  wire signed [127:0] t;
+  lane u (.clk(clk), .a(a), .b(b), .y(t));
+  assign y = t * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+splitcells -blast t:$dff
+check -assert
+opt_signif -cross-flops
+select -assert-count 1 t:$mul r:A_WIDTH=8 %i
+
+# -no-cross-hier is the behavior before the boundary was crossed: the reader keeps the
+# declared width no matter what the module can put on the port
+design -reset
+read_verilog <<EOF
+module lane(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  output wire signed [127:0] y
+);
+  assign y = a * b;
+endmodule
+
+module top(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  wire signed [127:0] t;
+  lane u (.a(a), .b(b), .y(t));
+  assign y = t * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+check -assert
+opt_signif -no-cross-hier
+select -assert-count 1 t:$mul r:A_WIDTH=128 %i
+design -reset
+log -pop
+
+# Test E2: boundaries nest, so the analysis has to as well. The product module bounds the
+# lane's output, which bounds the top's operand; stopping at either level loses the rest.
+log -header "E2: ranges compose through two levels of hierarchy"
+log -push
+design -reset
+read_verilog <<EOF
+module prod(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  output wire signed [63:0] p
+);
+  assign p = a * b;
+endmodule
+
+module lane(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  output wire signed [127:0] y
+);
+  wire signed [63:0] p;
+  prod u (.a(a), .b(b), .p(p));
+  assign y = p;
+endmodule
+
+module top(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  wire signed [127:0] t;
+  lane u (.a(a), .b(b), .y(t));
+  assign y = t * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+check -assert
+opt_signif
+select -assert-count 1 t:$mul r:A_WIDTH=8 %i
+design -reset
+log -pop
+
+# Test E3: one analysis per module, not per instance.
+#
+# A module is analyzed with its inputs reading every value their width allows, so the
+# answer holds wherever it is instantiated. The cost of that choice is here: the parent
+# feeds a zero-extended nibble, which the module itself cannot know, so its 128-bit input
+# leaves the output unbounded and nothing narrows. Per-instance analysis would catch it.
+log -header "E3: a module's inputs are read as unconstrained, not from the caller"
+log -push
+design -reset
+read_verilog <<EOF
+module pass_through(
+  input  wire signed [127:0] x,
+  output wire signed [127:0] y
+);
+  assign y = x;
+endmodule
+
+module top(
+  input  wire [3:0] a,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  wire signed [127:0] t;
+  pass_through u (.x({124'b0, a}), .y(t));
+  assign y = t * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+check -assert
+opt_signif
+select -assert-count 1 t:$mul r:A_WIDTH=128 %i
+design -reset
+log -pop
+
+# Test E4: a blackbox has no inside to read, so its output word says only what its width
+# says. The narrow port still bounds the reader; the wide one cannot.
+log -header "E4: a blackbox is bounded by its port width and nothing more"
+log -push
+design -reset
+read_verilog <<EOF
+(* blackbox *)
+module narrow_bb(
+  output wire signed [7:0] y
+);
+endmodule
+
+(* blackbox *)
+module wide_bb(
+  output wire signed [127:0] y
+);
+endmodule
+
+module top(
+  input  wire signed [3:0] c,
+  output wire signed [127:0] yn,
+  output wire signed [127:0] yw
+);
+  wire signed [7:0] n;
+  wire signed [127:0] w;
+  narrow_bb un (.y(n));
+  wide_bb uw (.y(w));
+  wire signed [127:0] nx = n;
+  assign yn = nx * c;
+  assign yw = w * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+check -assert
+opt_signif
+select -assert-count 1 t:$mul r:A_WIDTH=8 %i
+select -assert-count 1 t:$mul r:A_WIDTH=128 %i
+design -reset
+log -pop
+
+# Test E5: the analysis is per module, so its cost is paid once however many lanes there
+# are, and every reader gets the bound.
+log -header "E5: one analysis of a module answers for all of its instances"
+log -push
+design -reset
+read_verilog <<EOF
+module lane(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  output wire signed [127:0] y
+);
+  assign y = a * b;
+endmodule
+
+module top(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y0,
+  output wire signed [127:0] y1,
+  output wire signed [127:0] y2,
+  output wire signed [127:0] y3
+);
+  wire signed [127:0] t0, t1, t2, t3;
+  lane u0 (.a(a), .b(b), .y(t0));
+  lane u1 (.a(b), .b(a), .y(t1));
+  lane u2 (.a(a), .b(c), .y(t2));
+  lane u3 (.a(c), .b(b), .y(t3));
+  assign y0 = t0 * c;
+  assign y1 = t1 * c;
+  assign y2 = t2 * c;
+  assign y3 = t3 * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+check -assert
+opt_signif
+select -assert-count 4 t:$mul r:A_WIDTH=8 %i
+design -reset
+log -pop
+
+# Test E6: an instance is not an operator, whatever its ports are called.
+#
+# The range rules key on a cell's Y word, and a parameterized instance's type also starts
+# with '$', so the only thing that separates the two is whether the design has a module by
+# that name. An instance whose output port happens to be named Y would otherwise be read
+# as an operator carrying no width parameter at all, which is a range of exactly zero: the
+# reader would narrow a live word down to one bit.
+log -header "E6: an instance with a port named Y is still an instance"
+log -push
+design -reset
+read_verilog <<EOF
+module thing(
+  input  wire signed [63:0] a,
+  output wire signed [63:0] Y
+);
+  assign Y = a;
+endmodule
+
+module top(
+  input  wire signed [63:0] w,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  wire signed [63:0] t;
+  thing u (.a(w), .Y(t));
+  assign y = t * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+check -assert
+opt_signif
+select -assert-count 1 t:$mul r:A_WIDTH=64 %i
+design -reset
+log -pop
+
+# Test F1: the summary outlives the body.
+#
+# A flow that splits a design into module batches blackboxes everything outside the batch
+# it is working on, so the lane has no body left by the time the tree reading it is
+# narrowed. Recording the range while the body is there is what keeps that boundary
+# crossable; without the record the same blackbox says only how wide its port is.
+log -header "F1: a recorded range crosses a boundary whose far side is gone"
+log -push
+design -reset
+read_verilog <<EOF
+module lane(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  output wire signed [127:0] y
+);
+  assign y = a * b;
+endmodule
+
+module top(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  wire signed [127:0] t;
+  lane u (.a(a), .b(b), .y(t));
+  assign y = t * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+check -assert
+opt_signif -summarize
+select -assert-count 1 lane/w:y a:signif_range_signed %i
+blackbox lane
+opt_signif
+select -assert-count 1 t:$mul r:A_WIDTH=8 %i
+
+# Without the record there is nothing to read, and the port keeps its declared width
+design -reset
+read_verilog <<EOF
+module lane(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  output wire signed [127:0] y
+);
+  assign y = a * b;
+endmodule
+
+module top(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [127:0] y
+);
+  wire signed [127:0] t;
+  lane u (.a(a), .b(b), .y(t));
+  assign y = t * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+check -assert
+blackbox lane
+opt_signif
+select -assert-count 1 t:$mul r:A_WIDTH=128 %i
+design -reset
+log -pop
+
+# Test F2: a range nobody can vouch for is not written down.
+#
+# A self-accumulating register is unbounded by design, so its port gets no attribute --
+# and an attribute left over from an earlier stamp is removed rather than left to be
+# believed after the module it described has changed.
+log -header "F2: an unbounded port carries no range, stale or otherwise"
+log -push
+design -reset
+read_verilog <<EOF
+module top(
+  input  wire clk,
+  input  wire signed [3:0] a,
+  output reg signed [127:0] y
+);
+  always @(posedge clk) y <= y + a;
+endmodule
+EOF
+proc
+opt -full
+setattr -set signif_range_signed 1 w:y
+select -assert-count 1 w:y a:signif_range_signed %i
+opt_signif -summarize -cross-flops
+select -assert-count 0 w:y a:signif_range_signed %i
+design -reset
+log -pop
+
+# Test G1: the cross-boundary rewrite, proven rather than asserted.
+#
+# equiv_opt cannot be used here the way the rest of this file uses it: the solver has no
+# model for a module instance, so it stops at the very boundary under test. Flattening
+# both sides after the rewrite gives it one module to reason about, and comparing that
+# against the unrewritten design flattened the same way proves the narrowing kept the
+# function. The datapath is 32 bits wide because the proof pays for every bit and the
+# boundary is what is being tested, not the width.
+#
+# The recorded-range path in F1 is not provable this way -- a blackbox has no model
+# either -- so what pins it is that it narrows to the same width the body-analysis path
+# does, which F1 and E1 assert against each other.
+log -header "G1: narrowing across a boundary preserves function"
+log -push
+design -reset
+read_verilog <<EOF
+module lane(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  output wire signed [31:0] y
+);
+  assign y = a * b;
+endmodule
+
+module top(
+  input  wire signed [3:0] a,
+  input  wire signed [3:0] b,
+  input  wire signed [3:0] c,
+  output wire signed [31:0] y
+);
+  wire signed [31:0] t;
+  lane u (.a(a), .b(b), .y(t));
+  assign y = t * c;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+design -save orig
+
+# Narrow with the hierarchy intact, then flatten so the solver has something to model
+opt_signif
+select -assert-count 1 t:$mul r:A_WIDTH=8 %i
+flatten
+opt_clean
+design -stash gate
+
+design -load orig
+flatten
+opt_clean
+design -copy-from gate -as gate top
+equiv_make top gate equiv
+equiv_simple
+equiv_status -assert
 design -reset
 log -pop
