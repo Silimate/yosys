@@ -75,6 +75,34 @@ static Range declared_range(int width, bool is_signed)
 	return Range(0, ((wideint_t)1 << width) - 1);
 }
 
+// Exact range of a constant word, judged by value rather than by declared width: a
+// 128-bit zero is 0, and only the bits that differ from the sign have to fit the interval
+// arithmetic. A cleared pipeline register and a zeroed mux arm are both this word, and
+// both are wider than the arithmetic in a wide datapath. Undefined bits are not a value.
+static Range const_bits_range(const std::vector<State> &bits, bool is_signed)
+{
+	int n = GetSize(bits);
+	if (n <= 0)
+		return Range(0, 0);
+	for (int i = 0; i < n; i++)
+		if (bits[i] != State::S0 && bits[i] != State::S1)
+			return Range::unknown();
+	State sign = is_signed ? bits[n - 1] : State::S0;
+	int keep = std::min(n, max_range_width - 1);
+	// Above the arithmetic's reach the word has to be pure sign extension; anything
+	// else is a value no endpoint can hold.
+	for (int i = keep; i < n; i++)
+		if (bits[i] != sign)
+			return Range::unknown();
+	wideint_t v = 0;
+	for (int i = 0; i < keep; i++)
+		if (bits[i] == State::S1)
+			v |= (wideint_t)1 << i;
+	if (sign == State::S1)
+		v -= (wideint_t)1 << keep;
+	return Range(v, v);
+}
+
 // Overflow-checked helpers: any overflow collapses the result to top
 static bool add_ovf(wideint_t a, wideint_t b, wideint_t &out)
 {
@@ -86,14 +114,92 @@ static bool mul_ovf(wideint_t a, wideint_t b, wideint_t &out)
 	return __builtin_mul_overflow(a, b, &out);
 }
 
+// Endpoints are printed and parsed by hand: no smaller type holds them, and __int128 has
+// neither a stream nor a to_string.
+static std::string wideint_to_string(wideint_t v)
+{
+	if (v == 0)
+		return "0";
+	// Take digits off the signed value directly, so the most negative endpoint never has
+	// to be negated as a whole.
+	std::string s;
+	bool neg = v < 0;
+	while (v != 0) {
+		int d = (int)(v % 10);
+		s.push_back('0' + (d < 0 ? -d : d));
+		v /= 10;
+	}
+	if (neg)
+		s.push_back('-');
+	std::reverse(s.begin(), s.end());
+	return s;
+}
+
+static bool string_to_wideint(const std::string &s, wideint_t &out)
+{
+	size_t i = 0;
+	bool neg = i < s.size() && s[i] == '-';
+	if (neg)
+		i++;
+	if (i >= s.size())
+		return false;
+	wideint_t v = 0;
+	for (; i < s.size(); i++) {
+		if (s[i] < '0' || s[i] > '9')
+			return false;
+		wideint_t d = s[i] - '0';
+		if (mul_ovf(v, 10, v) || add_ovf(v, neg ? -d : d, v))
+			return false;
+	}
+	out = v;
+	return true;
+}
+
+// A recorded range on a port, which is how a module's summary survives losing its body.
+// The pair is written as two decimal endpoints so it reads in a dump and diffs in a test.
+static void set_range_attr(Wire *port, IdString attr, const Range &r)
+{
+	if (r.top) {
+		port->attributes.erase(attr);   // never leave a stale range behind
+		return;
+	}
+	port->set_string_attribute(attr, wideint_to_string(r.lo) + " " + wideint_to_string(r.hi));
+}
+
+static Range get_range_attr(Wire *port, IdString attr)
+{
+	if (!port->has_attribute(attr))
+		return Range::unknown();
+	std::string s = port->get_string_attribute(attr);
+	size_t sp = s.find(' ');
+	wideint_t lo, hi;
+	if (sp == std::string::npos || !string_to_wideint(s.substr(0, sp), lo) ||
+			!string_to_wideint(s.substr(sp + 1), hi) || lo > hi)
+		return Range::unknown();
+	return Range(lo, hi);
+}
+
+struct HierCache;
+
 struct SignifWorker
 {
+	// What drives a bit: an output word and which bit of that word this is. The word is
+	// named by a port so one index can hold both a cell's own output (Y, or Q under
+	// -cross-flops) and a submodule instance's output port.
+	struct Driver {
+		Cell *cell = nullptr;
+		IdString port;
+		int offset = 0;
+	};
+
 	Module *module;
+	Design *design;
+	HierCache *hier;       // output-port ranges of instantiated modules, or null
 	SigMap sigmap;
 	FfInitVals initvals;   // init attributes, for bounding a flop's reset/power-up value
 
-	// Sigmapped output bit -> the cell driving it and which output bit it is
-	dict<SigBit, std::pair<Cell *, int>> bit_driver;
+	// Sigmapped output bit -> the word driving it and this bit's place in that word
+	dict<SigBit, Driver> bit_driver;
 
 	dict<Cell *, Range> memo;
 	pool<Cell *> active;   // cells on the current recursion stack, for cycle breaking
@@ -103,6 +209,7 @@ struct SignifWorker
 
 	pool<IdString> narrow_types;
 	bool cross_flops;      // carry ranges across registers (assumes reset before use)
+	int min_bits;          // smallest narrowing worth taking, in operand bits removed
 
 	// One cell's narrowing decision. Flipping an unsigned cell to signed is a property
 	// of the whole cell, so ports cannot be decided independently.
@@ -128,24 +235,58 @@ struct SignifWorker
 	};
 	vector<Plan> plans;
 
-	SignifWorker(Module *module, int max_steps, int max_depth,
-			const pool<IdString> &narrow_types, bool cross_flops) :
-			module(module), sigmap(module), initvals(&sigmap, module),
-			max_steps(max_steps), max_depth(max_depth), narrow_types(narrow_types),
-			cross_flops(cross_flops)
+	SignifWorker(Module *module, Design *design, HierCache *hier, int max_steps,
+			int max_depth, const pool<IdString> &narrow_types, bool cross_flops,
+			int min_bits = 1) :
+			module(module), design(design), hier(hier), sigmap(module),
+			initvals(&sigmap, module), max_steps(max_steps), max_depth(max_depth),
+			narrow_types(narrow_types), cross_flops(cross_flops), min_bits(min_bits)
 	{
 		// Index every cell output bit. Cells whose semantics we do not model still get
 		// indexed; their range rule falls through to the declared width.
 		for (auto cell : module->cells()) {
-			IdString out = out_port(cell);
-			if (out == IdString())
+			if (is_builtin(cell)) {
+				IdString out = out_port(cell);
+				if (out == IdString())
+					continue;
+				SigSpec y = sigmap(cell->getPort(out));
+				for (int i = 0; i < GetSize(y); i++)
+					if (y[i].is_wire())
+						bit_driver[y[i]] = Driver{cell, out, i};
 				continue;
-			SigSpec y = sigmap(cell->getPort(out));
-			for (int i = 0; i < GetSize(y); i++)
-				if (y[i].is_wire())
-					bit_driver[y[i]] = std::make_pair(cell, i);
+			}
+
+			// A submodule instance drives words too. Nothing here can see inside it,
+			// but the same analysis run on the instantiated module bounds its outputs.
+			Module *child = hier != nullptr ? design->module(cell->type) : nullptr;
+			if (child == nullptr)
+				continue;
+			for (auto &conn : cell->connections()) {
+				Wire *port = child->wire(conn.first);
+				// A bidirectional port is driven from the outside as well, so nothing
+				// inside the module bounds it. opt_hier declines these for the same
+				// reason.
+				if (port == nullptr || !port->port_output || port->port_input)
+					continue;
+				SigSpec bits = sigmap(conn.second);
+				for (int i = 0; i < GetSize(bits) && i < port->width; i++)
+					if (bits[i].is_wire())
+						bit_driver[bits[i]] = Driver{cell, conn.first, i};
+			}
 		}
 	}
+
+	// A cell the range rules model, which is an operator or a flop and not an instance:
+	// a parameterized instance's type also starts with '$', so the design decides. Naming
+	// an instance's output port Y would otherwise read it as an operator of no width.
+	bool is_builtin(Cell *cell)
+	{
+		return cell->type.begins_with("$") &&
+				(design == nullptr || design->module(cell->type) == nullptr);
+	}
+
+	// Range of one output port of an instantiated module, from that module's own analysis
+	Range hier_port_range(const Driver &drv, bool is_signed);
 
 	// A flop's Q word is a value like any other: it only ever holds something its D
 	// input held, so the analysis can carry a range across it instead of stopping.
@@ -174,23 +315,24 @@ struct SignifWorker
 		return cell->hasParam(param) ? cell->getParam(param).as_int() : 0;
 	}
 
-	// If bits are exactly cell->Y[0 +: n] in order, return that cell, else nullptr
-	Cell *whole_output_of(const std::vector<SigBit> &bits)
+	// If bits are exactly one driven word's bits [0 +: n] in order, name that word
+	bool whole_output_of(const std::vector<SigBit> &bits, Driver &out)
 	{
 		if (bits.empty() || !bits[0].is_wire())
-			return nullptr;
+			return false;
 		auto it = bit_driver.find(bits[0]);
-		if (it == bit_driver.end() || it->second.second != 0)
-			return nullptr;
-		Cell *cell = it->second.first;
+		if (it == bit_driver.end() || it->second.offset != 0)
+			return false;
+		out = it->second;
 		for (int i = 1; i < GetSize(bits); i++) {
 			if (!bits[i].is_wire())
-				return nullptr;
+				return false;
 			auto jt = bit_driver.find(bits[i]);
-			if (jt == bit_driver.end() || jt->second.first != cell || jt->second.second != i)
-				return nullptr;
+			if (jt == bit_driver.end() || jt->second.cell != out.cell ||
+					jt->second.port != out.port || jt->second.offset != i)
+				return false;
 		}
-		return cell;
+		return true;
 	}
 
 	// Two's-complement add/sub/mul/neg produce the same bits for signed and unsigned
@@ -235,18 +377,11 @@ struct SignifWorker
 				break;
 			}
 		if (all_const) {
-			if (GetSize(bits) > max_range_width)
-				return Range::unknown();
-			wideint_t val = 0;
-			for (int i = 0; i < GetSize(bits); i++) {
-				if (bits[i].data != State::S0 && bits[i].data != State::S1)
-					return Range::unknown();
-				if (bits[i].data == State::S1)
-					val |= (wideint_t)1 << i;
-			}
-			if (is_signed && bits[GetSize(bits) - 1].data == State::S1)
-				val -= (wideint_t)1 << GetSize(bits);
-			return Range(val, val);
+			std::vector<State> states;
+			states.reserve(GetSize(bits));
+			for (auto &bit : bits)
+				states.push_back(bit.data);
+			return const_bits_range(states, is_signed);
 		}
 
 		// Constant-zero high bits mean the value is a narrower *unsigned* quantity,
@@ -257,10 +392,12 @@ struct SignifWorker
 		if (k < GetSize(bits))
 			return sig_range(sig.extract(0, k), false);
 
-		// A whole cell output word (or a low slice of one that provably fits)
-		Cell *cell = whole_output_of(bits);
-		if (cell != nullptr) {
-			Range r = cell_range(cell);
+		// A whole driven word (or a low slice of one that provably fits), which is
+		// either a cell's own output or an instantiated module's output port
+		Driver drv;
+		if (whole_output_of(bits, drv)) {
+			Range r = is_builtin(drv.cell) ? cell_range(drv.cell)
+					: hier_port_range(drv, is_signed);
 			if (r.top)
 				return declared_range(GetSize(bits), is_signed);
 			// Reading fewer bits than the cell drives is a truncation, which only
@@ -269,6 +406,24 @@ struct SignifWorker
 			if (GetSize(bits) >= need)
 				return r;
 			return declared_range(GetSize(bits), is_signed);
+		}
+
+		// Repeated top bits are sign extension whatever drives them, so the word is its
+		// low slice read as signed. This is the same net identity wreduce keys on, and
+		// it is how a narrow value reaches a wide port: a module output declared at the
+		// datapath width but assigned a narrower term arrives here as one sign bit
+		// fanned out over the top of the word.
+		// Only a real net repeats: two undefined bits are not one sign bit, since
+		// setundef may still resolve them differently.
+		int j = GetSize(bits);
+		while (j > 1 && bits[j - 1].is_wire() && bits[j - 1] == bits[j - 2])
+			j--;
+		if (j < GetSize(bits)) {
+			Range r = sig_range(sig.extract(0, j), true);
+			// Unsigned, a sign-extended negative value is a huge positive one, so only
+			// a range that cannot go negative survives the change of reader.
+			if (!r.top && (is_signed || r.lo >= 0))
+				return r;
 		}
 
 		// A word can also be driven bit by bit by a blasted register, which is the shape
@@ -325,9 +480,9 @@ struct SignifWorker
 
 		for (auto &bit : bits) {
 			auto it = bit.is_wire() ? bit_driver.find(bit) : bit_driver.end();
-			if (it == bit_driver.end() || !is_ff(it->second.first))
+			if (it == bit_driver.end() || !is_ff(it->second.cell))
 				return Range::unknown();
-			Cell *cell = it->second.first;
+			Cell *cell = it->second.cell;
 			// A flop already on the recursion stack means feedback: a genuine
 			// accumulator, which must keep its declared width.
 			if (active.count(cell) || GetSize(active) + GetSize(cells) >= max_depth)
@@ -342,7 +497,7 @@ struct SignifWorker
 				return Range::unknown();
 			cells.insert(cell);
 
-			int off = it->second.second;
+			int off = it->second.offset;
 			sig_d.append(ff.sig_d[off]);
 			if (ff.has_aload)
 				sig_ad.append(ff.sig_ad[off]);
@@ -429,7 +584,14 @@ struct SignifWorker
 		// negation representable. Without it a 128-bit word could carry an endpoint at
 		// the 128-bit minimum -- reachable as a checked product, e.g. -2^63 * (2^64-1)
 		// -- and the next $neg or $sub would negate it, which is undefined.
-		if (out.top || signed_width(out.lo, out.hi) > std::min(ywidth, max_range_width))
+		// Judge the fit under the encoding the range is actually in: a non-negative
+		// range needs no sign bit, and requiring one discards every unsigned range that
+		// reaches into the top half of its word (a 6-bit word holding [0,45] is the
+		// exponent sum of a block-scaled lane). sig_range re-checks per reader, so a
+		// signed reader of such a word still falls back to the declared range.
+		int need = out.top ? 0
+				: (out.lo < 0 ? signed_width(out.lo, out.hi) : unsigned_width(out.hi));
+		if (out.top || need > std::min(ywidth, max_range_width))
 			out = declared_range(ywidth, true);
 
 		active.erase(cell);
@@ -563,21 +725,15 @@ struct SignifWorker
 	// flow, so an x could still become either value: treat it as the whole word.
 	static Range const_range(const Const &val, int width, bool is_signed)
 	{
-		if (GetSize(val) > max_range_width)
-			return declared_range(width, is_signed);
-		for (int i = 0; i < GetSize(val); i++)
-			if (val[i] != State::S0 && val[i] != State::S1)
-				return declared_range(width, is_signed);
-		wideint_t v = 0;
-		for (int i = 0; i < GetSize(val); i++)
-			if (val[i] == State::S1)
-				v |= (wideint_t)1 << i;
 		// A flop's constant is a bit pattern of its own width; read it the same way the
 		// Q word is read, so a set-to-all-ones register is -1 when signed and 2^w-1
-		// when unsigned.
-		if (is_signed && GetSize(val) > 0 && val[GetSize(val) - 1] == State::S1)
-			v -= (wideint_t)1 << GetSize(val);
-		return Range(v, v);
+		// when unsigned. A value the arithmetic cannot hold is no constraint at all.
+		std::vector<State> states;
+		states.reserve(GetSize(val));
+		for (int i = 0; i < GetSize(val); i++)
+			states.push_back(val[i]);
+		Range r = const_bits_range(states, is_signed);
+		return r.top ? declared_range(width, is_signed) : r;
 	}
 
 	// Q of a flip-flop: the union of everything it can latch and everything it can be
@@ -835,6 +991,13 @@ struct SignifWorker
 			if (best == nullptr)
 				continue;
 
+			// A narrowing this small is not worth what it can cost downstream: the
+			// later pattern matchers key on a cell's output being read whole, so
+			// trimming a couple of bits off one reader can lose a whole compressor
+			// level or a peephole rewrite that was worth far more than the bits.
+			if (best->bits_saved() < min_bits)
+				continue;
+
 			for (int i = 0; i < 2; i++)
 				if (best->change[i])
 					log_debug("Narrowing %s port %s of %s.%s from %d to %d bits%s.\n",
@@ -868,6 +1031,119 @@ struct SignifWorker
 	int cells_touched() const { return GetSize(plans); }
 	int steps_used() const { return steps; }
 };
+
+// Output-port ranges of instantiated modules, so an instance's output word is bounded by
+// what that module can produce rather than by the width its port is declared at.
+//
+// A per-module analysis stops at every boundary, which on a hierarchical datapath is
+// almost everywhere: a lane written as its own module hands the accumulate tree a word of
+// the declared datapath width, and the tree is then priced at that width even though the
+// lane can only ever put a handful of significant bits in it. Since real RTL is always
+// written that way, without this the pass narrows little outside a flattened design.
+//
+// Each module is analyzed once, with its input ports read as unconstrained. That makes the
+// answer independent of where the module is instantiated, so one analysis serves every
+// instance, and it is an over-approximation of what any particular context supplies -- so
+// it can only ever be looser than the truth, never tighter.
+struct HierCache {
+	Design *design;
+	int max_steps, max_depth;
+	bool cross_flops;
+	dict<IdString, dict<IdString, Range>> summary[2];   // indexed by the reader's signedness
+	pool<IdString> done;     // modules already analyzed, including ones with no answer
+	pool<IdString> active;   // guards a hierarchy cycle, which RTLIL should not contain
+	int steps = 0;
+
+	HierCache(Design *design, int max_steps, int max_depth, bool cross_flops) :
+			design(design), max_steps(max_steps), max_depth(max_depth),
+			cross_flops(cross_flops) { }
+
+	// A range whose low end is negative says nothing about an unsigned word: every
+	// consumer refuses one, so it is not worth carrying or writing down.
+	static Range usable(const Range &r, bool is_signed)
+	{
+		return r.top || is_signed || r.lo >= 0 ? r : Range::unknown();
+	}
+
+	Range port_range(IdString type, IdString port, bool is_signed)
+	{
+		Module *child = design->module(type);
+		if (child == nullptr || active.count(type))
+			return Range::unknown();
+		if (!done.count(type))
+			summarize(child);
+		auto &tab = summary[is_signed ? 1 : 0];
+		auto it = tab.find(type);
+		if (it == tab.end())
+			return Range::unknown();
+		auto jt = it->second.find(port);
+		return jt == it->second.end() ? Range::unknown() : jt->second;
+	}
+
+	// Analyze one module and record what each of its output words can hold. Both
+	// signednesses are recorded because a word's range depends on how it is read: the
+	// same sign-extended term is a narrow signed value and a huge unsigned one.
+	void summarize(Module *child)
+	{
+		active.insert(child->name);
+		// A blackbox has no body to read. Its ports carry whatever a -summarize run
+		// recorded before the body was taken away, and failing that only their width.
+		std::unique_ptr<SignifWorker> worker;
+		if (!child->get_blackbox_attribute())
+			worker.reset(new SignifWorker(child, design, this, max_steps, max_depth, {},
+					cross_flops));
+
+		for (auto name : child->ports) {
+			Wire *port = child->wire(name);
+			if (port == nullptr || !port->port_output || port->port_input)
+				continue;
+			for (int s = 0; s < 2; s++) {
+				Range r;
+				if (worker) {
+					r = worker->sig_range(SigSpec(port), s != 0);
+				} else {
+					r = get_range_attr(port, s != 0 ? ID(signif_range_signed)
+							: ID(signif_range_unsigned));
+					if (r.top)
+						r = declared_range(port->width, s != 0);
+				}
+				r = usable(r, s != 0);
+				if (!r.top)
+					summary[s][child->name][name] = r;
+			}
+		}
+		if (worker)
+			steps += worker->steps_used();
+		active.erase(child->name);
+		done.insert(child->name);
+	}
+
+	// Record every selected module's output ranges on its ports, so they outlive the
+	// bodies that produced them
+	int stamp(Design *d)
+	{
+		int stamped = 0;
+		for (auto module : d->selected_modules())
+			for (auto name : module->ports) {
+				Wire *port = module->wire(name);
+				if (port == nullptr || !port->port_output || port->port_input)
+					continue;
+				Range rs = port_range(module->name, name, true);
+				Range ru = port_range(module->name, name, false);
+				set_range_attr(port, ID(signif_range_signed), rs);
+				set_range_attr(port, ID(signif_range_unsigned), ru);
+				if (!rs.top || !ru.top)
+					stamped++;
+			}
+		return stamped;
+	}
+};
+
+Range SignifWorker::hier_port_range(const Driver &drv, bool is_signed)
+{
+	return hier == nullptr ? Range::unknown()
+			: hier->port_range(drv.cell->type, drv.port, is_signed);
+}
 
 // Arithmetic operators, whose per-port widths are independent parameters so a port can be
 // narrowed on its own, and whose cost grows with operand width -- which is the point of
@@ -936,9 +1212,11 @@ struct OptSignifPass : public Pass {
 		log("    $mux / $pmux             union over the arms\n");
 		log("    flip-flops               with -cross-flops only: union of D, async\n");
 		log("                             load, reset and init values\n");
+		log("    module instances         the same analysis run on that module, unless\n");
+		log("                             -no-cross-hier\n");
 		log("    anything else            the declared width (no narrowing)\n");
 		log("\n");
-		log("Everything the analysis cannot interpret -- module inputs, flip-flop outputs\n");
+		log("Everything the analysis cannot interpret -- top-level inputs, flip-flop outputs\n");
 		log("without -cross-flops, bit-level logic, undefined bits, per-bit set/reset, and\n");
 		log("any range that overflows the 128-bit interval arithmetic -- degrades to the\n");
 		log("declared width, so the pass can only ever narrow a port and never widens one.\n");
@@ -969,6 +1247,37 @@ struct OptSignifPass : public Pass {
 		log("        loaded before its value is used, so keep it off where the power-up\n");
 		log("        state is observable.\n");
 		log("\n");
+		log("    -summarize\n");
+		log("        record each selected module's output-port ranges as\n");
+		log("        'signif_range_signed' and 'signif_range_unsigned' attributes on the\n");
+		log("        ports, and narrow nothing. A blackbox port with such an attribute is\n");
+		log("        read from it, which is what lets the analysis cross a boundary whose\n");
+		log("        far side is gone: a flow that splits a design into module batches\n");
+		log("        blackboxes everything outside the batch it is working on, and the\n");
+		log("        body that bounds the port is then not there to analyze.\n");
+		log("\n");
+		log("        The attribute records the module as this pass saw it. A flow that\n");
+		log("        stamps and then changes what a port carries has to stamp again;\n");
+		log("        stamping immediately before the bodies go away is the safe place.\n");
+		log("        An unbounded port has its attribute removed rather than left stale.\n");
+		log("\n");
+		log("    -no-cross-hier\n");
+		log("        do not look inside instantiated modules. By default an instance's\n");
+		log("        output word is bounded by analyzing the module it instantiates, with\n");
+		log("        that module's inputs read as unconstrained -- so the answer holds\n");
+		log("        wherever it is instantiated, and each module is analyzed once.\n");
+		log("\n");
+		log("        This matters as much as -cross-flops does, and for the same reason:\n");
+		log("        a datapath is written as a lane module instantiated per lane, and a\n");
+		log("        boundary the analysis stops at leaves everything downstream of it\n");
+		log("        priced at the declared width. Unlike -cross-flops it needs no\n");
+		log("        assumption, since a module's inputs are read as taking every value\n");
+		log("        their width allows.\n");
+		log("\n");
+		log("        Modules other than the selected ones are read but never modified.\n");
+		log("        Bidirectional ports are declined, since they are driven from outside\n");
+		log("        the module as well.\n");
+		log("\n");
 		log("    -types <type1>,<type2>,...\n");
 		log("        Only narrow ports of these cell types. Defaults to\n");
 		log("        $add,$sub,$mul,$neg: operators whose per-port widths are independent\n");
@@ -982,6 +1291,15 @@ struct OptSignifPass : public Pass {
 		log("        and asserts if they disagree; the argmax and prefix matchers\n");
 		log("        fingerprint compare widths). When narrowing is asked for on those\n");
 		log("        types, both operands are always taken to the same width.\n");
+		log("\n");
+		log("    -min-bits <n>\n");
+		log("        only narrow a cell when the rewrite removes at least n operand\n");
+		log("        bits (default 1, which takes every narrowing found). The later\n");
+		log("        pattern matchers key on a cell's output being read whole, so a\n");
+		log("        one-bit trim on one reader can cost a compressor level or a\n");
+		log("        peephole rewrite worth much more than the bit. Raise this where\n");
+		log("        such matchers run after this pass and the operands are already\n");
+		log("        near their significant width.\n");
 		log("\n");
 		log("    -max_steps <n>\n");
 		log("        Budget on range evaluations per module (default 100000). Reaching\n");
@@ -1013,12 +1331,19 @@ struct OptSignifPass : public Pass {
 		int max_iters = 4;
 		int max_depth = 1000;
 		bool cross_flops = false;
+		bool cross_hier = true;
+		bool summarize = false;
+		int min_bits = 1;
 		pool<IdString> narrow_types = default_narrow_types();
 
 		size_t argidx = 1;
 		for (; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-max_steps" && argidx + 1 < args.size()) {
 				max_steps = atoi(args[++argidx].c_str());
+				continue;
+			}
+			if (args[argidx] == "-min-bits" && argidx + 1 < args.size()) {
+				min_bits = max(1, atoi(args[++argidx].c_str()));
 				continue;
 			}
 			if (args[argidx] == "-max_depth" && argidx + 1 < args.size()) {
@@ -1039,9 +1364,28 @@ struct OptSignifPass : public Pass {
 				cross_flops = true;
 				continue;
 			}
+			if (args[argidx] == "-no-cross-hier") {
+				cross_hier = false;
+				continue;
+			}
+			if (args[argidx] == "-summarize") {
+				summarize = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
+
+		// One cache for the whole run: every module's output ranges are context-free, so
+		// they are computed once and reused by every parent, at any depth.
+		HierCache hier(design, max_steps, max_depth, cross_flops);
+
+		if (summarize) {
+			int stamped = hier.stamp(design);
+			design->scratchpad_set_int("opt_signif.steps", hier.steps);
+			log("Recorded ranges on %d output port%s.\n", stamped, stamped == 1 ? "" : "s");
+			return;
+		}
 
 		int total_ports = 0, total_cells = 0, total_steps = 0;
 		for (auto module : design->selected_modules()) {
@@ -1051,8 +1395,9 @@ struct OptSignifPass : public Pass {
 			// changes nothing is the fixed point and costs one analysis pass.
 			int ports = 0, cells = 0;
 			for (int iter = 0; iter < max_iters; iter++) {
-				SignifWorker worker(module, max_steps, max_depth, narrow_types,
-						cross_flops);
+				SignifWorker worker(module, design, cross_hier ? &hier : nullptr,
+						max_steps, max_depth, narrow_types, cross_flops,
+						min_bits);
 				int found = worker.run();
 				total_steps += worker.steps_used();
 				if (found == 0)
@@ -1071,8 +1416,9 @@ struct OptSignifPass : public Pass {
 		if (total_ports)
 			design->scratchpad_set_bool("opt.did_something", true);
 		// Range evaluations are a machine-independent stand-in for the pass's cost, which
-		// wall-clock on a shared machine is not.
-		design->scratchpad_set_int("opt_signif.steps", total_steps);
+		// wall-clock on a shared machine is not. The cross-boundary analyses count too:
+		// they are what a hierarchical design adds, and each module is charged once.
+		design->scratchpad_set_int("opt_signif.steps", total_steps + hier.steps);
 		log("Narrowed %d operand port%s on %d cell%s total.\n",
 			total_ports, total_ports == 1 ? "" : "s",
 			total_cells, total_cells == 1 ? "" : "s");
