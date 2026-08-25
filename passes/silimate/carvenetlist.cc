@@ -105,11 +105,21 @@ struct CarveNetlistPass : public Pass {
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    carvenetlist\n");
+		log("    carvenetlist [options]\n");
 		log("\n");
 		log("Carve each surround-with-flops cell-under-test out of the flat 'train' module into\n");
 		log("its own flop-free module and record the surrounding flops as that cell's boundary\n");
 		log("conditions.\n");
+		log("\n");
+		log("    -strict\n");
+		log("        abort if any carved module ends up with no cells. Such a carve\n");
+		log("        characterizes as zero area, which downstream is indistinguishable from a\n");
+		log("        cell that is genuinely free: the operator's area column is dropped when\n");
+		log("        the model is fitted, and the gap only surfaces as a failed Liberty write\n");
+		log("        on the first design that uses the operator. Feed-through and\n");
+		log("        constant-output cells are legitimately gate-less, so this is off by\n");
+		log("        default and the carves are listed as warnings instead; use it for a\n");
+		log("        training run in which every carve is expected to hold logic.\n");
 		log("\n");
 		log("The training netlist is one giant flat module (\"train\") of independent\n");
 		log("cells-under-test, each surrounded by flip-flops (see ml.dataset.surround_with_flops):\n");
@@ -167,7 +177,15 @@ struct CarveNetlistPass : public Pass {
 		log_header(design, "Executing CARVENETLIST pass (carve surround-with-flops cells into "
 				   "per-cell modules and record their flop boundary).\n");
 
+		bool strict = false;
 		size_t argidx = 1;
+		for (; argidx < args.size(); argidx++) {
+			if (args[argidx] == "-strict") {
+				strict = true;
+				continue;
+			}
+			break;
+		}
 		extra_args(args, argidx, design);
 
 		Module *train = design->module(ID(train));
@@ -1135,6 +1153,40 @@ struct CarveNetlistPass : public Pass {
 			mod->set_string_attribute(RTLIL::escape_id("pq_driving_pin"), r.driving_pin);
 			mod->set_string_attribute(RTLIL::escape_id("pq_load_cell"), r.load_cell);
 			mod->set_string_attribute(RTLIL::escape_id("pq_load_pin"), r.load_pin);
+		}
+
+		// A carve with no cells characterizes as zero area. That is correct for a cell that
+		// is genuinely free (a feed-through or a constant output), and wrong for a cone that
+		// lost its cell-under-test -- and the two are indistinguishable from here, so report
+		// rather than judge. Either way it is worth naming: downstream, Yosys stat reports
+		// the module with num_cells 0, the training row carries no usable area, and the
+		// operator's area column is dropped when the model is fitted, so the first design
+		// using that operator fails in Liberty emission with nothing left pointing here.
+		// Walked over the carve list rather than over design->modules() so that only carves
+		// are judged: a module submod never created counts too, since the cell is just as
+		// absent from the training data as one carved empty.
+		std::vector<std::string> gateless;
+		for (auto &it : boundary) {
+			Module *carved = design->module(RTLIL::escape_id(it.first));
+			if (carved == nullptr || carved->cells().size() == 0)
+				gateless.push_back(it.first);
+		}
+		if (!gateless.empty()) {
+			// Already name-ordered: boundary is a std::map
+			for (auto &name : gateless)
+				log_warning("carvenetlist: carved module '%s' has no cells and will "
+					    "characterize as zero area.\n",
+					    name.c_str());
+			if (strict)
+				log_error("carvenetlist: %d of %d carved modules have no cells (listed "
+					  "above). Expected every carve to keep its cell-under-test.\n",
+					  GetSize(gateless), GetSize(boundary));
+			else
+				log_warning("carvenetlist: %d of %d carved modules have no cells. This is "
+					    "expected for feed-through and constant-output cells; pass "
+					    "-strict to fail here instead when every carve should hold "
+					    "logic.\n",
+					    GetSize(gateless), GetSize(boundary));
 		}
 
 		// Drop the flop-bearing train module

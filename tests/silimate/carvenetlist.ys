@@ -365,7 +365,12 @@ module \train
 end
 EOF
 flatten -noscopeinfo
+# A pure feed-through is legitimately gate-less, so the zero-cell report fires here:
+# once for the module and once for the run summary.
+logger -expect warning "carved module 'cell' has no cells" 1
+logger -expect warning "1 of 1 carved modules have no cells" 1
 carvenetlist
+logger -check-expected
 select -assert-none cell/t:$_BUF_
 select -assert-count 1 cell/i:fast_cell_A
 select -assert-none  cell/o:fast_cell_A
@@ -455,3 +460,41 @@ miter -equiv -flatten -make_assert golden cell miter
 sat -verify -prove-asserts -enable_undef miter
 design -reset
 log -pop
+
+# -----------------------------------------------------------------------------
+# Test 7: -strict aborts on a carve that ends up with no cells.
+# A gate-less carve characterizes as zero area. For a feed-through that is
+# correct, but for a cone that lost its cell-under-test (e.g. a sequential
+# cell-under-test misread as a surround launch flop) it is silent corruption:
+# stat reports the module with num_cells 0, the operator's area column is
+# dropped when the model is fitted, and the run only fails much later, during
+# Liberty emission on the first design that uses the operator. -strict turns
+# that into a failure while the carve is still on screen.
+# -----------------------------------------------------------------------------
+log -header "Gate-less carve aborts under -strict"
+log -push
+design -reset
+read_rtlil <<EOF
+autoidx 1
+module \train
+  wire input 1 \fast_clk
+  wire width 1 input 2 \fast_cell_A
+  wire width 1 output 3 \fast_cell_Y
+  wire width 1 \fast_cell_A__pqi
+  wire width 1 \fast_cell_Y__pqo
+  cell $_DFF_P_ \linff0
+    connect \C \fast_clk
+    connect \D \fast_cell_A [0]
+    connect \Q \fast_cell_A__pqi [0]
+  end
+  connect \fast_cell_Y__pqo \fast_cell_A__pqi
+  cell $_DFF_P_ \coutff0
+    connect \C \fast_clk
+    connect \D \fast_cell_Y__pqo [0]
+    connect \Q \fast_cell_Y [0]
+  end
+end
+EOF
+flatten -noscopeinfo
+logger -expect error "1 of 1 carved modules have no cells" 1
+carvenetlist -strict
