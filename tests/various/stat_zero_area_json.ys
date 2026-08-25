@@ -1,0 +1,68 @@
+# Regression test: `stat -json` must emit an explicit `area` for a module that
+# has no cells, as long as the design carries area information at all.
+#
+# The area keys were previously gated on `area != 0`, i.e. on the module's own
+# area rather than on whether any area information was available. A module whose
+# cells all carved away has area 0 and so came out with no `area` key at all --
+# byte for byte the same shape as a module from a design with no Liberty.
+# Downstream consumers that spread `stat` output into a table then saw the area
+# column vanish for that module instead of reading a 0, so a training set full
+# of degenerate zero-cell carves silently lost its area column rather than
+# reporting zeros that could be checked against.
+#
+# Text mode already keyed the area columns off the design-wide `has_area` flag;
+# this makes the JSON path agree with it.
+#
+# The patterns below spell the `"area":` key as `area.:` because a `\"` in a .ys
+# token reaches the regex engine as an invalid escape. The 14-space run is what
+# separates `"area":` from the more tightly padded `"sequential_area":`.
+
+read_liberty -lib <<EOT
+library(test) {
+  cell (dff) {
+    area : 1;
+    ff("IQ", "IQN") { next_state : "(D)"; clocked_on : (CLK); }
+    pin(D)   { direction : input; }
+    pin(CLK) { direction : input; }
+    pin(Q)   { direction: output; function : IQ; }
+  }
+}
+EOT
+
+read_verilog <<EOT
+module has_cells(input CLK, D, output Q);
+  dff u0(.CLK(CLK), .D(D), .Q(Q));
+endmodule
+module no_cells(input a, output y);
+  assign y = a;
+endmodule
+EOT
+hierarchy -check
+
+# The design carries area information, so both modules report an area: the
+# cell-bearing one its real 1.0, the gate-less one an explicit 0.0.
+logger -expect log "area.:[ ]{14}0[.]000000" 1
+logger -expect log "area.:[ ]{14}1[.]000000" 1
+logger -expect-no-warnings
+stat -json
+logger -check-expected
+
+design -reset
+
+# Control: with no area information anywhere in the design, the area keys stay
+# absent. A zero here would be a claim the run cannot make, not a measurement.
+read_verilog <<EOT
+module rtl_only(input a, b, output y);
+  assign y = a & b;
+endmodule
+module truly_empty(input a, output y);
+  assign y = a;
+endmodule
+EOT
+hierarchy -check
+# Matched as a JSON key (`area` + quote + colon) rather than as a bare word, so
+# that an unrelated mention of "area" in the `creator` banner cannot pass for a
+# reported area.
+tee -q -o stat_zero_area_json.nolib.json stat -json
+exec -expect-return 1 -- grep -cE 'area.:[ ]+[0-9]' stat_zero_area_json.nolib.json
+exec -- rm -f stat_zero_area_json.nolib.json

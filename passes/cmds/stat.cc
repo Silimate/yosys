@@ -582,7 +582,14 @@ struct statdata_t {
 			       count_local, area_local);
 	}
 
-	void log_data_json(const char *mod_name, bool first_module, bool hierarchical = false, bool global_only = false)
+	// has_area reports whether the design carries area information at all (i.e. a Liberty
+	// was read), not whether this module's own area is non-zero. Keying the area keys off
+	// the module's own value instead made a module that legitimately has zero area -- one
+	// whose cells all carved away, leaving no gates -- indistinguishable from a design with
+	// no Liberty at all, and consumers that spread stat output into a table then saw the
+	// column go missing rather than read a 0.
+	void log_data_json(const char *mod_name, bool first_module, bool hierarchical = false, bool global_only = false,
+			   bool has_area = true)
 	{
 		if (!first_module)
 			log(",\n");
@@ -652,7 +659,7 @@ struct statdata_t {
 				log("         \"num_processes\":     %u,\n", num_processes);
 				log("         \"num_cells\":         %u,\n", num_cells);
 				log("         \"num_submodules\":       %u,\n", num_submodules);
-				if (area != 0) {
+				if (has_area) {
 					log("         \"area\":              %f,\n", area);
 					log("         \"sequential_area\":    %f,\n", sequential_area);
 				}
@@ -687,7 +694,7 @@ struct statdata_t {
 				log("         \"num_processes\":     %u,\n", local_num_processes);
 				log("         \"num_cells\":         %u,\n", local_num_cells);
 				log("         \"num_submodules\":       %u,\n", num_submodules);
-				if (area != 0) {
+				if (has_area) {
 					log("         \"area\":              %f,\n", area);
 					log("         \"sequential_area\":    %f,\n", sequential_area);
 				}
@@ -1009,7 +1016,7 @@ struct StatPass : public Pass {
 					top_mod = mod;
 			statdata_t data = mod_stat.at(mod->name);
 			if (json_mode) {
-				data.log_data_json(mod->name.c_str(), first_module, hierarchy_mode);
+				data.log_data_json(mod->name.c_str(), first_module, hierarchy_mode, false, has_area);
 				first_module = false;
 			} else {
 				log("\n");
@@ -1038,7 +1045,7 @@ struct StatPass : public Pass {
 			statdata_t data = hierarchy_worker(mod_stat, top_mod->name, 0, /*quiet=*/json_mode, has_area, hierarchy_mode);
 
 			if (json_mode)
-				data.log_data_json("design", true, hierarchy_mode, true);
+				data.log_data_json("design", true, hierarchy_mode, true, has_area);
 			else if (GetSize(mod_stat) > 1) {
 				log("\n");
 				data.log_data(top_mod->name, true, has_area, hierarchy_mode, true);
