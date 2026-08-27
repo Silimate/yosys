@@ -2355,6 +2355,11 @@ struct OptModRedPass : public Pass {
 		int min_terms = 4, max_terms = 512, max_push_depth = 6, min_push_add_width = 8;
 		int max_bits_eval_cells = 256, max_bound_bits = 10;
 		bool opaque_slots = false, push_shift_sub = false;
+		// These two end up as `int64_t(1) << n`, so they have to stay a valid
+		// signed shift however the command line spells them.
+		auto shift_bits = [](const std::string &s) {
+			return std::max(0, std::min(62, std::stoi(s)));
+		};
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -2370,7 +2375,7 @@ struct OptModRedPass : public Pass {
 			}
 			if ((args[argidx] == "-max-cut-bits" || args[argidx] == "-max_cut_bits") &&
 			    argidx + 1 < args.size()) {
-				max_cut_bits = std::stoi(args[++argidx]);
+				max_cut_bits = shift_bits(args[++argidx]);
 				continue;
 			}
 			if ((args[argidx] == "-min-terms" || args[argidx] == "-min_terms") &&
@@ -2403,7 +2408,7 @@ struct OptModRedPass : public Pass {
 			if ((args[argidx] == "-max-bound-bits" ||
 			     args[argidx] == "-max_bound_bits") &&
 			    argidx + 1 < args.size()) {
-				max_bound_bits = std::stoi(args[++argidx]);
+				max_bound_bits = shift_bits(args[++argidx]);
 				continue;
 			}
 			if (args[argidx] == "-opaque-slots" || args[argidx] == "-opaque_slots") {
