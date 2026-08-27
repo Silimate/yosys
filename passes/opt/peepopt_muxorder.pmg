@@ -25,6 +25,11 @@ match op
 	// Set ports, allowing A and B to be swapped
 	choice <IdString> A {\A, \B}
 	define <IdString> B (A == \A ? \B : \A)
+
+	// Under -muxorder-var-only, refuse a constant pushed operand: `a OP const` is
+	// much cheaper than the variable-operand OP this leaves behind, and the select
+	// moves from behind that OP to ahead of its carry chain -- losing area and depth.
+	filter !(muxorder_var_only && port(op, B).is_fully_const())
 	set op_a port(op, A)
 	set op_b port(op, B)
 	set op_y port(op, \Y)

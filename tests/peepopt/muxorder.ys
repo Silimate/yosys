@@ -519,3 +519,80 @@ opt_clean
 equiv_opt -assert peepopt -muxorder
 design -load postopt
 select -assert-any t:$add %co1 %a w:y %i # assert adder rewired
+
+log -pop
+log -header "Test s ? (a + const) : a is transformed by default"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, s, y);
+	input wire [3:0] a;
+	output wire [3:0] y;
+	input wire s;
+	assign y = s ? a + 4'd1 : a;
+endmodule
+EOF
+check -assert
+wreduce
+opt_clean
+equiv_opt -assert peepopt -muxorder
+design -load postopt
+select -assert-any t:$add %co1 %a w:y %i # assert adder rewired
+
+log -pop
+log -header "Test -muxorder-var-only leaves s ? (a + const) : a alone"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, s, y);
+	input wire [3:0] a;
+	output wire [3:0] y;
+	input wire s;
+	assign y = s ? a + 4'd1 : a;
+endmodule
+EOF
+check -assert
+wreduce
+opt_clean
+equiv_opt -assert peepopt -muxorder -muxorder-var-only
+design -load postopt
+select -assert-none t:$add %co1 %a w:y %i # incrementer must stay behind the mux
+
+log -pop
+log -header "Test -muxorder-var-only leaves s ? (a * const) : a alone"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, s, y);
+	input wire [3:0] a;
+	output wire [7:0] y;
+	input wire s;
+	assign y = s ? a * 4'd3 : a;
+endmodule
+EOF
+check -assert
+wreduce
+opt_clean
+equiv_opt -assert peepopt -muxorder -muxorder-var-only
+design -load postopt
+select -assert-none t:$mul %co1 %a w:y %i # const multiplier must stay behind the mux
+
+log -pop
+log -header "Test -muxorder-var-only still transforms a variable operand"
+log -push
+design -reset
+read_verilog <<EOF
+module top(a, b, s, y);
+	input wire [3:0] a;
+	input wire [3:0] b;
+	output wire [3:0] y;
+	input wire s;
+	assign y = s ? a + b : a;
+endmodule
+EOF
+check -assert
+wreduce
+opt_clean
+equiv_opt -assert peepopt -muxorder -muxorder-var-only
+design -load postopt
+select -assert-any t:$add %co1 %a w:y %i # assert adder rewired

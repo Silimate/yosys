@@ -29,6 +29,9 @@ bool did_something;
 // scratchpad configurations for pmgen
 int shiftadd_max_ratio;
 
+// pmgen configurations
+bool muxorder_var_only;
+
 // Helper function, removes LSB 0s
 SigSpec remove_bottom_padding(SigSpec sig)
 {
@@ -91,6 +94,12 @@ struct PeepoptPass : public Pass {
 		log("                Ex 1:   S?(A + B):A   --->   A + (S?B:0)\n");
 		log("                Ex 2:   S?(A * B):A   --->   A & (S?B:1)\n");
 		log("\n");
+		log("If -muxorder-var-only is also specified, muxorder skips operators whose pushed\n");
+		log("operand B is constant. `A OP const` is far cheaper than the variable-operand\n");
+		log("operator the rewrite leaves behind (an increment or a mask, not a full adder or\n");
+		log("multiplier), and S ends up ahead of that operator's carry chain instead of\n");
+		log("behind it, so such a rewrite costs both area and depth.\n");
+		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
@@ -98,6 +107,7 @@ struct PeepoptPass : public Pass {
 
 		bool formalclk = false;
 		bool muxorder = false;
+		muxorder_var_only = false;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
 		{
@@ -107,6 +117,10 @@ struct PeepoptPass : public Pass {
 			}
 			if (args[argidx] == "-muxorder") {
 				muxorder = true;
+				continue;
+			}
+			if (args[argidx] == "-muxorder-var-only") {
+				muxorder_var_only = true;
 				continue;
 			}
 			break;
