@@ -1514,3 +1514,84 @@ select i:v %co4 o:x %i -assert-count 1
 
 design -reset
 log -pop
+
+
+# Test 35
+log -header "Sliced ADD nest that is deeper as a tree is kept nested"
+log -push
+design -reset
+read_verilog -icells <<EOF2
+module top (
+  input  wire [17:0] x,
+  input  wire        p,
+  input  wire        q,
+  output wire [17:0] y
+);
+  wire cin;
+
+  // cin sits below a 15-bit slice of x, so the nest concatenates it for free
+  // while a flattened tree would spend a second full-width adder on it.
+  \$add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    add0 (.A(p), .B(q), .Y(cin));
+  \$add #(.A_WIDTH(18), .B_WIDTH(16), .Y_WIDTH(18), .A_SIGNED(0), .B_SIGNED(0))
+    add1 (.A(x), .B({x[14:0], cin}), .Y(y));
+endmodule
+EOF2
+check -assert
+
+# Without the guard the nest is flattened into a two-level tree of three adds
+design -save preopt
+opt_balance_tree
+select -assert-count 0 c:add0 c:add1
+select -assert-count 3 t:$add
+
+# With it both adds survive untouched
+design -load preopt
+equiv_opt -assert opt_balance_tree -sliced-profit
+design -load preopt
+opt_balance_tree -sliced-profit
+select -assert-count 1 c:add0
+select -assert-count 1 c:add1
+
+design -reset
+log -pop
+
+
+
+# Test 36
+log -header "Sliced shifted ADD chain is still flattened under -sliced-profit"
+log -push
+design -reset
+read_verilog -icells <<EOF2
+module top (
+  input  wire [15:0] a,
+  input  wire [15:0] b,
+  input  wire [15:0] c,
+  input  wire [15:0] d,
+  input  wire [15:0] e,
+  output wire [63:0] y
+);
+  wire [16:0] s0;
+  wire [31:0] s1;
+  wire [47:0] s2;
+
+  \$add #(.A_WIDTH(16), .B_WIDTH(16), .Y_WIDTH(17), .A_SIGNED(0), .B_SIGNED(0))
+    add0 (.A(a), .B({14'b0, b[15:14]}), .Y(s0));
+  \$add #(.A_WIDTH(31), .B_WIDTH(31), .Y_WIDTH(32), .A_SIGNED(0), .B_SIGNED(0))
+    add1 (.A({s0, b[13:0]}), .B({15'b0, c}), .Y(s1));
+  \$add #(.A_WIDTH(32), .B_WIDTH(32), .Y_WIDTH(48), .A_SIGNED(0), .B_SIGNED(0))
+    add2 (.A(s1), .B({16'b0, d}), .Y(s2));
+  \$add #(.A_WIDTH(48), .B_WIDTH(48), .Y_WIDTH(64), .A_SIGNED(0), .B_SIGNED(0))
+    add3 (.A(s2), .B({32'b0, e}), .Y(y));
+endmodule
+EOF2
+check -assert
+
+design -save preopt
+equiv_opt -assert opt_balance_tree -sliced-profit
+design -load preopt
+opt_balance_tree -sliced-profit
+select -assert-count 0 c:add0 c:add1 c:add2 c:add3
+select -assert-count 1 c:add3_tree_3
+design -reset
+log -pop

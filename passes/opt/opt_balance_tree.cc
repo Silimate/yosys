@@ -35,6 +35,10 @@ struct OptBalanceTreeWorker {
 	// Counts of each cell type that are getting balanced
 	dict<IdString, int> cell_count;
 	int sliced_add_count = 0;
+	int sliced_add_reject_count = 0;
+
+	// Only flatten a sliced $add nest when the tree is no deeper than the nest
+	bool sliced_profit = false;
 
 	struct SlicedAddContext {
 		dict<SigBit, Cell*> bit_to_driver;
@@ -230,7 +234,8 @@ struct OptBalanceTreeWorker {
 	}
 
 	bool extract_sliced_operand(const SigSpec &sig, int base_offset, vector<SigSpec> &summands,
-			pool<Cell*> &cluster, pool<Cell*> &visiting, SlicedAddContext &ctx, bool &saw_sliced_edge)
+			pool<Cell*> &cluster, pool<Cell*> &visiting, SlicedAddContext &ctx, bool &saw_sliced_edge,
+			vector<int> &summand_costs, int cost)
 	{
 		for (int i = 0; i < GetSize(sig); )
 		{
@@ -240,7 +245,8 @@ struct OptBalanceTreeWorker {
 			{
 				if (i != 0 || child_width != GetSize(sig))
 					saw_sliced_edge = true;
-				if (!extract_sliced_add(child, base_offset + i, summands, cluster, visiting, ctx, saw_sliced_edge))
+				if (!extract_sliced_add(child, base_offset + i, summands, cluster, visiting, ctx,
+							saw_sliced_edge, summand_costs, cost))
 					return false;
 				i += child_width;
 				continue;
@@ -263,15 +269,18 @@ struct OptBalanceTreeWorker {
 				i++;
 			}
 
-			if (is_nonzero(leaf))
+			if (is_nonzero(leaf)) {
 				summands.push_back(shift_summand(leaf, base_offset + leaf_start));
+				summand_costs.push_back(cost);
+			}
 		}
 
 		return true;
 	}
 
 	bool extract_sliced_add(Cell *cell, int base_offset, vector<SigSpec> &summands,
-			pool<Cell*> &cluster, pool<Cell*> &visiting, SlicedAddContext &ctx, bool &saw_sliced_edge)
+			pool<Cell*> &cluster, pool<Cell*> &visiting, SlicedAddContext &ctx, bool &saw_sliced_edge,
+			vector<int> &summand_costs, int cost)
 	{
 		if (!is_unsigned_add(cell) || visiting.count(cell))
 			return false;
@@ -279,9 +288,13 @@ struct OptBalanceTreeWorker {
 		visiting.insert(cell);
 		cluster.insert(cell);
 
+		// Every summand under this cell propagates through its carry chain
+		cost += GetSize(sigmap(cell->getPort(ID::Y)));
+
 		for (IdString port : {ID::A, ID::B}) {
 			SigSpec sig = sigmap(cell->getPort(port));
-			if (!extract_sliced_operand(sig, base_offset, summands, cluster, visiting, ctx, saw_sliced_edge))
+			if (!extract_sliced_operand(sig, base_offset, summands, cluster, visiting, ctx,
+						saw_sliced_edge, summand_costs, cost))
 				return false;
 		}
 
@@ -341,6 +354,34 @@ struct OptBalanceTreeWorker {
 		return false;
 	}
 
+	// Width and worst-case carry depth of the tree create_balanced_tree() would
+	// build: mirrors that function's split so the estimate matches what is emitted
+	std::pair<int, int> balanced_tree_cost(const vector<SigSpec> &sources, const vector<int> &costs,
+			int begin, int end)
+	{
+		if (end - begin == 1)
+			return {GetSize(sources[begin]), costs[begin]};
+
+		int mid = begin + (end - begin + 1) / 2;
+		auto [lhs_width, lhs_cost] = balanced_tree_cost(sources, costs, begin, mid);
+		auto [rhs_width, rhs_cost] = balanced_tree_cost(sources, costs, mid, end);
+		int width = max(lhs_width, rhs_width) + 1;
+		return {width, max(lhs_cost, rhs_cost) + width};
+	}
+
+	// Flattening a nest is only a win when its summands were already being added:
+	// disjoint slices of one operand cost nothing to concatenate, but the tree
+	// spends a full-width adder on each of them. Compare the worst-case carry
+	// depth (summed adder widths) of both shapes and keep the shallower one.
+	bool sliced_tree_is_profitable(const vector<SigSpec> &summands, const vector<int> &summand_costs)
+	{
+		int nest_cost = 0;
+		for (int cost : summand_costs)
+			nest_cost = max(nest_cost, cost);
+		return balanced_tree_cost(summands, vector<int>(GetSize(summands), 0), 0,
+				GetSize(summands)).second <= nest_cost;
+	}
+
 	bool try_sliced_add_tree(Cell *head_cell, pool<Cell*> &consumed_cells, SlicedAddContext &ctx)
 	{
 		if (!is_unsigned_add(head_cell) || consumed_cells.count(head_cell) ||
@@ -348,14 +389,22 @@ struct OptBalanceTreeWorker {
 			return false;
 
 		vector<SigSpec> summands;
+		vector<int> summand_costs;
 		pool<Cell*> cluster, visiting;
 		bool saw_sliced_edge = false;
-		if (!extract_sliced_add(head_cell, 0, summands, cluster, visiting, ctx, saw_sliced_edge))
+		if (!extract_sliced_add(head_cell, 0, summands, cluster, visiting, ctx, saw_sliced_edge,
+					summand_costs, 0))
 			return false;
 		if (!saw_sliced_edge || GetSize(cluster) <= 1 || GetSize(summands) <= 2)
 			return false;
 		if (sliced_cluster_has_external_fanout(head_cell, cluster, consumed_cells, ctx))
 			return false;
+		if (sliced_profit && !sliced_tree_is_profitable(summands, summand_costs)) {
+			log_debug("  Skipping sliced add tree for %s: %d summands are deeper as a tree.\n",
+					log_id(head_cell), GetSize(summands));
+			sliced_add_reject_count++;
+			return false;
+		}
 
 		log_debug("  Creating sliced add tree for %s with %d summands and %d cells...\n",
 				log_id(head_cell), GetSize(summands), GetSize(cluster));
@@ -374,7 +423,8 @@ struct OptBalanceTreeWorker {
 		return true;
 	}
 
-	OptBalanceTreeWorker(Module *module, const vector<IdString> cell_types) : module(module), sigmap(module) {
+	OptBalanceTreeWorker(Module *module, const vector<IdString> cell_types, bool sliced_profit)
+			: module(module), sigmap(module), sliced_profit(sliced_profit) {
 		// Do for each cell type
 		for (auto cell_type : cell_types) {
 			// Index all of the nets in the module
@@ -605,6 +655,12 @@ struct OptBalanceTreePass : public Pass {
 		log("    -logic\n");
 		log("        only convert logic cells.\n");
 		log("\n");
+		log("    -sliced-profit\n");
+		log("        only flatten a nest of sliced $add cells when the balanced tree is no\n");
+		log("        deeper than the nest it replaces. Concatenated slices of one operand\n");
+		log("        are free in the nest but each cost an adder in the tree, so flattening\n");
+		log("        them adds carry-propagate levels instead of removing them.\n");
+		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override {
 		log_header(design, "Executing OPT_BALANCE_TREE pass (cell cascades to trees).\n");
@@ -612,6 +668,7 @@ struct OptBalanceTreePass : public Pass {
 
 		// Handle arguments
 		size_t argidx;
+		bool sliced_profit = false;
 		vector<IdString> cell_types = {ID($and), ID($or), ID($xor), ID($add), ID($mul)};
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-arith") {
@@ -622,19 +679,24 @@ struct OptBalanceTreePass : public Pass {
 				cell_types = {ID($and), ID($or), ID($xor)};
 				continue;
 			}
+			if (args[argidx] == "-sliced-profit") {
+				sliced_profit = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
 		// Count of all cells that were packed
 		dict<IdString, int> cell_count;
-		int sliced_add_count = 0;
+		int sliced_add_count = 0, sliced_add_reject_count = 0;
 		for (auto module : design->selected_modules()) {
-			OptBalanceTreeWorker worker(module, cell_types);
+			OptBalanceTreeWorker worker(module, cell_types, sliced_profit);
 			for (auto cell : worker.cell_count) {
 				cell_count[cell.first] += cell.second;
 			}
 			sliced_add_count += worker.sliced_add_count;
+			sliced_add_reject_count += worker.sliced_add_reject_count;
 		}
 
 		// Log stats
@@ -642,6 +704,9 @@ struct OptBalanceTreePass : public Pass {
 			log("Converted %d %s cells into trees.\n", cell_count[cell_type], cell_type.unescape());
 		if (std::find(cell_types.begin(), cell_types.end(), ID($add)) != cell_types.end())
 			log("Converted %d sliced $add chains into trees.\n", sliced_add_count);
+		if (sliced_add_reject_count)
+			log("Kept %d sliced $add chain(s) nested: flattening them is deeper.\n",
+					sliced_add_reject_count);
 
 		// Clean up
 		Yosys::run_pass("clean -purge");
