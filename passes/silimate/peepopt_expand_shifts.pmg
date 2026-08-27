@@ -11,6 +11,15 @@ pattern expand_shifts
 //
 // where OP in {$and, $or, $xor, $add, $sub}
 //
+// $add and $sub only distribute over a *left* shift, which is a multiply by
+// 2^c and so distributes mod 2^width. Over a right shift they do not: the
+// discarded low window can carry (or borrow) into the retained bits, and
+// shifting each operand first throws that carry away. Counterexample for
+// (a + b) >> c with 9-bit operands: a = 255, b = 1, c = 8 gives 1, while
+// (a >> 8) + (b >> 8) gives 0. Bitwise ops distribute over either direction,
+// including the sign fill of $sshr, since the fill of a OP b is the same OP of
+// the two fills.
+//
 
 state <SigSpec> op_a op_b op_y  shift_amt shift_y
 
@@ -34,6 +43,9 @@ match shift_gate
 
 	// Connection: shift gate's A input is the OP gate's output
 	index <SigSpec> port(shift_gate, \A) === op_y
+
+	// Arithmetic only distributes over a left shift (see the header)
+	filter shift_gate->type.in($shl, $sshl) || op_gate->type.in($and, $or, $xor)
 
 	set shift_amt port(shift_gate, \B)
 	set shift_y port(shift_gate, \Y)

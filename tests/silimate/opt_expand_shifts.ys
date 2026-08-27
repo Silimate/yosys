@@ -182,6 +182,123 @@ log -pop
 
 
 
+log -header "Negative case: SHR across ADD must not expand (carry out of the discarded window)"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [2:0] c,
+  output wire [7:0] x
+);
+  assign x = (a + b) >> c;
+endmodule
+EOF
+check -assert
+equiv_opt -assert opt_shift -expand
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$shr
+design -reset
+log -pop
+
+
+
+log -header "Negative case: SHR across SUB must not expand (borrow into the retained bits)"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [2:0] c,
+  output wire [7:0] x
+);
+  assign x = (a - b) >> c;
+endmodule
+EOF
+check -assert
+equiv_opt -assert opt_shift -expand
+design -load postopt
+select -assert-count 1 t:$sub
+select -assert-count 1 t:$shr
+design -reset
+log -pop
+
+
+
+log -header "Negative case: SSHR across ADD must not expand"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire signed [7:0] a,
+  input wire signed [7:0] b,
+  input wire [2:0] c,
+  output wire signed [7:0] x
+);
+  assign x = (a + b) >>> c;
+endmodule
+EOF
+check -assert
+equiv_opt -assert opt_shift -expand
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$sshr
+design -reset
+log -pop
+
+
+
+log -header "Negative case: SSHR across SUB must not expand"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire signed [7:0] a,
+  input wire signed [7:0] b,
+  input wire [2:0] c,
+  output wire signed [7:0] x
+);
+  assign x = (a - b) >>> c;
+endmodule
+EOF
+check -assert
+equiv_opt -assert opt_shift -expand
+design -load postopt
+select -assert-count 1 t:$sub
+select -assert-count 1 t:$sshr
+design -reset
+log -pop
+
+
+
+# The shape this guard was written for: RTL widens the operand itself, so the sum is
+# wide enough not to wrap, and a wider sum is exactly what makes the expansion look
+# safe. It is not -- (255 + 1) >> 8 is 1, while (255 >> 8) + (1 >> 8) is 0.
+log -header "Negative case: shifted increment of a widened operand must not expand"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [13:0] w,
+  input wire [4:0] lv,
+  output wire [16:0] x
+);
+  assign x = ({3'd0, w} + 17'd1) >> lv;
+endmodule
+EOF
+check -assert
+equiv_opt -assert opt_shift -expand
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$shr
+design -reset
+log -pop
+
+
+
 log -header "Negative case: fanout from intermediate wire prevents expansion"
 log -push
 design -reset

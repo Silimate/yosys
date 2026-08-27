@@ -935,6 +935,9 @@ struct OptShiftPass : public Pass {
     log("        (a OP b) << c    ===>  (a << c) OP (b << c)\n");
     log("        (a OP b) >> c    ===>  (a >> c) OP (b >> c)\n");
     log("        where OP in {$and, $or, $xor, $add, $sub}\n");
+    log("      $add and $sub only expand across a left shift. A right shift\n");
+    log("      discards a low window the carry crosses, so (255 + 1) >> 8 is 1\n");
+    log("      while (255 >> 8) + (1 >> 8) is 0.\n");
     log("\n");
     log("  -sink\n");
     log("      Sink an add through a left shift, so the adder leaves the\n");
