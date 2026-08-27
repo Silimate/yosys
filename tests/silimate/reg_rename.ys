@@ -1,0 +1,16 @@
+# Unmatched register cells must be summarized instead of one warning per FF.
+log -header "reg_rename unmatched-register warning aggregation"
+log -push
+design -reset
+
+# 12 named 1-bit FFs; the VCD only dumps q0, so 11 cells are unmatched.
+read_rtlil reg_rename.il
+hierarchy -top top
+
+# 8 per-cell examples + 1 total-unmatched summary (11 unmatched cells)
+logger -expect warning "Unable to find matching register" 9
+logger -expect warning "total unmatched: 11" 1
+reg_rename -waveform reg_rename_unmatched.vcd -scope top
+
+design -reset
+log -pop

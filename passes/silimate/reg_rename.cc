@@ -18,6 +18,7 @@
  */
 
 #include <algorithm>
+#include <vector>
 
 #include "kernel/fstdata.h"
 #include "kernel/yosys.h"
@@ -111,6 +112,15 @@ static bool split_reg_cell(IdString cell_name, std::string &reg, std::vector<int
 	return true;
 }
 
+struct UnmatchedReg {
+	std::string reg;
+	std::string cell;
+	std::string scope;
+};
+
+// Keep a handful of per-cell examples; the rest collapse into one count line.
+static const size_t kUnmatchedExamples = 8;
+
 struct RegRenameInstance {
 	std::string vcd_scope;
 	Module *module;
@@ -144,7 +154,8 @@ struct RegRenameInstance {
 
 	// Processes registers in a given module hierarchy
 	// and renames to allow for correct register annotation
-	void process_registers(dict<std::string, RegLayout> &reg_layouts)
+	void process_registers(dict<std::string, RegLayout> &reg_layouts,
+			std::vector<UnmatchedReg> &unmatched)
 	{
 		if (debug)
 			log("Processing registers in scope: %s (module: %s)\n", 
@@ -201,8 +212,7 @@ struct RegRenameInstance {
 
 				auto layout_it = reg_layouts.find(vcd_scope + "." + reg);
 				if (layout_it == reg_layouts.end()) {
-					log_warning("Unable to find matching register %s in VCD for cell %s in scope %s\n",
-						reg.c_str(), log_id(cell->name), vcd_scope.c_str());
+					unmatched.push_back({reg, log_id(cell->name), vcd_scope});
 					continue;
 				}
 				const RegLayout &layout = layout_it->second;
@@ -347,11 +357,12 @@ struct RegRenameInstance {
 		}
 	}
 
-	void process_all(dict<std::string, RegLayout> &reg_layouts)
+	void process_all(dict<std::string, RegLayout> &reg_layouts,
+			std::vector<UnmatchedReg> &unmatched)
 	{
-		process_registers(reg_layouts);
+		process_registers(reg_layouts, unmatched);
 		for (auto &it : children)
-			it.second->process_all(reg_layouts);
+			it.second->process_all(reg_layouts, unmatched);
 	}
 };
 
@@ -499,8 +510,18 @@ struct RegRenamePass : public Pass {
 
 		// Build hierarchy and process register renamings
 		RegRenameInstance *root = new RegRenameInstance(scope, topmod, debug);
-		root->process_all(reg_layouts);
+		std::vector<UnmatchedReg> unmatched;
+		root->process_all(reg_layouts, unmatched);
 		delete root;
+
+		size_t n = unmatched.size();
+		size_t shown = std::min(n, kUnmatchedExamples);
+		for (size_t i = 0; i < shown; i++)
+			log_warning("Unable to find matching register %s in VCD for cell %s in scope %s\n",
+				unmatched[i].reg.c_str(), unmatched[i].cell.c_str(), unmatched[i].scope.c_str());
+		if (n > shown)
+			log_warning("Unable to find matching register for %zu additional cell(s) "
+				"(total unmatched: %zu)\n", n - shown, n);
 
 		log_flush();
 	}
