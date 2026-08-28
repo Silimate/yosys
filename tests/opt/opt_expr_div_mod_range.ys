@@ -1,0 +1,37 @@
+# `a % b` is `a` and `a / b` is 0 when the operand can never reach a constant
+# divisor. The operand's width bounds it, so the fold needs no range analysis.
+read_verilog -noopt <<EOT
+module gold(
+	input [4:0] a5,
+	input [3:0] a4,
+	input [5:0] a6,
+	input signed [4:0] s5,
+	output [7:0] fold_mod,
+	output [7:0] fold_div,
+	output [7:0] fold_edge,
+	output [2:0] fold_trunc,
+	output [7:0] keep_small,
+	output [7:0] keep_wide,
+	output signed [7:0] keep_signed
+);
+assign fold_mod    = a5 % 54; // 2**5 = 32 <= 54
+assign fold_div    = a5 / 54;
+assign fold_edge   = a4 % 17; // 2**4 = 16 <= 17, the tight boundary
+assign fold_trunc  = a5 % 55; // same fold with Y narrower than A
+assign keep_small  = a4 % 15; // 15 < 16, so a4 reaches the divisor
+assign keep_wide   = a6 % 54; // 2**6 = 64 > 54
+assign keep_signed = s5 % 54; // signed operands are out of scope
+endmodule
+EOT
+select -assert-count 6 t:$mod
+select -assert-count 1 t:$div
+copy gold gate
+
+cd gate
+opt_expr
+select -assert-count 3 t:$mod
+select -assert-none t:$div
+
+cd
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -show-ports -enable_undef miter

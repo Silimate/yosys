@@ -1824,6 +1824,40 @@ skip_identity:
 					goto next_cell;
 				}
 
+				// `a % b` is `a` and `a / b` is 0 when a provably never reaches
+				// b. A circular index `(i + v) % n` keeps its modulo even where
+				// the wrap is unreachable, and that maps to a real divider.
+				int a_bits = GetSize(sig_a);
+				while (a_bits > 0 && sig_a[a_bits - 1] == State::S0)
+					a_bits--;
+				// a < 2^a_bits, so a < b as soon as b has a bit set that high.
+				bool a_under_b = !a_signed && !b_signed;
+				if (a_under_b) {
+					a_under_b = false;
+					for (int i = a_bits; i < GetSize(sig_b); i++)
+						if (sig_b[i] == State::S1)
+							a_under_b = true;
+				}
+				if (a_under_b)
+				{
+					bool is_mod = cell->type.in(ID($mod), ID($modfloor));
+					log_debug("Replacing %s cell `%s' in module `%s' with %s: "
+							"operand never reaches the divisor.\n",
+							cell->type.c_str(), cell->name.c_str(),
+							module->name.c_str(), is_mod ? "operand" : "zero");
+
+					SigSpec new_y;
+					if (is_mod)
+						new_y = sig_a.extract(0, min(GetSize(sig_y), a_bits));
+					new_y.extend_u0(GetSize(sig_y), false);
+
+					module->connect(sig_y, new_y);
+					module->remove(cell);
+
+					did_something = true;
+					goto next_cell;
+				}
+
 				int exp;
 				if (!keepdc && sig_b.is_onehot(&exp) && !(b_signed && exp == GetSize(sig_b) - 1))
 				{
