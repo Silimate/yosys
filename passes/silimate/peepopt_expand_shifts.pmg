@@ -9,7 +9,8 @@ pattern expand_shifts
 // y = (a OP b) <<< c  ===>   y = (a <<< c) OP (b <<< c)
 // y = (a OP b) >>> c  ===>   y = (a >>> c) OP (b >>> c)
 //
-// where OP in {$and, $or, $xor, $add, $sub}
+// where OP in {$and, $or, $xor, $add, $sub}, except that $add and $sub only
+// distribute over the left shifts; see the direction check below.
 //
 
 state <SigSpec> op_a op_b op_y  shift_amt shift_y
@@ -41,6 +42,17 @@ match shift_gate
 	set shift_amt port(shift_gate, \B)
 	set shift_y port(shift_gate, \Y)
 endmatch
+
+code
+	// A left shift is a multiply by 2**c, which distributes over every operation
+	// matched above. A right shift is a flooring divide, which distributes over
+	// the bitwise ones but not over $add/$sub: the low bits it discards can still
+	// carry into the result. E.g. (127 + 1) >> 1 is 64, while (127 >> 1) +
+	// (1 >> 1) is 63. Unlike keep_arith below this is soundness, not cost, so it
+	// holds for a constant amount too: (3 + 1) >> 2 is 1, (3 >> 2) + (1 >> 2) is 0.
+	if (op_gate->type.in($add, $sub) && !shift_gate->type.in($shl, $sshl))
+		reject;
+endcode
 
 code
 	// A constant amount is free rewiring, so splitting it in two costs nothing,

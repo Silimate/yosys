@@ -182,6 +182,101 @@ log -pop
 
 
 
+log -header "Negative: SHR across ADD, where the discarded bits still carry"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [2:0] c,
+  output wire [8:0] x
+);
+  assign x = (a + b) >> c;
+endmodule
+EOF
+check -assert
+equiv_opt -assert opt_shift -expand
+design -load postopt
+# a right shift is a flooring divide, so it does not distribute over a sum:
+# (127 + 1) >> 1 is 64, while (127 >> 1) + (1 >> 1) is 63
+select -assert-count 1 t:$add
+select -assert-count 1 t:$shr
+design -reset
+log -pop
+
+
+
+log -header "Negative: SHR across SUB, where the discarded bits still borrow"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [7:0] a,
+  input wire [7:0] b,
+  input wire [2:0] c,
+  output wire [7:0] x
+);
+  assign x = (a - b) >> c;
+endmodule
+EOF
+check -assert
+equiv_opt -assert opt_shift -expand
+design -load postopt
+select -assert-count 1 t:$sub
+select -assert-count 1 t:$shr
+design -reset
+log -pop
+
+
+
+log -header "Negative: SSHR across ADD, which floors the same way"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire signed [7:0] a,
+  input wire signed [7:0] b,
+  input wire [2:0] c,
+  output wire signed [8:0] x
+);
+  assign x = (a + b) >>> c;
+endmodule
+EOF
+check -assert
+equiv_opt -assert opt_shift -expand
+design -load postopt
+select -assert-count 1 t:$add
+select -assert-count 1 t:$sshr
+design -reset
+log -pop
+
+
+
+log -header "Negative: SHR across ADD at a constant amount, which -expand-keep-arith allows"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input wire [7:0] a,
+  input wire [7:0] b,
+  output wire [7:0] x
+);
+  assign x = (a + b) >> 2;
+endmodule
+EOF
+check -assert
+# -expand-keep-arith only refuses a variable amount, so this is the configuration
+# in which the soundness guard is the only thing left to refuse the rewrite:
+# (3 + 1) >> 2 is 1, while (3 >> 2) + (1 >> 2) is 0
+equiv_opt -assert opt_shift -expand -expand-keep-arith
+design -load postopt
+select -assert-count 1 t:$add
+design -reset
+log -pop
+
+
+
 log -header "Negative case: fanout from intermediate wire prevents expansion"
 log -push
 design -reset

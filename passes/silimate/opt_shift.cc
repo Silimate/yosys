@@ -943,7 +943,9 @@ struct OptShiftPass : public Pass {
     log("      Expand shifts across binary operations:\n");
     log("        (a OP b) << c    ===>  (a << c) OP (b << c)\n");
     log("        (a OP b) >> c    ===>  (a >> c) OP (b >> c)\n");
-    log("        where OP in {$and, $or, $xor, $add, $sub}\n");
+    log("        where OP in {$and, $or, $xor, $add, $sub}, except that $add\n");
+    log("        and $sub only distribute over $shl/$sshl: a right shift is a\n");
+    log("        flooring divide, and the bits it discards can still carry.\n");
     log("\n");
     log("  -expand-keep-arith\n");
     log("      Restrict -expand so a variable shift amount is not expanded\n");
