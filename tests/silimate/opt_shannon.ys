@@ -1,0 +1,214 @@
+# Tests for opt_shannon
+#
+#   A1: the shape it is for -- a narrow mode register with a deep decode ahead
+#       of early data -- fires, proves equivalent, and folds the decode away.
+#   A2: a shallow cone buys nothing and is left alone.
+#   A3: the select width cap.
+#   A4: the duplication budget.
+#   A5: a cone the pass may not copy.
+#   A6: the select's readers outside the region are untouched.
+#
+# Depth is the point, so A1 checks that the mode-only decode is gone rather than
+# counting cells: the expansion deliberately trades area for depth, and here it
+# happens to win both because the decode folds to a constant per copy.
+
+# ============================================================================
+# A1: deep mode decode ahead of early data
+# ============================================================================
+log -header "A1: mode decode Shannon-expanded (equiv)"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input clk, input [7:0] x, input [1:0] m, output [7:0] q);
+  reg [1:0] mq;
+  reg [7:0] qr;
+  // Reads nothing but the mode register, so it folds to a constant in every
+  // copy -- this is the chain the expansion is aimed at.
+  wire [7:0] t0 = {6'b0, mq} * 8'd7;
+  wire [7:0] t1 = t0 ^ (t0 << 1);
+  wire [7:0] t2 = t1 + {t1[3:0], t1[7:4]};
+  wire [7:0] t3 = t2 * 8'd11;
+  wire [7:0] y  = x + t3;
+  always @(posedge clk) begin
+    mq <= m;
+    qr <= y;
+  end
+  assign q = qr;
+endmodule
+EOF
+prep -top top
+opt -full
+check -assert
+logger -expect log "Shannon-expanded 1 cone\(s\)" 1
+equiv_opt -assert opt_shannon
+logger -check-expected
+design -load postopt
+# The pass emits the copies and leaves the folding to the opt that follows it in
+# any flow, so fold them here before looking: the mode-only decode is then gone
+# entirely, leaving the four constants in one table read and the adder that was
+# always on the data path.
+opt -full
+select -assert-count 0 t:$mul
+select -assert-count 1 t:$bmux
+ltp -noff
+design -reset
+log -pop
+
+# ============================================================================
+# A2: nothing to save
+# ============================================================================
+# One adder deep, so the select's path through the cone is already shorter than
+# the mux that would replace it.
+log -header "A2: a shallow cone is left alone"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input clk, input [7:0] x, input [1:0] m, output [7:0] q);
+  reg [1:0] mq;
+  reg [7:0] qr;
+  always @(posedge clk) begin
+    mq <= m;
+    qr <= x + {6'b0, mq};
+  end
+  assign q = qr;
+endmodule
+EOF
+prep -top top
+opt -full
+logger -expect log "Shannon-expanded 0 cone\(s\)" 1
+opt_shannon
+logger -check-expected
+select -assert-count 0 t:$bmux
+design -reset
+log -pop
+
+# ============================================================================
+# A3: select too wide
+# ============================================================================
+log -header "A3: -max-sel-bits rejects a wider select"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input clk, input [7:0] x, input [1:0] m, output [7:0] q);
+  reg [1:0] mq;
+  reg [7:0] qr;
+  wire [7:0] t0 = {6'b0, mq} * 8'd7;
+  wire [7:0] t1 = t0 ^ (t0 << 1);
+  wire [7:0] t2 = t1 + {t1[3:0], t1[7:4]};
+  wire [7:0] t3 = t2 * 8'd11;
+  always @(posedge clk) begin
+    mq <= m;
+    qr <= x + t3;
+  end
+  assign q = qr;
+endmodule
+EOF
+prep -top top
+opt -full
+logger -expect log "Shannon-expanded 0 cone\(s\)" 1
+opt_shannon -max-sel-bits 1
+logger -check-expected
+select -assert-count 0 t:$bmux
+design -reset
+log -pop
+
+# ============================================================================
+# A4: duplication budget
+# ============================================================================
+# The boundaries deep enough to pay all need more copies than the budget allows,
+# and the one that fits is too shallow to pay.
+log -header "A4: -max-dup-cells rejects the expansion"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input clk, input [7:0] x, input [1:0] m, output [7:0] q);
+  reg [1:0] mq;
+  reg [7:0] qr;
+  wire [7:0] t0 = {6'b0, mq} * 8'd7;
+  wire [7:0] t1 = t0 ^ (t0 << 1);
+  wire [7:0] t2 = t1 + {t1[3:0], t1[7:4]};
+  wire [7:0] t3 = t2 * 8'd11;
+  always @(posedge clk) begin
+    mq <= m;
+    qr <= x + t3;
+  end
+  assign q = qr;
+endmodule
+EOF
+prep -top top
+opt -full
+logger -expect log "Shannon-expanded 0 cone\(s\)" 1
+opt_shannon -max-dup-cells 4
+logger -check-expected
+select -assert-count 0 t:$bmux
+design -reset
+log -pop
+
+# ============================================================================
+# A5: a cone the pass may not copy
+# ============================================================================
+# A second copy of a box whose body is unknown is not the same circuit, so the
+# walk cannot pass it -- and here it is the only reader of the select.
+log -header "A5: an uncopyable cone rejects the expansion"
+log -push
+design -reset
+read_verilog -sv <<EOF
+(* blackbox *)
+module bb (input [1:0] a, output [7:0] y);
+endmodule
+
+module top (input clk, input [7:0] x, input [1:0] m, output [7:0] q);
+  reg [1:0] mq;
+  reg [7:0] qr;
+  wire [7:0] w;
+  bb u (.a(mq), .y(w));
+  wire [7:0] t = (w * 8'd7) ^ (w + 8'd3);
+  always @(posedge clk) begin
+    mq <= m;
+    qr <= x + t;
+  end
+  assign q = qr;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt -full
+logger -expect log "Shannon-expanded 0 cone\(s\)" 1
+opt_shannon
+logger -check-expected
+select -assert-count 0 t:$bmux
+design -reset
+log -pop
+
+# ============================================================================
+# A6: the select still feeds what is outside the region
+# ============================================================================
+# Copy v pins the select inside the region only; every reader outside it goes on
+# reading the register, and the two have to agree.
+log -header "A6: readers outside the region survive (equiv)"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input clk, input [7:0] x, input [1:0] m,
+            output [7:0] q, output [1:0] mo);
+  reg [1:0] mq;
+  reg [7:0] qr;
+  wire [7:0] t0 = {6'b0, mq} * 8'd7;
+  wire [7:0] t1 = t0 ^ (t0 << 1);
+  wire [7:0] t2 = t1 + {t1[3:0], t1[7:4]};
+  wire [7:0] t3 = t2 * 8'd11;
+  always @(posedge clk) begin
+    mq <= m;
+    qr <= x + t3;
+  end
+  assign q = qr;
+  assign mo = mq;
+endmodule
+EOF
+prep -top top
+opt -full
+logger -expect log "Shannon-expanded 1 cone\(s\)" 1
+equiv_opt -assert opt_shannon
+logger -check-expected
+design -reset
+log -pop

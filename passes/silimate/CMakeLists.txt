@@ -80,6 +80,9 @@ yosys_pass(opt_muldist
 yosys_pass(infer_icg
 	infer_icg.cc
 )
+yosys_pass(opt_shannon
+	opt_shannon.cc
+)
 
 
 pmgen_command(peepopt_expand
