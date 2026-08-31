@@ -65,6 +65,7 @@ struct ShannonWorker {
 	dict<SigBit, Cell *> bit_to_driver;
 	dict<SigBit, pool<Cell *>> bit_to_readers;
 	pool<SigBit> visible_bits;  // read from outside the module's cell graph
+	pool<Cell *> touchable;     // in the selection, so ours to clone and remove
 
 	// dict::at(key, default) hands back a reference to the default, so a literal
 	// {} there dangles the moment the call expression ends -- fatal to walk.
@@ -89,8 +90,12 @@ struct ShannonWorker {
 		bit_to_driver.clear();
 		bit_to_readers.clear();
 		visible_bits.clear();
+		touchable.clear();
 		level_memo.clear();
 
+		// Indexed over every cell, not just the selected ones: an unselected
+		// reader still has to put the bit it reads on the region's cut, and an
+		// unselected driver still contributes its depth.
 		for (auto cell : module->cells())
 			for (auto &conn : cell->connections())
 				for (auto bit : sigmap(conn.second)) {
@@ -110,6 +115,9 @@ struct ShannonWorker {
 			if (wire->port_output || wire->get_bool_attribute(ID::keep))
 				for (auto bit : sigmap(SigSpec(wire)))
 					visible_bits.insert(bit);
+
+		for (auto cell : module->selected_cells())
+			touchable.insert(cell);
 	}
 
 	// A cell whose outputs are state, so the forward walk stops in front of it
@@ -334,7 +342,10 @@ struct ShannonWorker {
 			for (auto cell : frontier) {
 				if (cells.count(cell))
 					continue;
-				if (!can_copy(cell))
+				// The region is cloned and then removed, so it may only hold
+				// cells the selection handed us. An unselected one bounds the
+				// walk exactly as an uncopyable one does.
+				if (!can_copy(cell) || !touchable.count(cell))
 					return found;  // cannot copy it, so cannot pass it
 				cells.insert(cell);
 				if (GetSize(cells) > max_region_cells)
@@ -518,6 +529,15 @@ struct OptShannonPass : public Pass {
 		log("A sub-cone that reads only the select folds to a constant in every copy\n");
 		log("and is what the expansion is really aimed at; a cell that also reads\n");
 		log("something earlier is priced at its full depth.\n");
+		log("\n");
+		log("The rewrite is exact for every defined select, but it can leave the\n");
+		log("result defined where the original propagated an x. The copies evaluate\n");
+		log("the cone at each value the select can actually hold, so a cone that\n");
+		log("computes the same answer for all of them collapses to that answer,\n");
+		log("where feeding it an x had yielded an x. That is the usual pessimism an\n");
+		log("x carries, not a change of behavior: the select is a register, and in\n");
+		log("silicon it holds one of those values. The expansion never turns a\n");
+		log("defined result into a different one.\n");
 		log("\n");
 		log("    -max-sel-bits N\n");
 		log("        widest select to expand on (default 3), so at most 2^N copies.\n");

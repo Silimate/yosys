@@ -212,3 +212,90 @@ equiv_opt -assert opt_shannon
 logger -check-expected
 design -reset
 log -pop
+
+# ============================================================================
+# A7: what the expansion does to an undefined select
+# ============================================================================
+# 3*mq + 5*mq - 8*mq is zero for every mq, but that needs arithmetic across three
+# multipliers to see, so opt leaves it standing and an undefined mq makes the sum
+# undefined. Cofactoring evaluates it at each value mq can hold, all four give
+# zero, and the table folds to zero -- defined where the original was not.
+#
+# This is the pessimism an x carries, not a change of behavior: mq is a register
+# and holds one of those four values in silicon, where the sum really is zero.
+# The rewrite itself stays equivalent under modelled undef, which is asserted
+# below; the refinement arrives when the opt after it folds a table whose entries
+# all agree. Pinned here so it stays a known property of the pass.
+log -header "A7: an expansion may resolve an x the original propagated"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input clk, input [7:0] x, input [1:0] m, output [7:0] q);
+  reg [1:0] mq;
+  reg [7:0] qr;
+  wire [7:0] t0 = {6'b0, mq} * 8'd3;
+  wire [7:0] t1 = {6'b0, mq} * 8'd5;
+  wire [7:0] t2 = {6'b0, mq} * 8'd8;
+  wire [7:0] t3 = (t0 + t1) - t2;
+  always @(posedge clk) begin
+    mq <= m;
+    qr <= x + t3;
+  end
+  assign q = qr;
+endmodule
+EOF
+prep -top top
+opt -full
+# opt on its own cannot see the sum is zero: the decode is still there.
+select -assert-count 2 t:$mul
+design -save a7
+logger -expect log "Shannon-expanded 1 cone\(s\)" 1
+equiv_opt -assert -undef opt_shannon
+logger -check-expected
+# Expanded and then folded, the decode is gone and q is x delayed one cycle.
+design -load a7
+opt_shannon
+opt -full
+select -assert-count 0 t:$mul
+select -assert-count 0 t:$bmux
+design -reset
+log -pop
+
+# ============================================================================
+# A8: the region stays inside the selection
+# ============================================================================
+# The cone is cloned and then removed, so it may only hold cells the selection
+# handed us. Here the multipliers in the decode are held back while the register
+# that selects on them is not, which is the arrangement that would have the pass
+# delete a cell it was never given.
+log -header "A8: an unselected cell bounds the region"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input clk, input [7:0] x, input [1:0] m, output [7:0] q);
+  reg [1:0] mq;
+  reg [7:0] qr;
+  wire [7:0] t0 = {6'b0, mq} * 8'd7;
+  wire [7:0] t1 = t0 ^ (t0 << 1);
+  wire [7:0] t2 = t1 + {t1[3:0], t1[7:4]};
+  wire [7:0] t3 = t2 * 8'd11;
+  always @(posedge clk) begin
+    mq <= m;
+    qr <= x + t3;
+  end
+  assign q = qr;
+endmodule
+EOF
+prep -top top
+opt -full
+select -assert-min 1 t:$mul
+# Everything but the multipliers, so the walk out of mq meets one straight away.
+select top/* top/t:$mul %d
+logger -expect log "Shannon-expanded 0 cone\(s\)" 1
+opt_shannon
+logger -check-expected
+select -clear
+select -assert-min 1 t:$mul
+select -assert-count 0 t:$bmux
+design -reset
+log -pop
