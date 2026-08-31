@@ -87,8 +87,11 @@ struct ExtractFaWorker
 		{
 			if (cell->type.in( ID($_BUF_), ID($_NOT_), ID($_AND_), ID($_NAND_), ID($_OR_), ID($_NOR_),
 					ID($_XOR_), ID($_XNOR_), ID($_ANDNOT_), ID($_ORNOT_), ID($_MUX_), ID($_NMUX_),
-					ID($_AOI3_), ID($_OAI3_), ID($_AOI4_), ID($_OAI4_)))
+					ID($_AOI3_), ID($_OAI3_), ID($_AOI4_), ID($_OAI4_),
+					ID($xor), ID($xnor), ID($and), ID($or), ID($not), ID($mux)))
 			{
+				if (GetSize(cell->getPort(ID::Y)) != 1)
+					continue;
 				SigBit y = sigmap(SigBit(cell->getPort(ID::Y)));
 				log_assert(driver.count(y) == 0);
 				driver[y] = cell;
@@ -293,7 +296,7 @@ struct ExtractFaWorker
 
 		for (auto it : driver)
 		{
-			if (it.second->type.in(ID($_BUF_), ID($_NOT_)))
+			if (it.second->type.in(ID($_BUF_), ID($_NOT_), ID($buf), ID($not)))
 				continue;
 
 			SigBit root = it.first;
