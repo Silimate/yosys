@@ -1795,13 +1795,32 @@ struct SimWorker : SimShared
 			log_warning("Can't find port '%s' on module '%s' in FST, leaving it undriven.\n", path.c_str(), log_id(mod));
 	}
 
-	// An interface pin miss can be resolved by the sim_src attribute.
+	// A port dumped somewhere other than under its own instance carries that path in sim_src.
 	fstHandle handle_for_input(Wire *wire, const std::string &path)
 	{
 		fstHandle id = fst->getHandle(path);
 		if (id == 0 && wire->has_attribute(ID(sim_src)))
 			id = fst->getHandle(wire->get_string_attribute(ID(sim_src)));
 		return id;
+	}
+
+	// Child path, then the declaration sim_src (whole var or bit-blasted).
+	bool bind_port_input(SimInstance *t, Wire *wire, const std::string &path)
+	{
+		fstHandle id = handle_for_input(wire, path);
+		if (id != 0) {
+			t->fst_inputs[wire] = id;
+			return true;
+		}
+		if (bind_fst_bits(t, wire, path))
+			return true;
+		if (!wire->has_attribute(ID(sim_src)))
+			return false;
+		std::string src = wire->get_string_attribute(ID(sim_src));
+		if (bind_fst_bits(t, wire, src))
+			return true;
+		log_warning("Port '%s' takes its data from '%s', which is no found in the input waveform, leaving it undriven.\n", path.c_str(), src.c_str());
+		return true;
 	}
 
 	// SILIMATE: bit-blasted dump is one FST var per HDL index, not one packed vector.
@@ -1845,13 +1864,9 @@ struct SimWorker : SimShared
 				// Drive every port_input from the FST
 				for (auto wire : m->wires()) {
 					if (!wire->port_input) continue;
-					fstHandle id = handle_for_input(wire, iscope + "." + wire->name.unescape());
-					if (id == 0) {
-						if (!bind_fst_bits(t, wire, iscope + "." + wire->name.unescape()))
-							report_missing_fst_input(iscope + "." + wire->name.unescape(), m);
-						continue;
-					}
-					t->fst_inputs[wire] = id;
+					std::string path = iscope + "." + wire->name.unescape();
+					if (!bind_port_input(t, wire, path))
+						report_missing_fst_input(path, m);
 				}
 				t->addAdditionalInputs();
 			}
@@ -1898,11 +1913,9 @@ struct SimWorker : SimShared
 
 				// Populate fst_inputs for input ports
 				if (wire->port_input) {
-					fstHandle id = handle_for_input(wire, scope + "." + RTLIL::unescape_id(wire->name));
-					if (id != 0)
-						top->fst_inputs[wire] = id;
-					else if (!bind_fst_bits(top, wire, scope + "." + RTLIL::unescape_id(wire->name)))
-						report_missing_fst_input(scope + "." + RTLIL::unescape_id(wire->name), topmod);
+					std::string path = scope + "." + RTLIL::unescape_id(wire->name);
+					if (!bind_port_input(top, wire, path))
+						report_missing_fst_input(path, topmod);
 				}
 			}
 

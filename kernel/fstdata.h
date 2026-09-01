@@ -57,6 +57,7 @@ class FstData
 
 	std::string valueOf(fstHandle signal);
 	fstHandle getHandle(std::string name);
+	std::string resolveName(std::string name);
 	dict<int,fstHandle> getMemoryHandles(std::string name);
 	int getScale() { return scale; }
 	const char *getTimescaleString() { return timescale_str.c_str(); }

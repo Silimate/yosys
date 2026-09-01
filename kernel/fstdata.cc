@@ -95,6 +95,47 @@ fstHandle FstData::getHandle(std::string name) {
 		return 0;
 };
 
+// Lowercase drop [digits] so case mismatch errors don't happen
+static std::string fold_name(const std::string &s)
+{
+	std::string o;
+	for (size_t i = 0; i < s.size(); ) {
+		if (s[i] == '[') {
+			size_t j = s.find(']', i);
+			if (j != std::string::npos) {
+				std::string inner = s.substr(i + 1, j - i - 1);
+				if (!inner.empty() && inner.find_first_not_of("0123456789") == std::string::npos) {
+					i = j + 1;
+					continue;
+				}
+			}
+		}
+		char c = s[i++];
+		if (c >= 'A' && c <= 'Z')
+			c = c - 'A' + 'a';
+		o += c;
+	}
+	return o;
+}
+
+std::string FstData::resolveName(std::string name)
+{
+	normalize_brackets(name);
+	if (name_to_handle.count(name))
+		return name;
+	std::string key = fold_name(name);
+	std::string hit;
+	int n = 0;
+	for (auto &kv : name_to_handle) {
+		if (fold_name(kv.first) != key)
+			continue;
+		hit = kv.first;
+		if (++n > 1)
+			return std::string();
+	}
+	return n == 1 ? hit : std::string();
+}
+
 dict<int,fstHandle> FstData::getMemoryHandles(std::string name) {
 	if (memory_to_handle.find(name) != memory_to_handle.end())
 		return memory_to_handle[name];

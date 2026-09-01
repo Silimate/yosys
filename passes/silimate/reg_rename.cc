@@ -347,6 +347,24 @@ struct RegRenameInstance {
 		}
 	}
 
+	// Parent net the dump names
+	std::string dumped_path(const SigSpec &sig)
+	{
+		Wire *w = nullptr;
+		for (auto &c : sig.chunks()) {
+			if (!c.wire)
+				continue;
+			if (w && w != c.wire)
+				return {};
+			w = c.wire;
+		}
+		if (!w)
+			return {};
+		if (w->has_attribute(ID(sim_src)))
+			return w->get_string_attribute(ID(sim_src));
+		return vcd_scope + "." + RTLIL::unescape_id(w->name);
+	}
+
 	// SV interface ports are refs to parent storage (IEEE 1800 25.3). Stamp sim_src
 	// from the dump now; after a parallel-resim cut the parent connection is gone.
 	void bind_interface_ports(FstData &fst)
@@ -359,16 +377,15 @@ struct RegRenameInstance {
 					continue;
 				if (!cell->hasPort(wire->name))
 					continue;
-				SigSpec sig = cell->getPort(wire->name);
-				if (!sig.is_wire())
-					continue; // slices/concats/constants have no single dumped signal
-				std::string src = vcd_scope + "." + RTLIL::unescape_id(sig.as_wire()->name);
-				if (!fst.getHandle(src))
+				std::string src = dumped_path(cell->getPort(wire->name));
+				if (src.empty())
 					continue;
-				wire->set_string_attribute(ID(sim_src), src);
+				std::string resolved = fst.resolveName(src);
+				wire->set_string_attribute(ID(sim_src), resolved.empty() ? src : resolved);
 				if (debug)
 					log("Interface port %s.%s resolved to %s\n", child->vcd_scope.c_str(),
-							RTLIL::unescape_id(wire->name).c_str(), src.c_str());
+							RTLIL::unescape_id(wire->name).c_str(),
+							wire->get_string_attribute(ID(sim_src)).c_str());
 			}
 			child->bind_interface_ports(fst);
 		}
