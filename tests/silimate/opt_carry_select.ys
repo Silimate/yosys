@@ -154,6 +154,75 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
+log -header "-late-ports: carry-in port against a flop -> rewrite, but not by default"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module cs(input clk, input [31:0] d, input cin, output reg [31:0] q);
+  reg [31:0] acc;
+  always @(posedge clk) begin
+    acc <= d;
+    q <= acc + cin;     // flop is early, cin's arrival lives in the parent
+  end
+endmodule
+EOF
+proc; opt_clean
+# The arrival walk stops at the flop and at the port alike, so both operands
+# read as 0 and the default declines: the pass is unchanged without the flag.
+opt_carry_select
+select -assert-count 0 t:$mux
+select -assert-count 1 t:$add
+# Ranking the carry-in-width port after every in-module path makes it the late
+# operand, so the wide add splits into a low add + incrementer + select mux.
+opt_carry_select -late-ports 1
+opt_clean
+select -assert-count 2 t:$add
+select -assert-count 1 t:$mux
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Negative: -late-ports with a port on the wide side too -> no rewrite"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module cs(input [31:0] base, input cin, output [31:0] y);
+  assign y = base + cin;   // both operands come off ports
+endmodule
+EOF
+proc; opt_clean
+# The rank lands on both operands, so it cannot order them and they tie.
+opt_carry_select -late-ports 1
+select -assert-count 0 t:$mux
+select -assert-count 1 t:$add
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Negative: -late-ports port addend wider than the bound -> no rewrite"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module cs(input clk, input [31:0] d, input [3:0] step, output reg [31:0] q);
+  reg [31:0] acc;
+  always @(posedge clk) begin
+    acc <= d;
+    q <= acc + step;
+  end
+endmodule
+EOF
+proc; opt_clean
+# A 4-bit port addend is past carry-in width, so the rank is withheld ...
+opt_carry_select -late-ports 1
+select -assert-count 0 t:$mux
+# ... and the bound is what withheld it, not some other guard.
+opt_carry_select -late-ports 4
+opt_clean
+select -assert-count 1 t:$mux
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
 log -header "Negative: high part below min_wide -> no rewrite"
 log -push
 design -reset

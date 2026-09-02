@@ -36,11 +36,17 @@ struct OptCarrySelectWorker : FracDelayTiming {
 	int max_narrow;
 	int min_wide;
 	double margin;
+	int late_port_width;
 
 	int converted = 0;
 
-	OptCarrySelectWorker(Module *m, int max_narrow, int min_wide, double margin)
-		: FracDelayTiming(m), max_narrow(max_narrow), min_wide(min_wide), margin(margin)
+	// Bits an input port drives directly, i.e. the ones whose real arrival lives
+	// in the parent and so reads as 0 here, indistinguishable from a register.
+	pool<SigBit> port_in_bits;
+
+	OptCarrySelectWorker(Module *m, int max_narrow, int min_wide, double margin, int late_port_width)
+		: FracDelayTiming(m), max_narrow(max_narrow), min_wide(min_wide), margin(margin),
+		  late_port_width(late_port_width)
 	{
 		for (auto cell : module->cells())
 			for (auto &conn : cell->connections())
@@ -48,6 +54,24 @@ struct OptCarrySelectWorker : FracDelayTiming {
 					for (auto bit : sigmap(conn.second))
 						if (bit.wire)
 							driver_map[bit] = cell;
+
+		for (auto wire : module->wires())
+			if (wire->port_input)
+				for (auto bit : sigmap(SigSpec(wire)))
+					if (bit.wire && !driver_map.count(bit))
+						port_in_bits.insert(bit);
+	}
+
+	// True when the whole operand comes straight off module input ports, so its
+	// real arrival is set by the parent and is invisible to this module's walk.
+	bool port_fed(const SigSpec &sig)
+	{
+		if (GetSize(sig) == 0)
+			return false;
+		for (auto &bit : sigmap(sig))
+			if (!port_in_bits.count(bit))
+				return false;
+		return true;
 	}
 
 	// Decision record so we never iterate over a mutating cell list.
@@ -94,8 +118,20 @@ struct OptCarrySelectWorker : FracDelayTiming {
 		SigSpec wide_sig = c->getPort(wide_is_a ? ID::A : ID::B);
 		SigSpec narrow_sig = c->getPort(wide_is_a ? ID::B : ID::A);
 
-		double arr_wide = arrival(wide_sig);
-		double arr_narrow = arrival(narrow_sig);
+		// A module input port's arrival lives in the parent, so the per-module walk
+		// charges it 0 -- the same as a register output. -late-ports instead ranks a
+		// port-fed operand after every in-module path, which is what lets a carry-in
+		// chained from a sibling instance read as the late operand.
+		double port_rank = late_port_width > 0 ? longest_path() + 1.0 : 0.0;
+		// The wide side is ranked whatever its width, so a port-against-port adder
+		// ties and is still rejected. The narrow side additionally has to look like a
+		// carry-in: a wide port-fed addend is as likely to be early as late, and
+		// guessing there is not worth the mux level the split costs the wide path.
+		bool wide_ranked = port_fed(wide_sig);
+		bool narrow_ranked = port_fed(narrow_sig) && k <= late_port_width;
+
+		double arr_wide = arrival(wide_sig) + (wide_ranked ? port_rank : 0.0);
+		double arr_narrow = arrival(narrow_sig) + (narrow_ranked ? port_rank : 0.0);
 		if (arr_narrow <= arr_wide + margin) {
 			if (show)
 				log_debug("opt_carry_select: %s/%s reject(narrow-not-late) a_w=%d b_w=%d "
@@ -203,6 +239,14 @@ struct OptCarrySelectPass : public Pass {
 		log("    -margin F\n");
 		log("        require narrow_arrival > wide_arrival + F (default 0.0).\n");
 		log("\n");
+		log("    -late-ports N\n");
+		log("        rank an operand of at most N bits that comes straight off module\n");
+		log("        input ports as arriving after every in-module path (default 0, off).\n");
+		log("        The arrival walk is per-module, so a carry-in chained from a sibling\n");
+		log("        instance in the parent otherwise reads as early as a register output\n");
+		log("        and its adder is never split. Keep N at carry-in width: a wide\n");
+		log("        port-fed addend is as likely to be early as late.\n");
+		log("\n");
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override {
@@ -211,6 +255,7 @@ struct OptCarrySelectPass : public Pass {
 		int max_narrow = 16;
 		int min_wide = 8;
 		double margin = 0.0;
+		int late_port_width = 0;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -226,13 +271,17 @@ struct OptCarrySelectPass : public Pass {
 				margin = atof(args[++argidx].c_str());
 				continue;
 			}
+			if (args[argidx] == "-late-ports" && argidx + 1 < args.size()) {
+				late_port_width = atoi(args[++argidx].c_str());
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
 		int total = 0;
 		for (auto module : design->selected_modules()) {
-			OptCarrySelectWorker worker(module, max_narrow, min_wide, margin);
+			OptCarrySelectWorker worker(module, max_narrow, min_wide, margin, late_port_width);
 			worker.run();
 			total += worker.converted;
 		}
