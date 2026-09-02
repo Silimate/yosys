@@ -182,6 +182,42 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
+log -header "Functional equivalence: -late-ports split at carry-in width"
+log -push
+design -reset
+# Narrower split (k=1) than any other equivalence case here, which is the width
+# -late-ports exists to reach: the low add is a single bit and the high half is
+# the whole word. The wide operand is behind an XOR so it is not port-fed and
+# only the carry-in takes the port rank.
+read_verilog -sv <<EOF
+module cs(input [31:0] a0, input [31:0] a1, input cin, output [31:0] y);
+  wire [31:0] base = a0 ^ a1;
+  assign y = base + cin;
+endmodule
+EOF
+proc; opt_clean
+rename cs gold
+
+read_verilog -sv <<EOF
+module cs(input [31:0] a0, input [31:0] a1, input cin, output [31:0] y);
+  wire [31:0] base = a0 ^ a1;
+  assign y = base + cin;
+endmodule
+EOF
+proc; opt_clean
+opt_carry_select -late-ports 1 cs
+select -assert-count 1 cs/t:$mux
+opt_clean cs
+rename cs gate
+
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt; memory; opt
+sat -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
 log -header "Negative: -late-ports with a port on the wide side too -> no rewrite"
 log -push
 design -reset
