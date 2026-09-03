@@ -92,3 +92,53 @@ opt_expr -full; opt_clean -purge
 select -assert-count 3 t:$add
 design -reset
 log -pop
+
+# =============================================================================
+# Test 4: a partial selection only rewrites what it selected
+# A cell-level selection still puts the module in selected_modules(), so the
+# worker has to check the cells too or it rewrites flops nobody asked about.
+# Selecting only the muxes must leave every flop alone.
+# =============================================================================
+log -header "a partial selection rewrites nothing outside it"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+
+read -sv opt_seqconst_align.sv
+verific -import opt_seqconst_align
+proc; opt_clean
+
+opt_seqconst t:$mux
+select -clear
+# The pointer tail is still constant in fact, but no flop was selected, so the
+# write crossbar has to survive intact.
+opt_expr -full; opt_clean -purge
+select -assert-count 259 t:$mux
+select -assert-count 8 t:$add
+design -reset
+log -pop
+
+# =============================================================================
+# Test 5: an oversized constant shift amount is not read as a negative
+# RTLIL shift amounts are arbitrarily wide, so one with bit 31 set comes back
+# from as_int() negative. Reading it that way indexes the operand past its top
+# instead of shifting it out, which for a signed operand reads back as the sign
+# bit and makes a changing register look constant. See the fixture for why the
+# shape has to be written in RTLIL.
+# =============================================================================
+log -header "an oversized constant shift amount does not fold a changing bit"
+log -push
+design -reset
+read_rtlil opt_seqconst_shiftovf.il
+hierarchy -top shiftovf
+
+# s holds its reset value of 1 and is genuinely constant, so its flop folds away
+# and the shift constant-folds behind it. q is not constant -- it leaves 1111 for
+# 0000 after one clock -- so its flop has to survive. Fold q and opt_clean takes
+# that flop with it, which is what this counts.
+opt_seqconst
+opt_expr -full; opt_clean -purge
+select -assert-count 1 t:$adff
+design -reset
+log -pop

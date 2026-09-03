@@ -29,6 +29,22 @@ PRIVATE_NAMESPACE_BEGIN
 static inline bool known(State s) { return s == State::S0 || s == State::S1; }
 static inline State from_bool(bool b) { return b ? State::S1 : State::S0; }
 
+// A constant shift amount, saturated at `cap`. RTLIL shift amounts are arbitrarily
+// wide, so as_int() on one with bit 31 set comes back negative and would be read as
+// a shift the other way; anything at or past `cap` shifts the operand out entirely.
+static int const_shift(const SigSpec &b, int cap)
+{
+	int sh = 0;
+	for (int i = 0; i < GetSize(b); i++) {
+		if (b[i] != State::S1)
+			continue;
+		if (i >= 31 || (sh | (1 << i)) >= cap)
+			return cap;
+		sh |= 1 << i;
+	}
+	return sh;
+}
+
 struct OptSeqConstWorker {
 	Module *module;
 	SigMap sigmap;
@@ -49,8 +65,15 @@ struct OptSeqConstWorker {
 
 	int replaced = 0;
 
+	// Which flops this invocation may rewrite. The analysis below still reads every
+	// cell in the module, since the invariant it proves is a property of the design
+	// and seeing less of it would only make the result weaker.
+	pool<Cell *> rewritable;
+
 	OptSeqConstWorker(Module *m) : module(m), sigmap(m), initvals(&sigmap, m)
 	{
+		for (auto cell : module->selected_cells())
+			rewritable.insert(cell);
 		for (auto cell : module->cells()) {
 			for (auto &conn : cell->connections())
 				if (cell->output(conn.first))
@@ -188,10 +211,11 @@ struct OptSeqConstWorker {
 			}
 			return;
 		}
-		if (t.in(ID($shl), ID($sshl)) && cell->getPort(ID::B).is_fully_const()) {
+		if (t.in(ID($shl), ID($sshl)) && !cell->getParam(ID::B_SIGNED).as_bool() &&
+		    cell->getPort(ID::B).is_fully_def()) {
 			SigSpec a = sigmap(cell->getPort(ID::A));
 			bool sa = cell->getParam(ID::A_SIGNED).as_bool();
-			int sh = cell->getPort(ID::B).as_int();
+			int sh = const_shift(sigmap(cell->getPort(ID::B)), GetSize(y));
 			for (int i = 0; i < GetSize(y); i++)
 				memo[y[i]] = i < sh ? State::S0 : in_bit(a, i - sh, sa);
 			return;
@@ -306,7 +330,7 @@ struct OptSeqConstWorker {
 		// wreduce and opt_clean shrink the flop itself afterwards.
 		for (auto &it : ffdata) {
 			Cell *cell = it.first;
-			if (!cell->hasPort(ID::Q))
+			if (!rewritable.count(cell) || !cell->hasPort(ID::Q))
 				continue;
 			SigSpec q = cell->getPort(ID::Q);
 			int hits = 0;
@@ -320,6 +344,9 @@ struct OptSeqConstWorker {
 			for (int i = 0; i < GetSize(q); i++) {
 				SigBit b = q[i];
 				auto hit = b.wire ? hyp.find(sigmap(b)) : hyp.end();
+				if (hit != hyp.end())
+					log_debug("  %s is always %s\n", log_signal(b),
+						  hit->second == State::S1 ? "1" : "0");
 				repl.append(hit != hyp.end() ? SigSpec(hit->second) : priv.extract(i, 1));
 			}
 			cell->setPort(ID::Q, priv);
