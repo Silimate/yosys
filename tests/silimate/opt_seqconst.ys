@@ -1,0 +1,94 @@
+# =============================================================================
+# Test 1: SAT self-equivalence — aligned pointer before vs after opt_seqconst
+#
+# This one needs equiv_induct, not a miter. The pass folds bits that are constant
+# in every *reachable* state, so the two designs differ on states the reset makes
+# unreachable and a combinational proof would (correctly) find a counterexample
+# there. `sat -tempinduct` does not close it either: it only assumes the assert
+# held in earlier steps, and the folded bits are internal, so nothing pins them
+# and the unrolling diverges. equiv_induct assumes every equiv point matched in
+# the previous cycle, which is exactly the hypothesis the pass argues from.
+#
+# The pass is scoped to `gate` here and in test 2. `gold` already exists by this
+# point, and with no selection argument opt_seqconst runs on every module in the
+# design, so a bare invocation would optimize `gold` too and the miter would
+# compare optimized against optimized.
+# =============================================================================
+log -header "SAT self-equivalence: aligned pointer before vs after opt_seqconst"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+
+read -sv opt_seqconst_align.sv
+verific -import opt_seqconst_align
+proc; opt_clean
+rename opt_seqconst_align gold
+
+# Verific resets its flags after every -import, so gate has to re-issue them or it
+# would be elaborated differently from gold.
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+read -sv opt_seqconst_align.sv
+verific -import opt_seqconst_align
+proc; opt_clean
+rename opt_seqconst_align gate
+opt_seqconst gate; select -clear; opt_expr -full; opt_clean -purge
+
+async2sync
+equiv_make gold gate equiv
+hierarchy -top equiv
+equiv_simple -undef
+equiv_induct -undef
+equiv_status -assert
+design -reset
+log -pop
+
+# =============================================================================
+# Test 2: cell counts — folding the pointer tail collapses the scatter
+# The unrolled write loop is a full crossbar while the column index is variable:
+# ROWS*COLS*COLS byte muxes. Folding wr_ptr's low CW=3 bits makes iteration i
+# write column i, so the whole thing becomes a write of one row.
+# =============================================================================
+log -header "cell counts: folding the pointer tail collapses the write crossbar"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+
+read -sv opt_seqconst_align.sv
+verific -import opt_seqconst_align
+proc; opt_clean
+select -assert-count 259 t:$mux
+select -assert-count 8 t:$add
+
+opt_seqconst
+opt_expr -full; opt_clean -purge
+# 259 byte muxes down to the row write, and the 8 per-lane index adders down to the
+# single pointer increment.
+select -assert-max 40 t:$mux
+select -assert-count 1 t:$add
+design -reset
+log -pop
+
+# =============================================================================
+# Test 3: pointers that must not fold
+# One per way the induction can fail: a step that leaves no tail, an external
+# load into the low bits, and no reset to seed the base case with.
+# =============================================================================
+log -header "unaligned, externally loaded and unreset pointers do not fold"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+
+read -sv opt_seqconst_neg.sv
+verific -import opt_seqconst_neg
+proc; opt_clean
+select -assert-count 3 t:$add
+
+opt_seqconst
+opt_expr -full; opt_clean -purge
+# Nothing folded, so all three increments and their full width survive.
+select -assert-count 3 t:$add
+design -reset
+log -pop
