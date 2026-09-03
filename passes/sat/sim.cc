@@ -1896,7 +1896,8 @@ struct SimWorker : SimShared
 		if (open == std::string::npos || open == 0)
 			return false;
 		std::string inner = name.substr(open + 1, name.size() - open - 2);
-		if (inner.empty() || inner.find_first_not_of("0123456789") != std::string::npos)
+		if (inner.empty() || inner.size() > 9 ||
+				inner.find_first_not_of("0123456789") != std::string::npos)
 			return false;
 		if (path.size() < name.size() || path.compare(path.size() - name.size(), name.size(), name) != 0)
 			return false;
