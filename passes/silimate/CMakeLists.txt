@@ -65,6 +65,9 @@ yosys_pass(opt_compact_prefix
 yosys_pass(opt_bmux_nest
 	opt_bmux_nest.cc
 )
+yosys_pass(opt_seqconst
+	opt_seqconst.cc
+)
 yosys_pass(opt_carry_select
 	opt_carry_select.cc
 )
