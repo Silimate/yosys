@@ -39,6 +39,9 @@ opt_clean
 # row index instead, leaving the row xor and the emitted rebase.
 select -assert-count 65 t:$shiftx
 select -assert-count 2 t:$xor
+# Both stages carry the mark that stops opt_bmux_nest merging them back into the
+# one wide select the reindex just broke apart.
+select -assert-count 65 a:staged_gather
 
 # The two indices must be offsets of one shared base. Here the column index is
 # computed from an unrelated input, so no xor identity relates them and the swap

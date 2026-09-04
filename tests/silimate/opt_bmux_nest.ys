@@ -161,3 +161,46 @@ proc; opt -fast
 sat -verify -prove-asserts
 design -reset
 log -pop
+
+# =============================================================================
+# Test 6: a staged nest is left alone
+# muxpush -gather-reindex builds a two-level gather on purpose, to keep a late
+# index off the wide select, and marks both stages. Merging them back gives up
+# the depth that bought and costs area, since the flat table is then selected as
+# a whole. Either stage carrying the mark must stop the fold, so both are
+# checked; mux_push_gather_reindex.ys pins the other half, that the reindex
+# actually marks what it emits.
+# =============================================================================
+log -header "staged outer is not flattened"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+
+read -sv opt_bmux_nest_split.sv
+verific -import opt_bmux_nest_split
+proc; opt_clean
+setattr -set staged_gather 1 t:$bmux r:S_WIDTH=3 %i
+select -clear
+opt_bmux_nest
+select -assert-count 0 t:$bmux r:S_WIDTH=5 %i
+select -assert-count 54 t:$bmux
+design -reset
+log -pop
+
+log -header "staged inner is not flattened"
+log -push
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+
+read -sv opt_bmux_nest_split.sv
+verific -import opt_bmux_nest_split
+proc; opt_clean
+setattr -set staged_gather 1 t:$bmux r:S_WIDTH=2 %i
+select -clear
+opt_bmux_nest
+select -assert-count 0 t:$bmux r:S_WIDTH=5 %i
+select -assert-count 54 t:$bmux
+design -reset
+log -pop
