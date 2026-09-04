@@ -346,6 +346,14 @@ struct OptPriEncWorker {
 	// Wires whose sigmap bits are all inside `cone_bits` (and pass `keep`).
 	// Buses carrying constant bits are only offered when `allow_const`, since
 	// only the PE fingerprint knows how to hold those positions fixed.
+	// Canonical wire order, public before private so a tie between a port and a
+	// proc temporary reports the named wire. Used as the base order and as the
+	// tiebreaker for every width-keyed sort below.
+	static bool wire_name_lt(Wire* a, Wire* b) {
+		if (a->name.isPublic() != b->name.isPublic()) return a->name.isPublic();
+		return a->name.str() < b->name.str();
+	}
+
 	vector<Wire*> wires_in_cone(const pool<SigBit>& cone_bits,
 	                            std::function<bool(Wire*)> keep,
 	                            bool allow_const = false) {
@@ -375,6 +383,11 @@ struct OptPriEncWorker {
 			if (it.second == uit->second)
 				out.push_back(w);
 		}
+		// cover is keyed on Wire*, and Yosys hashes pointers by value, so its
+		// iteration order tracks the allocator and differs across platforms.
+		// Callers truncate this list or sort it on a non-unique key, so hand
+		// back a canonical order rather than whatever malloc produced.
+		std::sort(out.begin(), out.end(), wire_name_lt);
 		return out;
 	}
 
@@ -401,8 +414,11 @@ struct OptPriEncWorker {
 				if (control_bits.count(bit)) return true;
 			return false;
 		}, /*allow_const=*/true);
+		// Width alone ties constantly, and the first T that fingerprints wins,
+		// so an unbroken tie picks a different input bus per sort implementation.
 		std::sort(out.begin(), out.end(), [](Wire* a, Wire* b) {
-			return a->width > b->width;
+			if (a->width != b->width) return a->width > b->width;
+			return wire_name_lt(a, b);
 		});
 		return out;
 	}
@@ -2269,7 +2285,10 @@ struct OptPriEncWorker {
 						start_cands.push_back(w);
 				}
 				std::sort(req_cands.begin(), req_cands.end(),
-				          [](Wire* a, Wire* b) { return a->width > b->width; });
+				          [](Wire* a, Wire* b) {
+					          if (a->width != b->width) return a->width > b->width;
+					          return wire_name_lt(a, b);
+				          });
 
 				bool matched = false;
 				for (Wire* req_wire : req_cands) {
