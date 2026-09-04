@@ -1,0 +1,50 @@
+# activity_prop copies per-wire $ACKT/$DUTY onto cells as $ACKT/$DUTY, the
+# identifiers clockgate reads with ID($ACKT)/ID($DUTY). The old $ACKT:/$DUTY:
+# keys were invisible to that consumer.
+
+log -header "Cell $ACKT/$DUTY use the no-colon identifiers clockgate reads"
+log -push
+design -reset
+read_rtlil <<EOT
+module \top
+  attribute $ACKT "1.000000"
+  attribute $DUTY "0.500000"
+  wire input 1 \clk
+  attribute $ACKT "0.100000"
+  attribute $DUTY "0.200000"
+  wire input 2 \en
+  attribute $ACKT "0.250000"
+  attribute $DUTY "0.500000"
+  wire input 3 \d
+  attribute $ACKT "0.250000"
+  attribute $DUTY "0.500000"
+  wire output 4 \q
+
+  cell $dffe \ff
+    parameter \CLK_POLARITY 1'1
+    parameter \EN_POLARITY 1'1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \en
+    connect \D \d
+    connect \Q \q
+  end
+end
+EOT
+
+activity_prop
+
+# Clockgate looks up cell attributes with ID($ACKT)/ID($DUTY), not $ACKT:/$DUTY:.
+select -assert-count 1 t:$dffe a:$ACKT %i
+select -assert-count 1 t:$dffe a:$DUTY %i
+select -assert-none a:$ACKT:
+select -assert-none a:$DUTY:
+
+# Pin names clockgate's get_cell_activity() scans for must be in the payload.
+select -assert-count 1 t:$dffe a:$ACKT=*EN* %i
+select -assert-count 1 t:$dffe a:$ACKT=*CLK* %i
+select -assert-count 1 t:$dffe a:$DUTY=*EN* %i
+select -assert-count 1 t:$dffe a:$DUTY=*CLK* %i
+
+design -reset
+log -pop

@@ -75,9 +75,9 @@ struct ActivityProp {
 			wireCount++;
 			SigSpec sig(sigmap(wire));
 			// Retrieve the activity/dutycycle attributes created in the sim pass, attached to wires, in the form:
-			// $ACKT: 0.1 0.2 .... (Each bit in a bus has its own activity, index 0 of the bus is left most)
-			std::string act = wire->get_string_attribute("$ACKT");
-			std::string duty = wire->get_string_attribute("$DUTY");
+			// $ACKT = 0.1 0.2 .... (Each bit in a bus has its own activity, index 0 of the bus is left most)
+			std::string act = wire->get_string_attribute(ID($ACKT));
+			std::string duty = wire->get_string_attribute(ID($DUTY));
 			//std::cout << "WIRE: " << wire->name.c_str() << " act: " << act << std::endl;
 			// Split the activity lists
 			std::vector<std::string> activities = tokenize(act, " ", true);
@@ -145,9 +145,9 @@ struct ActivityProp {
 				}
 			}
 			// Annotate on cells the complete list of ports activities and dutycycles in the form:
-			// $ACKT: \P1=0.1 \P2=0.2 ....
-			cell->set_string_attribute("$ACKT:", cell_ports_activity);
-			cell->set_string_attribute("$DUTY:", cell_ports_duty);
+			// $ACKT = \P1=0.1 \P2=0.2 ....
+			cell->set_string_attribute(ID($ACKT), cell_ports_activity);
+			cell->set_string_attribute(ID($DUTY), cell_ports_duty);
 		}
 	}
 
