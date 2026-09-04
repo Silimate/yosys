@@ -2941,6 +2941,8 @@ struct AnnotateActivity : public OutputWriter {
 		std::vector<uint64_t> prevTimes;
 		std::vector<double_t> toggleCounts;
 		std::vector<uint64_t> highTimes;
+		// Time the bit held a known 0 or 1, which is what duty is a fraction of
+		std::vector<uint64_t> knownTimes;
 		std::vector<uint64_t> totalEventCounts;
 	};
 
@@ -2967,6 +2969,7 @@ struct AnnotateActivity : public OutputWriter {
 					std::vector<double_t> dvals(GetSize(value), 0);
 					SignalActivityData data;
 					data.highTimes = vals;
+					data.knownTimes = vals;
 					data.prevTimes = vals;
 					data.lastValues = vals;
 					data.totalEventCounts = vals;
@@ -3033,6 +3036,7 @@ struct AnnotateActivity : public OutputWriter {
 				std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
 				std::vector<uint64_t> &prevTimes = itr->second.prevTimes;
 				std::vector<uint64_t> &highTimes = itr->second.highTimes;
+				std::vector<uint64_t> &knownTimes = itr->second.knownTimes;
 				std::vector<uint64_t> &totalEventCounts = itr->second.totalEventCounts;
 				for (int i = GetSize(value) - 1; i >= 0; i--) {
 					uint64_t val = '-';
@@ -3056,15 +3060,23 @@ struct AnnotateActivity : public OutputWriter {
 					if (lastVals[i] == 0) {
 						lastVals[i] = val;
 					}
-					if (lastVals[i] == '1') {
-						highTimes[i] += time - prevTimes[i];
+					// Only a known 0 or 1 says anything about duty, so an x/z stretch is
+					// left out of both sides rather than counted as time spent low
+					if (lastVals[i] == '1' || lastVals[i] == '0') {
+						knownTimes[i] += time - prevTimes[i];
+						if (lastVals[i] == '1') {
+							highTimes[i] += time - prevTimes[i];
+						}
 					}
 					prevTimes[i] = time;
 					// Final high time for last event of the given sig
 					totalEventCounts[i]--;
 					if (totalEventCounts[i] == 0) {
-						if (val == '1') {
-							highTimes[i] += max_time - prevTimes[i];
+						if (val == '1' || val == '0') {
+							knownTimes[i] += max_time - prevTimes[i];
+							if (val == '1') {
+								highTimes[i] += max_time - prevTimes[i];
+							}
 						}
 					}
 					// If signal toggled
@@ -3147,6 +3159,7 @@ struct AnnotateActivity : public OutputWriter {
 			  SignalActivityDataMap::const_iterator itr = dataMap.find(id);
 			  const std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
 			  const std::vector<uint64_t> &highTimes = itr->second.highTimes;
+			  const std::vector<uint64_t> &knownTimes = itr->second.knownTimes;
 			  if (worker->debug) {
 				  std::string full_name = form_vcd_name(name, size, w);
 				  std::cout << full_name << " " << id << ":\n";
@@ -3178,8 +3191,9 @@ struct AnnotateActivity : public OutputWriter {
 			  }
 			  std::string duty_str;
 			  for (uint32_t i = 0; i < (uint32_t)size; i++) {
-				  // Compute Duty cycle
-				  double duty = (double)highTimes[i] / (double)duration;
+				  // Compute Duty cycle over the time the bit was actually driven, so a
+				  // dump that goes dark ($dumpoff) does not read as time spent low
+				  double duty = knownTimes[i] ? (double)highTimes[i] / (double)knownTimes[i] : 0.0;
 					totalDuty += duty;
 				  duty_str += std::to_string(duty) + " ";
 			  }
