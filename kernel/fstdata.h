@@ -74,9 +74,6 @@ private:
 	std::map<std::string, fstHandle> name_to_handle;
 	std::map<std::string, dict<int, fstHandle>> memory_to_handle;
 	fstHandle max_handle;
-	// Handles are dense 1..max_handle, so index directly. A std::map here cost a
-	// cache-missing tree walk per value change, and snapshotting it into past_data
-	// made replay O(timestamps * mapped handles) in allocations.
 	std::vector<std::string> last_data;
 	uint64_t last_time;
 	std::vector<std::string> past_data;
