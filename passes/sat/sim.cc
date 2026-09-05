@@ -1931,7 +1931,8 @@ struct SimWorker : SimShared
 			for (size_t i = 0; i < instance_modules.size(); i++) {
 				const std::string &iscope = instance_specs[i].second;
 				Module *m = instance_modules[i];
-				log("Using -instance %s at scope \"%s\"\n", instance_specs[i].first.c_str(), iscope.c_str());
+				if (debug)
+					log("Using -instance %s at scope \"%s\"\n", instance_specs[i].first.c_str(), iscope.c_str());
 				SimInstance *t = new SimInstance(this, iscope, m);
 				tops.push_back(t);
 				// Drive every port_input from the FST
