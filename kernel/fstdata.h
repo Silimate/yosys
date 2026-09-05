@@ -65,15 +65,23 @@ class FstData
 private:
 	void extractVarNames();
 	void registerVar(const FstVar &var);
+	void flushDirty();
+	void resetReplay(uint64_t start, uint64_t end, unsigned int end_cycle);
 
 	struct fstReaderContext *ctx;
 	std::vector<FstVar> vars;
 	std::map<fstHandle, FstVar> handle_to_var;
 	std::map<std::string, fstHandle> name_to_handle;
 	std::map<std::string, dict<int, fstHandle>> memory_to_handle;
-	std::map<fstHandle, std::string> last_data;
+	fstHandle max_handle;
+	// Handles are dense 1..max_handle, so index directly. A std::map here cost a
+	// cache-missing tree walk per value change, and snapshotting it into past_data
+	// made replay O(timestamps * mapped handles) in allocations.
+	std::vector<std::string> last_data;
 	uint64_t last_time;
-	std::map<fstHandle, std::string> past_data;
+	std::vector<std::string> past_data;
+	std::vector<fstHandle> dirty; // handles written since the last snapshot
+	std::vector<bool> dirty_mark; // dedups dirty across delta cycles at one timestamp
 	uint64_t past_time;
 	int scale; // exponent of 10, e.g. -6 = us, -9 = ns
 	std::string timescale_str;

@@ -45,6 +45,7 @@ FstData::FstData(std::string filename) : ctx(nullptr)
 	ctx = (fstReaderContext *)fstReaderOpen(filename.c_str());
 	if (!ctx)
 		log_error("Error opening '%s' as FST file\n", filename);
+	max_handle = fstReaderGetMaxHandle(ctx);
 	scale = (int)fstReaderGetTimescale(ctx);
 	timescale_str = "";
 	int unit = 0;
@@ -249,10 +250,37 @@ static void reconstruct_clb_attimes(void *user_data, uint64_t pnt_time, fstHandl
 	ptr->reconstruct_callback_attimes(pnt_time, pnt_facidx, pnt_value, plen);
 }
 
+// Size the handle-indexed state and clear per-replay counters.
+void FstData::resetReplay(uint64_t start, uint64_t end, unsigned int end_cycle)
+{
+	start_time = start;
+	end_time = end;
+	curr_cycle = 0;
+	last_cycle = end_cycle;
+	last_time = start_time;
+	past_time = start_time;
+	last_data.assign(max_handle + 1, std::string());
+	past_data.assign(max_handle + 1, std::string());
+	dirty.clear();
+	dirty_mark.assign(max_handle + 1, false);
+	all_samples = clk_signals.empty();
+}
+
+// Promote this timestamp's changes into past_data
+void FstData::flushDirty()
+{
+	for (auto h : dirty) {
+		past_data[h] = last_data[h];
+		dirty_mark[h] = false;
+	}
+	dirty.clear();
+}
+
 void FstData::reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_facidx, const unsigned char *pnt_value, uint32_t /* plen */)
 {
 	if (pnt_time > end_time || !pnt_value) return;
 	if (curr_cycle > last_cycle) return;
+	if (pnt_facidx > max_handle) return; // outside the range declared in the FST header
 	// if we are past the timestamp
 	bool is_clock = false;
 	if (!all_samples) {
@@ -265,7 +293,7 @@ void FstData::reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_faci
 	}
 
 	if (pnt_time > past_time) {
-		past_data = last_data;
+		flushDirty();
 		past_time = pnt_time;
 	}
 
@@ -277,7 +305,7 @@ void FstData::reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_faci
 		} else {
 			if (is_clock) {
 				std::string val = std::string((const char *)pnt_value);
-				std::string prev = past_data[pnt_facidx];
+				const std::string &prev = past_data[pnt_facidx];
 				if ((prev!="1" && val=="1") || (prev!="0" && val=="0")) {
 					callback(last_time);
 					curr_cycle++;
@@ -287,33 +315,29 @@ void FstData::reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_faci
 		}
 	}
 	// always update last_data
-	last_data[pnt_facidx] =  std::string((const char *)pnt_value);
+	if (!dirty_mark[pnt_facidx]) {
+		dirty_mark[pnt_facidx] = true;
+		dirty.push_back(pnt_facidx);
+	}
+	last_data[pnt_facidx].assign((const char *)pnt_value); // reuses existing capacity
 }
 
 void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t start, uint64_t end, unsigned int end_cycle, CallbackFunction cb)
 {
 	clk_signals = signal;
 	callback = cb;
-	start_time = start;
-	end_time = end;
-	curr_cycle = 0;
-	last_cycle = end_cycle;
-	last_data.clear();
-	last_time = start_time;
-	past_data.clear();
-	past_time = start_time;
-	all_samples = clk_signals.empty();
+	resetReplay(start, end, end_cycle);
 
 	fstReaderSetUnlimitedTimeRange(ctx);
 	fstReaderSetFacProcessMaskAll(ctx);
 	fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
 	if (last_time!=end_time && curr_cycle <= last_cycle) {
-		past_data = last_data;
+		flushDirty();
 		callback(last_time);
 		curr_cycle++;
 	}
 	if (curr_cycle <= last_cycle) {
-		past_data = last_data;
+		flushDirty();
 		callback(end_time);
 		curr_cycle++;
 	}
@@ -324,15 +348,7 @@ void FstData::reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, 
 {
 	clk_signals = clk_signal;
 	callback = cb;
-	start_time = start;
-	end_time = end;
-	curr_cycle = 0;
-	last_cycle = end_cycle;
-	last_data.clear();
-	last_time = start_time;
-	past_data.clear();
-	past_time = start_time;
-	all_samples = clk_signals.empty();
+	resetReplay(start, end, end_cycle);
 
 	// Need pre-start VCs so stable signals are not x at -start.
 	fstReaderSetUnlimitedTimeRange(ctx);
@@ -351,12 +367,12 @@ void FstData::reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, 
 
 	// Flush final sample(s) if the last VC was before end_time / end_cycle.
 	if (last_time!=end_time && curr_cycle <= last_cycle) {
-		past_data = last_data;
+		flushDirty();
 		callback(last_time);
 		curr_cycle++;
 	}
 	if (curr_cycle <= last_cycle) {
-		past_data = last_data;
+		flushDirty();
 		callback(end_time);
 		curr_cycle++;
 	}
@@ -364,7 +380,8 @@ void FstData::reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, 
 
 std::string FstData::valueOf(fstHandle signal)
 {
-	if (past_data.find(signal) == past_data.end()) {
+	// Empty is the not-yet-seen sentinel; FST value strings are never zero-width.
+	if (signal >= past_data.size() || past_data[signal].empty()) {
 		return std::string(handle_to_var[signal].width, 'x');
 	}
 	return past_data[signal];
