@@ -86,6 +86,7 @@ struct OutputWriter
 	OutputWriter(SimWorker *w) { worker = w;};
 	virtual ~OutputWriter() {};
 	virtual void write(std::map<int, bool> &use_signal) = 0;
+	virtual void step(uint64_t time, const std::map<int, RTLIL::Const> &data) {}
 	SimWorker *worker;
 };
 
@@ -1599,6 +1600,10 @@ struct SimWorker : SimShared
 	std::string scope;
 	bool reg_overwrite = false;
 	bool fast = false;
+	bool retain_output_data = false;
+
+	// Stream output data if -fast is set and and sim files aren't written
+	bool stream_output_data() const { return fast && !retain_output_data; }
 
 	~SimWorker()
 	{
@@ -1620,7 +1625,12 @@ struct SimWorker : SimShared
 		std::map<int,Const> data;
 		for (auto t : tops)
 			t->register_output_step_values(&data);
-		output_data.emplace_back(time, data);
+		// Always keep the first sample
+		if (!stream_output_data() || output_data.empty())
+			output_data.emplace_back(time, data);
+		if (stream_output_data())
+			for (auto &writer : outputfiles)
+				writer->step(time, data);
 	}
 
 	void write_output_files()
@@ -1931,7 +1941,8 @@ struct SimWorker : SimShared
 			for (size_t i = 0; i < instance_modules.size(); i++) {
 				const std::string &iscope = instance_specs[i].second;
 				Module *m = instance_modules[i];
-				log("Using -instance %s at scope \"%s\"\n", instance_specs[i].first.c_str(), iscope.c_str());
+				if (debug)
+					log("Using -instance %s at scope \"%s\"\n", instance_specs[i].first.c_str(), iscope.c_str());
 				SimInstance *t = new SimInstance(this, iscope, m);
 				tops.push_back(t);
 				// Drive every port_input from the FST
@@ -2943,67 +2954,118 @@ struct AnnotateActivity : public OutputWriter {
 		std::vector<uint64_t> highTimes;
 		// Time the bit held a known 0 or 1, which is what duty is a fraction of
 		std::vector<uint64_t> knownTimes;
-		std::vector<uint64_t> totalEventCounts;
 	};
 
 	typedef std::unordered_map<int, SignalActivityData> SignalActivityDataMap;
 
-	void write(std::map<int, bool> &use_signal) override
+	// Running per-bit tallies for each signal in the design.
+	SignalActivityDataMap dataMap;
+	// Bounds of the sampled window. Activity and duty are relative to this window, which
+	// does not necessarily start at time 0 (-start/-stop).
+	uint64_t min_time = UINT64_MAX;
+	uint64_t max_time = 0;
+	// clock pin id and bit (highest toggling bit)
+	int clk = 0;
+	int clk_bit = 0;
+	double_t highest_toggle = 0;
+
+	// Accumulate one sample in a running total.
+	void step(uint64_t time, const std::map<int, RTLIL::Const> &data) override
 	{
-		// Init map
-		SignalActivityDataMap dataMap;
-		// For each event (new time when a value changed)
-		uint32_t nbTotalBits = 0;
-		for (auto &d : worker->output_data) {
-			// For each signal/values in that time slice
-			for (auto &data : d.second) {
-				int sig = data.first;
-				if (!use_signal.at(sig))
-					continue;
-				// Create an entry in the map with all zeros for all bits of the signal
-				SignalActivityDataMap::iterator itr = dataMap.find(sig);
-				if (itr == dataMap.end()) {
-					Const value = data.second;
-					std::vector<uint64_t> vals(GetSize(value), 0);
-					nbTotalBits += GetSize(value);
-					std::vector<double_t> dvals(GetSize(value), 0);
-					SignalActivityData data;
-					data.highTimes = vals;
-					data.knownTimes = vals;
-					data.prevTimes = vals;
-					data.lastValues = vals;
-					data.totalEventCounts = vals;
-					data.toggleCounts = dvals;
-					dataMap.emplace(sig, data);
+		if (time < min_time)
+			min_time = time;
+		if (time > max_time)
+			max_time = time;
+		// For each signal/values in that time slice
+		for (auto &sigval : data) {
+			int sig = sigval.first;
+			const Const &value = sigval.second;
+			SignalActivityDataMap::iterator itr = dataMap.find(sig);
+			if (itr == dataMap.end()) {
+				// First sighting of this signal
+				SignalActivityData entry;
+				entry.lastValues.assign(GetSize(value), 0);
+				entry.prevTimes.assign(GetSize(value), time);
+				entry.highTimes.assign(GetSize(value), 0);
+				entry.knownTimes.assign(GetSize(value), 0);
+				entry.toggleCounts.assign(GetSize(value), 0);
+				itr = dataMap.emplace(sig, std::move(entry)).first;
+			}
+			std::vector<uint64_t> &lastVals = itr->second.lastValues;
+			std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
+			std::vector<uint64_t> &prevTimes = itr->second.prevTimes;
+			std::vector<uint64_t> &highTimes = itr->second.highTimes;
+			std::vector<uint64_t> &knownTimes = itr->second.knownTimes;
+			for (int i = GetSize(value) - 1; i >= 0; i--) {
+				uint64_t val = '-';
+				if (worker->norm_xz) {
+					val = value[i] == State::S1 ? '1' : '0';
+				} else {
+					switch (value[i]) {
+					case State::S0:
+						val = '0';
+						break;
+					case State::S1:
+						val = '1';
+						break;
+					case State::Sx:
+						val = 'x';
+						break;
+					default:
+						val = 'z';
+					}
+				}
+				if (lastVals[i] == 0) {
+					lastVals[i] = val;
+				}
+				// Only a known 0 or 1 says anything about duty, so an x/z stretch is
+				// left out of both sides rather than counted as time spent low
+				if (lastVals[i] == '1' || lastVals[i] == '0') {
+					knownTimes[i] += time - prevTimes[i];
+					if (lastVals[i] == '1') {
+						highTimes[i] += time - prevTimes[i];
+					}
+				}
+				prevTimes[i] = time;
+				// If signal toggled
+				if (val != lastVals[i]) {
+					if (val == 'x' || val == 'z' || lastVals[i] == 'x' || lastVals[i] == 'z')
+						toggleCounts[i] += 0.5;
+					else
+						toggleCounts[i] += 1.0;
+					if (toggleCounts[i] > highest_toggle) {
+						highest_toggle = toggleCounts[i];
+						clk = sig;
+						clk_bit = i;
+					}
+					lastVals[i] = val;
 				}
 			}
+		}
+	}
+
+	void write(std::map<int, bool> &use_signal) override
+	{
+		// SILIMATE: the retained path (no -fast, or a waveform writer / -x is active)
+		// replays the run through the same accumulator, so the buffered and streaming
+		// activity numbers cannot drift apart.
+		if (!worker->stream_output_data())
+			for (auto &d : worker->output_data)
+				step(d.first, d.second);
+		finalize(use_signal);
+	}
+
+	void finalize(std::map<int, bool> &use_signal)
+	{
+		// Only signals surviving the -x filter count toward the reported averages
+		uint32_t nbTotalBits = 0;
+		for (auto &entry : dataMap) {
+			auto used = use_signal.find(entry.first);
+			if (used != use_signal.end() && used->second)
+				nbTotalBits += GetSize(entry.second.lastValues);
 		}
 		log("Computing signal activity for %ld signals (%d bits)\n", use_signal.size(), nbTotalBits);
 		log_flush();
-		// Bounds of the sampled window. Activity and duty are relative to this
-		// window, which does not necessarily start at time 0 (-start/-stop).
-		uint64_t min_time = UINT64_MAX;
-		uint64_t max_time = 0;
-		// Inititalization of totalEventCounts and window bounds
-		for (auto &d : worker->output_data) {
-			uint64_t time = d.first;
-			if (time > max_time)
-				max_time = time;
-			if (time < min_time)
-				min_time = time;
-			// For each signal/values in that time slice
-			for (auto &data : d.second) {
-				int sig = data.first;
-				if (!use_signal.at(sig))
-					continue;
-				Const value = data.second;
-				SignalActivityDataMap::iterator itr = dataMap.find(sig);
-				std::vector<uint64_t> &totalEventCounts = itr->second.totalEventCounts;
-				for (int i = GetSize(value) - 1; i >= 0; i--) {
-					totalEventCounts[i]++;
-				}
-			}
-		}
 
 		if (min_time == UINT64_MAX)
 			min_time = 0;
@@ -3013,86 +3075,18 @@ struct AnnotateActivity : public OutputWriter {
 			return;
 		}
 
-		// Signals that are already high when the window opens must not be
-		// credited for the time before min_time.
-		for (auto &entry : dataMap)
-			std::fill(entry.second.prevTimes.begin(), entry.second.prevTimes.end(), min_time);
-
-		// clock pin id and bit (highest toggling bit)
-		int clk = 0;
-		int clk_bit = 0;
-		double_t highest_toggle = 0;
-		// For each event (new time when a value changed)
-		for (auto &d : worker->output_data) {
-			uint64_t time = d.first;
-			// For each signal/values in that time slice
-			for (auto &data : d.second) {
-				int sig = data.first;
-				if (!use_signal.at(sig))
+		// Credit every bit from its last event out to the end of the window.
+		for (auto &entry : dataMap) {
+			std::vector<uint64_t> &lastVals = entry.second.lastValues;
+			std::vector<uint64_t> &prevTimes = entry.second.prevTimes;
+			std::vector<uint64_t> &highTimes = entry.second.highTimes;
+			std::vector<uint64_t> &knownTimes = entry.second.knownTimes;
+			for (size_t i = 0; i < lastVals.size(); i++) {
+				if (lastVals[i] != '1' && lastVals[i] != '0')
 					continue;
-				Const value = data.second;
-				SignalActivityDataMap::iterator itr = dataMap.find(sig);
-				std::vector<uint64_t> &lastVals = itr->second.lastValues;
-				std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
-				std::vector<uint64_t> &prevTimes = itr->second.prevTimes;
-				std::vector<uint64_t> &highTimes = itr->second.highTimes;
-				std::vector<uint64_t> &knownTimes = itr->second.knownTimes;
-				std::vector<uint64_t> &totalEventCounts = itr->second.totalEventCounts;
-				for (int i = GetSize(value) - 1; i >= 0; i--) {
-					uint64_t val = '-';
-					if (worker->norm_xz) {
-						val = value[i] == State::S1 ? '1' : '0';
-					} else {
-						switch (value[i]) {
-						case State::S0:
-							val = '0';
-							break;
-						case State::S1:
-							val = '1';
-							break;
-						case State::Sx:
-							val = 'x';
-							break;
-						default:
-							val = 'z';
-						}
-					}
-					if (lastVals[i] == 0) {
-						lastVals[i] = val;
-					}
-					// Only a known 0 or 1 says anything about duty, so an x/z stretch is
-					// left out of both sides rather than counted as time spent low
-					if (lastVals[i] == '1' || lastVals[i] == '0') {
-						knownTimes[i] += time - prevTimes[i];
-						if (lastVals[i] == '1') {
-							highTimes[i] += time - prevTimes[i];
-						}
-					}
-					prevTimes[i] = time;
-					// Final high time for last event of the given sig
-					totalEventCounts[i]--;
-					if (totalEventCounts[i] == 0) {
-						if (val == '1' || val == '0') {
-							knownTimes[i] += max_time - prevTimes[i];
-							if (val == '1') {
-								highTimes[i] += max_time - prevTimes[i];
-							}
-						}
-					}
-					// If signal toggled
-					if (val != lastVals[i]) {
-						if (val == 'x' || val == 'z' || lastVals[i] == 'x' || lastVals[i] == 'z')
-							toggleCounts[i] += 0.5;
-						else
-							toggleCounts[i] += 1.0;
-						if (toggleCounts[i] > highest_toggle) {
-							highest_toggle = toggleCounts[i];
-							clk = sig;
-							clk_bit = i;
-						}
-						lastVals[i] = val;
-					}
-				}
+				knownTimes[i] += max_time - prevTimes[i];
+				if (lastVals[i] == '1')
+					highTimes[i] += max_time - prevTimes[i];
 			}
 		}
 
@@ -3157,6 +3151,10 @@ struct AnnotateActivity : public OutputWriter {
 			  if (!use_signal.at(id) || (w == nullptr))
 				  return;
 			  SignalActivityDataMap::const_iterator itr = dataMap.find(id);
+			  // Every wire in use_signal was emitted at sample 0 and
+			  // so accumulated, and traced memory words carry a null wire and returned above
+			  if (itr == dataMap.end())
+				  return;
 			  const std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
 			  const std::vector<uint64_t> &highTimes = itr->second.highTimes;
 			  const std::vector<uint64_t> &knownTimes = itr->second.knownTimes;
@@ -3534,7 +3532,10 @@ struct SimPass : public Pass {
 		log("    -fast\n");
 		log("        FST/VCD cosim: decompress only handles mapped for the active\n");
 		log("        instance(s). Time range stays unlimited so -start matches the\n");
-		log("        non-fast initial state for stable pre-start signals.\n");
+		log("        non-fast initial state for stable pre-start signals. Also streams\n");
+		log("        -activity instead of retaining every sample, so peak memory tracks\n");
+		log("        design size rather than run length. Retention is kept when a\n");
+		log("        waveform writer (-vcd/-fst/-aiw) or -x needs random access.\n");
 		log("\n");
 		log("    -normxz\n");
 		log("        normalize x/z to 0 before values participate in simulation and\n");
@@ -3578,18 +3579,21 @@ struct SimPass : public Pass {
 				std::string vcd_filename = args[++argidx];
 				rewrite_filename(vcd_filename);
 				worker.outputfiles.emplace_back(std::unique_ptr<VCDWriter>(new VCDWriter(&worker, vcd_filename.c_str())));
+				worker.retain_output_data = true;  // writes the header before any value change
 				continue;
 			}
 			if (args[argidx] == "-fst" && argidx+1 < args.size()) {
 				std::string fst_filename = args[++argidx];
 				rewrite_filename(fst_filename);
 				worker.outputfiles.emplace_back(std::unique_ptr<FSTWriter>(new FSTWriter(&worker, fst_filename.c_str())));
+				worker.retain_output_data = true;  // writes the header before any value change
 				continue;
 			}
 			if (args[argidx] == "-aiw" && argidx+1 < args.size()) {
 				std::string aiw_filename = args[++argidx];
 				rewrite_filename(aiw_filename);
 				worker.outputfiles.emplace_back(std::unique_ptr<AIWWriter>(new AIWWriter(&worker, aiw_filename.c_str())));
+				worker.retain_output_data = true;  // indexes std::prev(output_data.end())
 				continue;
 			}
 			if (args[argidx] == "-hdlname") {
@@ -3739,6 +3743,7 @@ struct SimPass : public Pass {
 			}
 			if (args[argidx] == "-x") {
 				worker.ignore_x = true;
+				worker.retain_output_data = true;  // use_signal needs every sample to spot all-X signals
 				continue;
 			}
 			if (args[argidx] == "-date") {
