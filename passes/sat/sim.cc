@@ -3151,8 +3151,8 @@ struct AnnotateActivity : public OutputWriter {
 			  if (!use_signal.at(id) || (w == nullptr))
 				  return;
 			  SignalActivityDataMap::const_iterator itr = dataMap.find(id);
-			  // SILIMATE: a memory word traced on the final sample can reach use_signal
-			  // without ever being accumulated, leaving nothing to annotate
+			  // Every wire in use_signal was emitted at sample 0 and
+			  // so accumulated, and traced memory words carry a null wire and returned above
 			  if (itr == dataMap.end())
 				  return;
 			  const std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
