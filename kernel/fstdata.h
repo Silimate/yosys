@@ -23,6 +23,8 @@
 #include "kernel/yosys.h"
 #include "libs/fst/fstapi.h"
 
+#include <memory>
+
 YOSYS_NAMESPACE_BEGIN
 
 typedef std::function<void(uint64_t)> CallbackFunction;
@@ -38,16 +40,36 @@ struct FstVar
 	int width;
 };
 
+// Immutable hierarchy index of one waveform file, shared (and not duplicated) by every reader of it.
+struct FstIndex
+{
+	~FstIndex();
+
+	std::vector<FstVar> vars;
+	std::map<fstHandle, FstVar> handle_to_var;
+	// Iterated by autoScope, so ordered: a dict would make scope selection depend on hashing
+	std::map<std::string, fstHandle> name_to_handle;
+	std::map<std::string, dict<int, fstHandle>> memory_to_handle;
+	fstHandle max_handle = 0;
+	int scale = 0; // exponent of 10, e.g. -6 = us, -9 = ns
+	std::string timescale_str;
+	std::string fst_path; // file actually opened, after any vcd2fst conversion
+	std::string tmp_file; // vcd2fst output owned by this index, removed with it
+};
+
 class FstData
 {
 	public:
 	FstData(std::string filename);
 	~FstData();
 
+	// Drop cached indices. Only safe once no FstData is live.
+	static void clearIndexCache();
+
 	uint64_t getStartTime();
 	uint64_t getEndTime();
 
-	std::vector<FstVar>& getVars() { return vars; };
+	const std::vector<FstVar>& getVars() const { return index->vars; };
 
 	void reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_facidx, const unsigned char *pnt_value, uint32_t plen);
 	void reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t start_time, uint64_t end_time, unsigned int end_cycle, CallbackFunction cb);
@@ -56,32 +78,29 @@ class FstData
 			uint64_t start_time, uint64_t end_time, unsigned int end_cycle, CallbackFunction cb);
 
 	std::string valueOf(fstHandle signal);
-	fstHandle getHandle(std::string name);
-	dict<int,fstHandle> getMemoryHandles(std::string name);
-	int getScale() { return scale; }
-	const char *getTimescaleString() { return timescale_str.c_str(); }
-	int getWidth(fstHandle signal);
+	fstHandle getHandle(std::string name) const;
+	dict<int,fstHandle> getMemoryHandles(std::string name) const;
+	int getScale() const { return index->scale; }
+	const char *getTimescaleString() const { return index->timescale_str.c_str(); }
+	int getWidth(fstHandle signal) const;
 	std::string autoScope(Module *topmod);
-private:
-	void extractVarNames();
-	void registerVar(const FstVar &var);
+	private:
+	void extractVarNames(FstIndex &idx);
+	static void registerVar(FstIndex &idx, const FstVar &var);
 	void flushDirty();
 	void resetReplay(uint64_t start, uint64_t end, unsigned int end_cycle);
 
 	struct fstReaderContext *ctx;
-	std::vector<FstVar> vars;
-	std::map<fstHandle, FstVar> handle_to_var;
-	std::map<std::string, fstHandle> name_to_handle;
-	std::map<std::string, dict<int, fstHandle>> memory_to_handle;
-	fstHandle max_handle;
-	std::vector<std::string> last_data;
+
+	// Shared and read-only index of all signals
+	std::shared_ptr<const FstIndex> index;
+	fstHandle max_handle; // hot-path copy of index->max_handle
+	dict<fstHandle, std::string> last_data;
 	uint64_t last_time;
-	std::vector<std::string> past_data;
+	dict<fstHandle, std::string> past_data;
 	std::vector<fstHandle> dirty; // handles written since the last snapshot
 	std::vector<bool> dirty_mark; // dedups dirty across delta cycles at one timestamp
 	uint64_t past_time;
-	int scale; // exponent of 10, e.g. -6 = us, -9 = ns
-	std::string timescale_str;
 	uint64_t start_time;
 	uint64_t end_time;
 	unsigned int last_cycle;
@@ -89,7 +108,6 @@ private:
 	CallbackFunction callback;
 	std::vector<fstHandle> clk_signals;
 	bool all_samples;
-	std::string tmp_file;
 };
 
 YOSYS_NAMESPACE_END
