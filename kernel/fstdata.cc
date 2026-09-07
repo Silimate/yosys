@@ -27,27 +27,57 @@ static std::string file_base_name(std::string const & path)
 	return path.substr(path.find_last_of("/\\") + 1);
 }
 
-FstData::FstData(std::string filename) : ctx(nullptr)
+// One index per waveform file, held strongly for the life of the process and shared by any forked process.
+static std::map<std::string, std::shared_ptr<const FstIndex>> &indexCache()
 {
+	static std::map<std::string, std::shared_ptr<const FstIndex>> cache;
+	return cache;
+}
+
+FstIndex::~FstIndex()
+{
+	if (!tmp_file.empty())
+		remove(tmp_file.c_str());
+}
+
+FstData::FstData(std::string filename) : ctx(nullptr), max_handle(0)
+{
+	// Reuse an index built earlier in this process, or inherited from the parent by fork
+	auto cached = indexCache().find(filename);
+	if (cached != indexCache().end()) {
+		index = cached->second;
+		max_handle = index->max_handle;
+		ctx = (fstReaderContext *)fstReaderOpen(index->fst_path.c_str());
+		if (!ctx)
+			log_error("Error opening '%s' as FST file\n", index->fst_path);
+		// Only observable sign the workers inherited the index instead of rebuilding it
+		log_debug("Reusing FST index for '%s': %d vars, hierarchy not rebuilt\n",
+				filename, GetSize(index->vars));
+		return;
+	}
+
+	auto idx = std::make_shared<FstIndex>();
 	#if defined(YOSYS_ENABLE_SPAWN)
 	std::string filename_trim = file_base_name(filename);
 	if (filename_trim.size() > 4 && filename_trim.compare(filename_trim.size()-4, std::string::npos, ".vcd") == 0) {
 		filename_trim.erase(filename_trim.size()-4);
-		tmp_file = stringf("%s/converted_%s.fst", get_base_tmpdir(), filename_trim);
-		std::string cmd = stringf("vcd2fst %s %s", filename, tmp_file);
+		idx->tmp_file = stringf("%s/converted_%s.fst", get_base_tmpdir(), filename_trim);
+		std::string cmd = stringf("vcd2fst %s %s", filename, idx->tmp_file);
 		log("Exec: %s\n", cmd);
 		if (run_command(cmd) != 0)
 			log_cmd_error("Shell command failed!\n");
-		filename = tmp_file;
-	}
+		idx->fst_path = idx->tmp_file;
+	} else
 	#endif
+		idx->fst_path = filename;
+
 	const std::vector<std::string> g_units = { "s", "ms", "us", "ns", "ps", "fs", "as", "zs" };
-	ctx = (fstReaderContext *)fstReaderOpen(filename.c_str());
+	ctx = (fstReaderContext *)fstReaderOpen(idx->fst_path.c_str());
 	if (!ctx)
-		log_error("Error opening '%s' as FST file\n", filename);
-	max_handle = fstReaderGetMaxHandle(ctx);
-	scale = (int)fstReaderGetTimescale(ctx);
-	timescale_str = "";
+		log_error("Error opening '%s' as FST file\n", idx->fst_path);
+	max_handle = idx->max_handle = fstReaderGetMaxHandle(ctx);
+	int scale = idx->scale = (int)fstReaderGetTimescale(ctx);
+	std::string timescale_str = "";
 	int unit = 0;
 	int zeros = 0;
 	if (scale > 0)  {
@@ -63,15 +93,23 @@ FstData::FstData(std::string filename) : ctx(nullptr)
 	}
 	for (int i=0;i<zeros; i++) timescale_str += "0";
 	timescale_str += g_units[unit];
-	extractVarNames();
+	idx->timescale_str = timescale_str;
+
+	// Walking hierarchy forces libfst to inflate it to a temp file, so this cache exists to do the work once.
+	extractVarNames(*idx);
+	index = idx;
+	indexCache()[filename] = index;
 }
 
 FstData::~FstData()
 {
 	if (ctx)
 		fstReaderClose(ctx);
-	if (!tmp_file.empty())
-		remove(tmp_file.c_str());
+}
+
+void FstData::clearIndexCache()
+{
+	indexCache().clear();
 }
 
 uint64_t FstData::getStartTime() { return fstReaderGetStartTime(ctx); }
@@ -88,19 +126,16 @@ static void normalize_brackets(std::string &str)
 	}
 }
 
-fstHandle FstData::getHandle(std::string name) {
+fstHandle FstData::getHandle(std::string name) const {
 	normalize_brackets(name);
-	if (name_to_handle.find(name) != name_to_handle.end())
-		return name_to_handle[name];
-	else
-		return 0;
+	// find, not operator[]: the index is shared, so a miss must not insert into it
+	auto it = index->name_to_handle.find(name);
+	return it == index->name_to_handle.end() ? 0 : it->second;
 };
 
-dict<int,fstHandle> FstData::getMemoryHandles(std::string name) {
-	if (memory_to_handle.find(name) != memory_to_handle.end())
-		return memory_to_handle[name];
-	else
-		return dict<int,fstHandle>();
+dict<int,fstHandle> FstData::getMemoryHandles(std::string name) const {
+	auto it = index->memory_to_handle.find(name);
+	return it == index->memory_to_handle.end() ? dict<int,fstHandle>() : it->second;
 };
 
 static std::string remove_spaces(std::string str)
@@ -109,11 +144,11 @@ static std::string remove_spaces(std::string str)
 	return str;
 }
 
-void FstData::registerVar(const FstVar &var)
+void FstData::registerVar(FstIndex &idx, const FstVar &var)
 {
-	vars.push_back(var);
+	idx.vars.push_back(var);
 	if (!var.is_alias)
-		handle_to_var[var.id] = var;
+		idx.handle_to_var[var.id] = var;
 
 	std::string clean_name = var.name;
 	if (!clean_name.empty() && clean_name[0] == '\\')
@@ -141,7 +176,7 @@ void FstData::registerVar(const FstVar &var)
 		if (*endptr) {
 			log_debug("Error parsing memory address in : %s\n", clean_name);
 		} else {
-			memory_to_handle[var.scope+"."+mem_cell][mem_addr] = var.id;
+			idx.memory_to_handle[var.scope+"."+mem_cell][mem_addr] = var.id;
 		}
 	}
 	pos = clean_name.find_last_of("[");
@@ -155,14 +190,14 @@ void FstData::registerVar(const FstVar &var)
 		if (*endptr) {
 			log_debug("Error parsing memory address in : %s\n", clean_name);
 		} else {
-			memory_to_handle[var.scope+"."+mem_cell][mem_addr] = var.id;
+			idx.memory_to_handle[var.scope+"."+mem_cell][mem_addr] = var.id;
 		}
 	}
 	normalize_brackets(clean_name);
-	name_to_handle[var.scope+"."+clean_name] = var.id;
+	idx.name_to_handle[var.scope+"."+clean_name] = var.id;
 }
 
-void FstData::extractVarNames()
+void FstData::extractVarNames(FstIndex &idx)
 {
 	struct fstHier *h;
 	std::string fst_scope_name;
@@ -200,11 +235,11 @@ void FstData::extractVarNames()
 							u.scope = fork_parent_scope;
 							normalize_brackets(u.scope);
 							u.is_alias = false;
-							registerVar(u);
+							registerVar(idx, u);
 					} else {
 							// If not a union, register all variables in the fork scope as normal.
 							for (auto &v : fork_vars) {
-								registerVar(v);
+								registerVar(idx, v);
 							}
 					}
 					in_fork = false;
@@ -230,7 +265,7 @@ void FstData::extractVarNames()
 				var.width = h->u.var.length;
 
 				if (in_fork) fork_vars.push_back(var); // store all variables in fork scope into a vector
-				else registerVar(var); // otherwise, register the variable as normal
+				else registerVar(idx, var); // otherwise, register the variable as normal
 				break;
 			}
 		}
@@ -250,7 +285,7 @@ static void reconstruct_clb_attimes(void *user_data, uint64_t pnt_time, fstHandl
 	ptr->reconstruct_callback_attimes(pnt_time, pnt_facidx, pnt_value, plen);
 }
 
-// Size the handle-indexed state and clear per-replay counters.
+// Clear the per-replay state and counters.
 void FstData::resetReplay(uint64_t start, uint64_t end, unsigned int end_cycle)
 {
 	start_time = start;
@@ -259,10 +294,10 @@ void FstData::resetReplay(uint64_t start, uint64_t end, unsigned int end_cycle)
 	last_cycle = end_cycle;
 	last_time = start_time;
 	past_time = start_time;
-	last_data.assign(max_handle + 1, std::string());
-	past_data.assign(max_handle + 1, std::string());
+	last_data.clear();
+	past_data.clear();
 	dirty.clear();
-	dirty_mark.assign(max_handle + 1, false);
+	dirty_mark.assign(max_handle + 1, false); // one bit per handle stays cheap dense
 	all_samples = clk_signals.empty();
 }
 
@@ -270,7 +305,7 @@ void FstData::resetReplay(uint64_t start, uint64_t end, unsigned int end_cycle)
 void FstData::flushDirty()
 {
 	for (auto h : dirty) {
-		past_data[h] = last_data[h];
+		past_data[h] = last_data.at(h); // assign reuses the existing capacity
 		dirty_mark[h] = false;
 	}
 	dirty.clear();
@@ -305,7 +340,11 @@ void FstData::reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_faci
 		} else {
 			if (is_clock) {
 				std::string val = std::string((const char *)pnt_value);
-				const std::string &prev = past_data[pnt_facidx];
+				// Absent stands in for the dense vector's empty-string sentinel, which
+				// compared unequal to both "0" and "1"
+				static const std::string absent;
+				auto prev_it = past_data.find(pnt_facidx);
+				const std::string &prev = prev_it == past_data.end() ? absent : prev_it->second;
 				if ((prev!="1" && val=="1") || (prev!="0" && val=="0")) {
 					callback(last_time);
 					curr_cycle++;
@@ -380,18 +419,21 @@ void FstData::reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, 
 
 std::string FstData::valueOf(fstHandle signal)
 {
-	// Empty is the not-yet-seen sentinel; FST value strings are never zero-width.
-	if (signal >= past_data.size() || past_data[signal].empty()) {
-		return std::string(handle_to_var[signal].width, 'x');
+	// Absent or empty is the not-yet-seen sentinel; FST value strings are never zero-width.
+	auto it = past_data.find(signal);
+	if (it == past_data.end() || it->second.empty()) {
+		// An unmapped handle yields a zero-width string, as operator[] did before
+		auto var = index->handle_to_var.find(signal);
+		return std::string(var == index->handle_to_var.end() ? 0 : var->second.width, 'x');
 	}
-	return past_data[signal];
+	return it->second;
 }
 
-int FstData::getWidth(fstHandle signal)
+int FstData::getWidth(fstHandle signal) const
 {
-	if (handle_to_var.count(signal)) {
-		return handle_to_var[signal].width;
-	}
+	auto it = index->handle_to_var.find(signal);
+	if (it != index->handle_to_var.end())
+		return it->second.width;
 
 	log_warning("Signal %d was not extracted from file...\n", signal);
 	return 0;
@@ -414,7 +456,7 @@ std::string FstData::autoScope(Module *topmod) {
 
 	// Extract list of candidate scopes from name_to_handle
 	pool<std::string> candidate_scopes;
-	for (auto entry : name_to_handle) {
+	for (auto entry : index->name_to_handle) {
 		std::string name = entry.first;
 		size_t last_dot = name.find_last_of('.');
 		if (last_dot != std::string::npos) {
@@ -434,10 +476,10 @@ std::string FstData::autoScope(Module *topmod) {
 			const std::string &port_name = port.first;
 			int port_width = port.second;
 			std::string key = scope_candidate + "." + port_name;
-			auto it = name_to_handle.find(key);
+			auto it = index->name_to_handle.find(key);
 
 			// Check the signal exists and has correct width to determine a match
-			if (it != name_to_handle.end() && getWidth(it->second) == port_width) {
+			if (it != index->name_to_handle.end() && getWidth(it->second) == port_width) {
 				matches++;
 			}
 		}
