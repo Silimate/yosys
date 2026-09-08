@@ -451,38 +451,6 @@ struct OptVpsWorker
 		return val;
 	}
 
-	// Trace a signal back through the driver graph to find the
-	// set of root bits (primary inputs / FF outputs) that
-	// influence it.  Returns them as a sorted SigSpec.
-	SigSpec trace_input_roots(SigSpec sig)
-	{
-		pool<SigBit> roots, visited;
-		std::vector<SigBit> worklist;
-		for (auto bit : sig)
-			worklist.push_back(sigmap(bit));
-		while (!worklist.empty()) {
-			SigBit b = worklist.back();
-			worklist.pop_back();
-			if (!visited.insert(b).second)
-				continue;
-			Cell *drv = bit_drivers.at(b, nullptr);
-			if (!drv) {
-				if (b.wire)
-					roots.insert(b);
-				continue;
-			}
-			for (auto &conn : drv->connections())
-				if (!drv->output(conn.first))
-					for (auto bit2 : conn.second)
-						worklist.push_back(sigmap(bit2));
-		}
-		SigSpec result;
-		for (auto b : roots)
-			result.append(b);
-		result.sort();
-		return result;
-	}
-
 	// Uniform bit-gather -> shared barrel shift.  With an arithmetic index
 	// expression Verific lowers `for (i...) y[i] = t[i - k]` per output element
 	// ($bmux, or $shr with one used Y bit), never emitting the decoder +
@@ -989,6 +957,43 @@ struct OptVpsWorker
 		return r;
 	}
 
+	// Key identifying the *variable* part of an index expression, for the two
+	// groupings below that merge reads differing only by a constant offset.
+	//
+	// This used to be the set of root bits the expression depends on, which is
+	// not the same question. Two indices can read the same roots and still hold
+	// different values -- `idx1` and `idx2` in a pipeline both trace back to
+	// {clk, index}, and `i` and `i ^ 1` both trace back to {i} -- and merging
+	// those rewires one read onto the other's shifter. The affine form is the
+	// right question: value == konst + sum(coeffs), so two expressions with the
+	// same coefficient map differ by exactly konst, which is the constant offset
+	// the callers already recover via eval_at_zero. Anything non-affine falls
+	// back to an opaque atom of the signal itself, so it groups only with a
+	// spelling that reduces to the same signal.
+	typedef std::pair<CoeffMap, int> IndexKey;   // (variable part, exactness)
+
+	IndexKey index_key(SigSpec sig)
+	{
+		Affine a = affine_of(sig, 0);
+		// A key match is read as "these differ by exactly the constant
+		// eval_at_zero measured", so only a fully exact form earns a shared
+		// key. A form that holds merely modulo 2^exact_bits does not: 8-bit
+		// `n + 31` and `n + 63` have the same coefficients, but at n = 200
+		// they are 231 and 7, which is not 32 apart, and the merge would
+		// slice the second read at +32 anyway. Wrapping forms, forms that
+		// ran out of affine depth, and the empty spec all fall back to a key
+		// naming the signal itself, so a read groups only with another
+		// spelling of the same signal (and constant-only shifts, whose
+		// variable part is empty, still group -- they really do differ by
+		// exactly their constants).
+		if (!a.ok || a.exact_bits < AFFINE_EXACT) {
+			CoeffMap self;
+			self[AffineAtom(sigmap(sig), false)] = 1;
+			return IndexKey(self, -1);
+		}
+		return IndexKey(a.coeffs, a.exact_bits);
+	}
+
 	struct GatherCand {
 		Cell *cell;
 		SigSpec ysig; // this cell's gathered element: 1 bit for $shr, WIDTH for $bmux
@@ -1333,7 +1338,7 @@ struct OptVpsWorker
 			Wire *src_wire;    // register wire (from first source bit)
 			int src_offset;    // offset of first source bit in that wire
 			int idx_const;     // constant part of decoder binary_index
-			SigSpec idx_roots; // primary input bits influencing decoder
+			IndexKey idx_roots; // variable part of the decoder's index
 		};
 
 		std::vector<XReadCandidate> all_reads;
@@ -1345,7 +1350,7 @@ struct OptVpsWorker
 
 			// Decoder-invariant, so hoisted out of the candidate loop
 			SigSpec binary_idx = decoder->getPort(ID::B);
-			SigSpec roots = trace_input_roots(binary_idx);
+			IndexKey roots = index_key(binary_idx);
 			int idx_c = eval_at_zero(binary_idx);
 
 			for (auto cell : bucket->second) {
@@ -1391,7 +1396,7 @@ struct OptVpsWorker
 		struct SrcKey {
 			Wire *wire;
 			int W;
-			SigSpec roots;
+			IndexKey roots;
 			bool operator<(const SrcKey &o) const {
 				if (wire != o.wire) return wire < o.wire;
 				if (W != o.W) return W < o.W;
@@ -1721,8 +1726,10 @@ struct OptVpsWorker
 	void merge_shared_barrel_shifters()
 	{
 		// Rebuild bit_drivers to include cells created during
-		// process_vps_reads (e.g. $sub cells for index adjustment)
+		// process_vps_reads (e.g. $sub cells for index adjustment). The
+		// affine memo is derived from that map, so it goes stale with it.
 		bit_drivers.clear();
+		affine_cache.clear();
 		for (auto cell : module->cells())
 			for (auto &conn : cell->connections())
 				if (cell->output(conn.first))
@@ -1802,13 +1809,16 @@ struct OptVpsWorker
 		if (shr_infos.empty())
 			return;
 
-		// Group by (register wire, input root bits of shift
-		// variable, alignment).  Using trace_input_roots lets
-		// reads with different carry patterns but the same
-		// underlying dynamic variable group together.
+		// Group by (register wire, variable part of the shift, alignment).
+		// Keying on the affine form lets reads with different carry patterns
+		// but the same underlying dynamic variable group together, while
+		// keeping apart two indices that merely depend on the same inputs --
+		// the shared shifter below is built from ONE group member's shift
+		// signal, so a group has to mean "same value, modulo the constant
+		// offset reg_offset already carries".
 		struct MergeKey {
 			Wire *wire;
-			SigSpec roots;
+			IndexKey roots;
 			int align;
 			bool operator<(const MergeKey &o) const {
 				if (wire != o.wire) return wire < o.wire;
@@ -1820,7 +1830,7 @@ struct OptVpsWorker
 		std::map<MergeKey, std::vector<int>> groups;
 		for (int i = 0; i < GetSize(shr_infos); i++) {
 			auto &info = shr_infos[i];
-			SigSpec roots = trace_input_roots(info.shift_variable);
+			IndexKey roots = index_key(info.shift_variable);
 			groups[{info.reg_wire, roots, info.shift_align}].push_back(i);
 		}
 

@@ -208,8 +208,12 @@ struct OptPriEncWorker : CutRegionWorker {
 	bool allow_partial_cone = false;
 	int max_input_width = 256;
 	int min_input_width = 4;
-	// 2^8 evals, paid only by a pinned bus that already survived the deck.
-	int max_exhaustive_free_bits = 8;
+	// Enumerating a pinned bus's whole reachable domain is 2^n evals, but only
+	// a bus that already survived the deck ever gets there, so the count is
+	// bounded by the matches rather than by the candidates. Past this width the
+	// bus is accepted on the deck alone; raising it converts those into proofs
+	// (and lets them stop the deck early), at 2^n evals for the ones it covers.
+	int max_exhaustive_free_bits = 12;
 	// Cut walks are bounded by the same cell cap the discovery walk used, so a
 	// candidate whose cone overran that cap (-partial-cone) cannot silently
 	// turn a bounded probe into a walk of the whole design behind it.
@@ -289,7 +293,8 @@ struct OptPriEncWorker : CutRegionWorker {
 
 	// Inverted index: sigmap bit -> wires that contain it. Built once per run()
 	// so candidate T/req/start discovery is O(|cone_bits|) instead of O(|wires|).
-	dict<SigBit, vector<Wire*>> bit_to_cand_wires;
+	dict<SigBit, vector<int>> bit_to_cand_slots;   // slots, see build_cand_wire_index
+	vector<Wire*> slot_wire;
 	dict<Wire*, int> wire_uniq_bit_count;
 	dict<Wire*, vector<SigBit>> wire_sig_bits;
 	pool<Wire*> wire_has_const;
@@ -298,11 +303,18 @@ struct OptPriEncWorker : CutRegionWorker {
 	// wire the module has, this one only the snapshot candidate discovery works
 	// from, and it also records what each wire's bits look like after sigmap.
 	void build_cand_wire_index(const vector<Wire*>& wires) {
-		bit_to_cand_wires.clear();
+		bit_to_cand_slots.clear();
 		wire_uniq_bit_count.clear();
 		wire_sig_bits.clear();
 		wire_has_const.clear();
+		slot_wire.clear();
+		slot_wire.reserve(wires.size());
 		for (Wire* w : wires) {
+			// Dense slot per candidate wire: wires_in_cone tallies coverage
+			// per wire once per root candidate, and doing that in hash maps
+			// keyed on Wire* costs more than the tally.
+			int slot = GetSize(slot_wire);
+			slot_wire.push_back(w);
 			SigSpec ss = sigmap(SigSpec(w));
 			vector<SigBit> bits;
 			bits.reserve(GetSize(ss));
@@ -311,13 +323,18 @@ struct OptPriEncWorker : CutRegionWorker {
 				bits.push_back(bit);
 				if (!bit.wire) { wire_has_const.insert(w); continue; }
 				if (uniq.insert(bit).second)
-					bit_to_cand_wires[bit].push_back(w);
+					bit_to_cand_slots[bit].push_back(slot);
 			}
 			wire_sig_bits[w] = std::move(bits);
 			// Counts the bits ConstEval can pin; const positions are covered
 			// by the netlist, so they never need to be found in the cone.
 			wire_uniq_bit_count[w] = GetSize(uniq);
 		}
+		wic_cover.assign(GetSize(slot_wire), 0);
+		wic_cover_gen.assign(GetSize(slot_wire), 0);
+		wic_keep_gen.assign(GetSize(slot_wire), 0);
+		wic_keep.assign(GetSize(slot_wire), 0);
+		wic_gen = 0;
 	}
 
 	// Wires whose sigmap bits are all inside `cone_bits` (and pass `keep`).
@@ -331,39 +348,53 @@ struct OptPriEncWorker : CutRegionWorker {
 		return a->name.str() < b->name.str();
 	}
 
-	vector<Wire*> wires_in_cone(const pool<SigBit>& cone_bits,
-	                            std::function<bool(Wire*)> keep,
+	// Per-slot scratch for the tally below, reused across calls. A generation
+	// stamp retires the previous call's entries, so a root candidate pays for
+	// the wires its own cone touches rather than for rebuilding two hash maps.
+	vector<int> wic_cover;
+	vector<uint32_t> wic_cover_gen, wic_keep_gen;
+	vector<uint8_t> wic_keep;
+	uint32_t wic_gen = 0;
+
+	template <typename FnKeep>
+	vector<Wire*> wires_in_cone(const pool<SigBit>& cone_bits, FnKeep keep,
 	                            bool allow_const = false) {
-		dict<Wire*, int> cover;
-		dict<Wire*, bool> keep_cache;
-		auto keep_cached = [&](Wire* w) -> bool {
-			auto it = keep_cache.find(w);
-			if (it != keep_cache.end()) return it->second;
-			bool ok = keep(w);
-			keep_cache[w] = ok;
-			return ok;
-		};
+		if (++wic_gen == 0) {   // wrapped: retire every stamp at once
+			std::fill(wic_cover_gen.begin(), wic_cover_gen.end(), 0);
+			std::fill(wic_keep_gen.begin(), wic_keep_gen.end(), 0);
+			wic_gen = 1;
+		}
+		vector<int> touched;
 		for (auto bit : cone_bits) {
-			auto it = bit_to_cand_wires.find(bit);
-			if (it == bit_to_cand_wires.end()) continue;
-			for (Wire* w : it->second) {
-				if (!keep_cached(w)) continue;
-				cover[w]++;
+			auto it = bit_to_cand_slots.find(bit);
+			if (it == bit_to_cand_slots.end()) continue;
+			for (int slot : it->second) {
+				if (wic_keep_gen[slot] != wic_gen) {
+					wic_keep_gen[slot] = wic_gen;
+					wic_keep[slot] = keep(slot_wire[slot]) ? 1 : 0;
+				}
+				if (!wic_keep[slot]) continue;
+				if (wic_cover_gen[slot] != wic_gen) {
+					wic_cover_gen[slot] = wic_gen;
+					wic_cover[slot] = 0;
+					touched.push_back(slot);
+				}
+				wic_cover[slot]++;
 			}
 		}
 		vector<Wire*> out;
-		for (auto& it : cover) {
-			Wire* w = it.first;
+		for (int slot : touched) {
+			Wire* w = slot_wire[slot];
 			if (!allow_const && wire_has_const.count(w)) continue;
 			auto uit = wire_uniq_bit_count.find(w);
 			if (uit == wire_uniq_bit_count.end()) continue;
-			if (it.second == uit->second)
+			if (wic_cover[slot] == uit->second)
 				out.push_back(w);
 		}
-		// cover is keyed on Wire*, and Yosys hashes pointers by value, so its
-		// iteration order tracks the allocator and differs across platforms.
-		// Callers truncate this list or sort it on a non-unique key, so hand
-		// back a canonical order rather than whatever malloc produced.
+		// `touched` follows cone_bits, which is a pool: its iteration order
+		// tracks the allocator and differs across platforms. Callers truncate
+		// this list or sort it on a non-unique key, so hand back a canonical
+		// order rather than whatever the hash produced.
 		std::sort(out.begin(), out.end(), wire_name_lt);
 		return out;
 	}
@@ -2484,6 +2515,14 @@ struct OptPriEncPass : public Pass {
 		log("    -no-rr\n");
 		log("        disable round-robin / rotated-priority detection.\n");
 		log("\n");
+		log("    -max-exhaustive-bits N\n");
+		log("        free-bit width up to which a bus whose positions the netlist\n");
+		log("        pins has its surviving variant confirmed by enumerating the\n");
+		log("        whole reachable domain rather than trusted from the test\n");
+		log("        deck (default 12, i.e. up to 4096 evaluations; 0..20).\n");
+		log("        Only a bus that already survived the deck reaches the\n");
+		log("        enumeration.\n");
+		log("\n");
 		log("    -max-t-cands N\n");
 		log("        candidate input buses to prove against one matched output\n");
 		log("        (default 64). A cone crowded with same-width internal buses\n");
@@ -2515,6 +2554,7 @@ struct OptPriEncPass : public Pass {
 		int min_width = 4;
 		int max_push_arms = 24;
 		int max_t_cands = 64;
+		int max_exhaustive_bits = 12;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -2531,6 +2571,19 @@ struct OptPriEncPass : public Pass {
 			}
 			if (args[argidx] == "-max-t-cands" && argidx + 1 < args.size()) {
 				max_t_cands = std::stoi(args[++argidx]); continue;
+			}
+			if (args[argidx] == "-max-exhaustive-bits" && argidx + 1 < args.size()) {
+				max_exhaustive_bits = std::stoi(args[++argidx]);
+				// The enumeration is a signed `1 << nf` over the free bits,
+				// so a width at or past the width of int is undefined rather
+				// than merely slow; well before that the eval count is
+				// hopeless. Refuse the value instead of accepting one the
+				// loop cannot honour.
+				if (max_exhaustive_bits < 0 || max_exhaustive_bits > 20)
+					log_cmd_error("-max-exhaustive-bits must be in 0..20 "
+					              "(2^20 evaluations); got %d.\n",
+					              max_exhaustive_bits);
+				continue;
 			}
 			if (args[argidx] == "-max-width" && argidx + 1 < args.size()) {
 				max_width = std::stoi(args[++argidx]); continue;
@@ -2564,6 +2617,7 @@ struct OptPriEncPass : public Pass {
 			worker.min_input_width = min_width;
 			worker.max_push_arms = max_push_arms;
 			worker.max_t_cands = max_t_cands;
+			worker.max_exhaustive_free_bits = max_exhaustive_bits;
 			worker.run();
 			total_regions += worker.regions_rewritten;
 			total_roundtrips += worker.roundtrips_collapsed;
