@@ -28,7 +28,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/rewrite_utils.h"
+#include "passes/opt/cut_region.h"
 
 // Priority-encoder variants the pass recognises. The CLO/CTO forms count a
 // leading/trailing run of ONES; by De Morgan they are CLZ/CTZ of ~x, so they
@@ -184,15 +184,19 @@ static int software_leadone(const Const& c, int N) {
 	return msb < 0 ? 0 : msb + 1;
 }
 
-struct OptPriEncWorker {
-	Module* module;
-	SigMap sigmap;
+// CutRegionWorker owns the module indexes (bit_to_driver holds combinational
+// drivers only, so a sequential or absent driver reads as a cone leaf), the
+// interned per-root cone graph the cut walks run on, and the per-module walk /
+// eval budgets that keep an adversarial netlist from turning candidate search
+// into a multi-minute scan.
+struct OptPriEncWorker : CutRegionWorker {
 	Cell* cell = nullptr;
 
-	// Bit-level driver map (combinational drivers only).
-	dict<SigBit, Cell*> bit_to_driver;
-	pool<SigBit> input_port_bits;
-	pool<Cell*> sequential_cells;
+	// Bits a sequential cell drives. The shared index deliberately omits those
+	// drivers -- every walk wants them to read as leaves -- but the smear source
+	// ranking still has to tell a register output from ordinary combinational
+	// logic, so keep the bit set for that one query.
+	pool<SigBit> ff_out_bits;
 
 	// Configuration.
 	bool detect_clz = true;
@@ -206,6 +210,18 @@ struct OptPriEncWorker {
 	int min_input_width = 4;
 	// 2^8 evals, paid only by a pinned bus that already survived the deck.
 	int max_exhaustive_free_bits = 8;
+	// Cut walks are bounded by the same cell cap the discovery walk used, so a
+	// candidate whose cone overran that cap (-partial-cone) cannot silently
+	// turn a bounded probe into a walk of the whole design behind it.
+	int cut_max_cells = 4096;
+	// Candidate input buses proved against one output. A cut that closes is
+	// answered in a handful of lookups, but a cone full of same-width internal
+	// buses can still offer hundreds, so cap what one output may try.
+	int max_t_cands = 64;
+	// Mux arms hunt_smear may open. Its depth budget bounds a chain but not a
+	// tree: two arms per level is 2^depth nodes, and each new arm pays a cone
+	// walk plus a fingerprint deck.
+	int max_smear_hunt_nodes = 64;
 
 	// Stats.
 	int regions_rewritten = 0;
@@ -244,72 +260,30 @@ struct OptPriEncWorker {
 	dict<std::pair<Wire*, int>, SigSpec> pe_prefix_cache;
 	dict<SigSpec, SigSpec> leadone_cache;
 
-	OptPriEncWorker(Module* m) : module(m), sigmap(m) { build_indexes(); }
+	OptPriEncWorker(Module* m) : CutRegionWorker(m) { build_ff_index(); }
 
-	void build_indexes() {
-		for (auto cell : module->cells()) {
-			if (is_sequential(cell)) {
-				sequential_cells.insert(cell);
-				continue;
-			}
-			for (auto& conn : cell->connections()) {
-				if (!cell->output(conn.first)) continue;
+	void build_ff_index() {
+		for (auto c : module->cells()) {
+			if (!is_sequential(c)) continue;
+			for (auto& conn : c->connections()) {
+				if (!c->output(conn.first)) continue;
 				for (auto bit : sigmap(conn.second))
-					if (bit.wire) bit_to_driver[bit] = cell;
+					if (bit.wire) ff_out_bits.insert(bit);
 			}
-		}
-		for (auto wire : module->wires()) {
-			if (!wire->port_input) continue;
-			for (auto bit : sigmap(wire))
-				input_port_bits.insert(bit);
 		}
 	}
 
-	// Compute the combinational fanin cone of `from`. Outputs the set of cells
-	// in the cone (cells whose output is reached by BFS) and the "leaf" bits
-	// (port-input bits or bits driven by sequential cells / undriven).
+	// Combinational fanin cone of `from`, on CutRegionWorker's shared walk.
 	// Returns 1 on success, 0 if the cone is empty/unusable, -1 if it exceeded
-	// the size caps (caller may retry with a larger cap / budget).
-	int get_cone(SigSpec from, pool<Cell*>& cone_cells, pool<SigBit>& leaf_bits,
-	             int max_cone_cells, int max_leaf_bits) {
+	// the size caps (caller may retry with a larger cap, or keep the prefix).
+	// The shared walk reports only success or failure, but discovery has to tell
+	// an over-budget cone from an empty one, so the two verdicts are split here.
+	int cone_status(SigSpec from, pool<Cell*>& cone_cells, pool<SigBit>& leaf_bits,
+	                int max_cone_cells, int max_leaf_bits) {
 		cone_cells.clear();
 		leaf_bits.clear();
-		pool<SigBit> visited;
-		std::queue<SigBit> worklist;
-		for (auto bit : sigmap(from)) {
-			if (!bit.wire) continue;
-			if (visited.insert(bit).second) worklist.push(bit);
-		}
-		while (!worklist.empty()) {
-			SigBit bit = worklist.front();
-			worklist.pop();
-			if (input_port_bits.count(bit)) {
-				leaf_bits.insert(bit);
-				if (GetSize(leaf_bits) > max_leaf_bits) return -1;
-				continue;
-			}
-			auto it = bit_to_driver.find(bit);
-			if (it == bit_to_driver.end()) {
-				leaf_bits.insert(bit);
-				if (GetSize(leaf_bits) > max_leaf_bits) return -1;
-				continue;
-			}
-			Cell* drv = it->second;
-			if (sequential_cells.count(drv)) {
-				leaf_bits.insert(bit);
-				if (GetSize(leaf_bits) > max_leaf_bits) return -1;
-				continue;
-			}
-			if (!cone_cells.insert(drv).second) continue;
-			if (GetSize(cone_cells) > max_cone_cells) return -1;
-			for (auto& conn : drv->connections()) {
-				if (!drv->input(conn.first)) continue;
-				for (auto in_bit : sigmap(conn.second)) {
-					if (!in_bit.wire) continue;
-					if (visited.insert(in_bit).second) worklist.push(in_bit);
-				}
-			}
-		}
+		if (!get_cone(from, cone_cells, leaf_bits, max_cone_cells, max_leaf_bits))
+			return -1;
 		return cone_cells.empty() ? 0 : 1;
 	}
 
@@ -320,7 +294,10 @@ struct OptPriEncWorker {
 	dict<Wire*, vector<SigBit>> wire_sig_bits;
 	pool<Wire*> wire_has_const;
 
-	void build_wire_index(const vector<Wire*>& wires) {
+	// Named apart from CutRegionWorker::build_wire_index: that one indexes every
+	// wire the module has, this one only the snapshot candidate discovery works
+	// from, and it also records what each wire's bits look like after sigmap.
+	void build_cand_wire_index(const vector<Wire*>& wires) {
 		bit_to_cand_wires.clear();
 		wire_uniq_bit_count.clear();
 		wire_sig_bits.clear();
@@ -420,7 +397,22 @@ struct OptPriEncWorker {
 			if (a->width != b->width) return a->width > b->width;
 			return wire_name_lt(a, b);
 		});
-		return out;
+		// A bus routinely reaches here under several names -- the named wire,
+		// the $0\... proc temporary feeding it, resize aliases -- that sigmap
+		// collapses onto one signal. They are one candidate: proving and
+		// fingerprinting each spelling in turn repeats identical work and, on
+		// a miss, repeats it for every alias. Keep the first, which the sort
+		// above has already made the widest and most canonically named.
+		pool<SigSpec> seen;
+		vector<Wire*> uniq;
+		uniq.reserve(out.size());
+		for (Wire* w : out) {
+			auto sit = wire_sig_bits.find(w);
+			if (sit == wire_sig_bits.end()) continue;
+			if (!seen.insert(SigSpec(sit->second)).second) continue;
+			uniq.push_back(w);
+		}
+		return uniq;
 	}
 
 	// Multi-bit confirmation patterns only (no zero / one-hots). Shared by PE
@@ -567,6 +559,10 @@ struct OptPriEncWorker {
 			auto it = bit_to_driver.find(bit);
 			if (it == bit_to_driver.end()) continue;   // safe leaf
 			Cell* d = it->second;
+			// Recorded as multiply driven: there is no single cell whose
+			// output could be checked against the cut, so the bit cannot be
+			// shown safe to pin.
+			if (d == nullptr) return false;
 			for (auto& conn : d->connections()) {
 				if (!d->output(conn.first)) continue;
 				for (auto ob : sigmap(conn.second))
@@ -586,6 +582,7 @@ struct OptPriEncWorker {
 			if (bit.wire == nullptr) return false;
 			auto it = bit_to_driver.find(bit);
 			if (it == bit_to_driver.end()) continue;   // safe leaf
+			if (it->second == nullptr) return false;   // multiply driven
 			if (evaluated.count(it->second)) return false;
 		}
 		return true;
@@ -869,9 +866,9 @@ struct OptPriEncWorker {
 
 		pool<Cell*> cone_cells;
 		pool<SigBit> leaf_bits;
-		int st = get_cone(M_sig, cone_cells, leaf_bits,
-		                  std::max(128, max_input_width * 16),
-		                  max_input_width + 16);
+		int st = cone_status(M_sig, cone_cells, leaf_bits,
+		                     std::max(128, max_input_width * 16),
+		                     max_input_width + 16);
 		if (st <= 0) return miss();
 
 		pool<SigBit> cone_bits = leaf_bits;
@@ -891,11 +888,8 @@ struct OptPriEncWorker {
 			auto rank = [&](Wire* w) {
 				SigSpec s = sigmap(SigSpec(w));
 				bool seq = false;
-				for (auto bit : s) {
-					auto it = bit_to_driver.find(bit);
-					if (it != bit_to_driver.end() && sequential_cells.count(it->second))
-						seq = true;
-				}
+				for (auto bit : s)
+					if (ff_out_bits.count(bit)) seq = true;
 				if (w->port_input || seq) return 0;
 				return 1;
 			};
@@ -914,7 +908,10 @@ struct OptPriEncWorker {
 				if (bit.wire) x_bits.insert(bit);
 			if (x_bits.empty()) continue;
 			pool<Cell*> evaluated;
-			if (!cone_depends_only_on_T(M_sig, x_bits, &evaluated)) continue;
+			// This cone closed (st > 0 above), so its leaves are the real ones
+			// and the cut walk can answer a leaf-only source without walking.
+			if (!cone_depends_only_on_T(M_sig, x_bits, &evaluated,
+			                            &leaf_bits, &cone_cells)) continue;
 			PinnedBus pb = make_pinned_bus(x);
 			if (!fingerprint_smear(pb, M_sig, N, evaluated)) continue;
 			smear_hit[M_sig] = x;
@@ -957,8 +954,20 @@ struct OptPriEncWorker {
 		return true;
 	}
 
+	int smear_hunt_left = 0;
+
 	// Walk mux layers so a clamp/pad tree does not hide a smear arm from I1.
+	// Depth bounds a clamp *chain*, which is the shape this was written for, but
+	// nothing stops a mux *tree*: two arms per level makes the walk 2^budget
+	// nodes, and every arm that is not already memoized pays a cone walk plus a
+	// fingerprint deck. Charge the nodes as well, from one budget per entry.
 	void hunt_smear(SigSpec sig, int budget = 16) {
+		smear_hunt_left = max_smear_hunt_nodes;
+		hunt_smear_rec(sig, budget);
+	}
+
+	void hunt_smear_rec(SigSpec sig, int budget) {
+		if (smear_hunt_left-- <= 0) return;
 		sig = sigmap(sig);
 		if (GetSize(sig) < min_input_width) return;
 		if (smear_hit.count(sig)) return;
@@ -967,8 +976,8 @@ struct OptPriEncWorker {
 		SigBit sel;
 		SigSpec sa, sb;
 		if (!split_mux(sig, sel, sa, sb)) return;
-		hunt_smear(sa, budget - 1);
-		hunt_smear(sb, budget - 1);
+		hunt_smear_rec(sa, budget - 1);
+		hunt_smear_rec(sb, budget - 1);
 	}
 
 	bool subtree_has_smear(SigSpec sig, int budget) {
@@ -1287,9 +1296,9 @@ struct OptPriEncWorker {
 		pool<Cell*> drivers;
 		for (auto bit : sig) {
 			if (!bit.wire) return nullptr;
-			auto it = bit_to_driver.find(bit);
-			if (it == bit_to_driver.end()) return nullptr;
-			drivers.insert(it->second);
+			Cell* drv = bit_to_driver.at(bit, nullptr);
+			if (drv == nullptr) return nullptr;
+			drivers.insert(drv);
 		}
 		if (GetSize(drivers) != 1) return nullptr;
 		Cell* d = *drivers.begin();
@@ -1305,10 +1314,10 @@ struct OptPriEncWorker {
 		Cell* d = nullptr;
 		for (auto bit : sig) {
 			if (!bit.wire) return nullptr;
-			auto it = bit_to_driver.find(bit);
-			if (it == bit_to_driver.end()) return nullptr;
-			if (d && d != it->second) return nullptr;
-			d = it->second;
+			Cell* drv = bit_to_driver.at(bit, nullptr);
+			if (drv == nullptr) return nullptr;
+			if (d && d != drv) return nullptr;
+			d = drv;
 		}
 		return d;
 	}
@@ -1430,9 +1439,7 @@ struct OptPriEncWorker {
 		for (auto bit : s) {
 			if (!bit.wire) continue;
 			if (input_port_bits.count(bit)) continue;
-			auto it = bit_to_driver.find(bit);
-			if (it == bit_to_driver.end()) continue;
-			if (sequential_cells.count(it->second)) continue;
+			if (bit_to_driver.at(bit, nullptr) == nullptr) continue;
 			return false;
 		}
 		return true;
@@ -1623,6 +1630,16 @@ struct OptPriEncWorker {
 			SigSpec A = sigmap(cmp->getPort(ID::A));
 			SigSpec B = sigmap(cmp->getPort(ID::B));
 			SigSpec Y = sigmap(cmp->getPort(ID::Y));
+			// Every path through rewrite_smear_cmp -- the direct narrowing and
+			// both mux peels -- needs an operand that is off the combinational
+			// path and not fully constant, to stand as the threshold K. Without
+			// one the compare cannot be narrowed however the hunt below turns
+			// out, and the hunt is the expensive half: it walks a cone and runs
+			// a fingerprint deck per mux arm, once per comparator in the whole
+			// module. Ask the cheap structural question first.
+			if (!(is_offpath_operand(A) && !A.is_fully_const()) &&
+			    !(is_offpath_operand(B) && !B.is_fully_const()))
+				continue;
 			hunt_smear(A);
 			hunt_smear(B);
 			cell = cmp;
@@ -1709,10 +1726,8 @@ struct OptPriEncWorker {
 			SigBit bit = q.front();
 			q.pop();
 			if (targets.count(bit)) return true;
-			auto it = bit_to_driver.find(bit);
-			if (it == bit_to_driver.end()) continue;
-			Cell* d = it->second;
-			if (sequential_cells.count(d)) continue;
+			Cell* d = bit_to_driver.at(bit, nullptr);
+			if (d == nullptr) continue;
 			for (auto& conn : d->connections()) {
 				if (!d->input(conn.first)) continue;
 				for (auto in_bit : sigmap(conn.second))
@@ -1922,31 +1937,8 @@ struct OptPriEncWorker {
 	}
 
 	// Generalisation of cone_depends_only_on_T to a set of allowed leaf bits.
-	bool cone_depends_only_on_set(SigSpec S_sig, const pool<SigBit>& allowed) {
-		pool<SigBit> visited;
-		std::queue<SigBit> worklist;
-		for (auto bit : sigmap(S_sig)) {
-			if (!bit.wire) continue;
-			if (visited.insert(bit).second) worklist.push(bit);
-		}
-		while (!worklist.empty()) {
-			SigBit bit = worklist.front();
-			worklist.pop();
-			if (allowed.count(bit)) continue;
-			if (input_port_bits.count(bit)) return false;
-			auto it = bit_to_driver.find(bit);
-			if (it == bit_to_driver.end()) return false;
-			Cell* drv = it->second;
-			if (sequential_cells.count(drv)) return false;
-			for (auto& conn : drv->connections()) {
-				if (!drv->input(conn.first)) continue;
-				for (auto in_bit : sigmap(conn.second)) {
-					if (!in_bit.wire) continue;
-					if (visited.insert(in_bit).second) worklist.push(in_bit);
-				}
-			}
-		}
-		return true;
+	bool cone_depends_only_on_set(const SigSpec& S_sig, const pool<SigBit>& allowed) {
+		return cut_cone_walk(S_sig, allowed, cut_max_cells);
 	}
 
 	struct RRRewrite {
@@ -2005,9 +1997,13 @@ struct OptPriEncWorker {
 		for (int i = 0; i < GetSize(S_sig); i++) {
 			SigBit bit = S_sig[i];
 			if (!bit.wire) continue;
-			auto it = bit_to_driver.find(bit);
-			if (it == bit_to_driver.end()) return false;
-			drivers.insert(it->second);
+			// A null entry is the shared index's record of a bit more than
+			// one cell drives. Such a bit has no sole driver, so it fails the
+			// same way an undriven one does -- and collecting the null instead
+			// would leave a one-element driver set to dereference below.
+			Cell* drv = bit_to_driver.at(bit, nullptr);
+			if (drv == nullptr) return false;
+			drivers.insert(drv);
 			driven.append(bit);
 			driven_pos.push_back(i);
 		}
@@ -2036,48 +2032,31 @@ struct OptPriEncWorker {
 			ID($and), ID($or), ID($xor), ID($xnor), ID($not));
 	}
 
-	// Cheap structural prefilter for a candidate S=f(T). ConstEval will only
-	// assign T, so any other variable leaf in the fanin cone guarantees the
-	// fingerprint will fail. Stop traversal at T bits to allow T to be an
-	// internal wire produced by logic outside the PE region.
-	bool cone_depends_only_on_T(SigSpec S_sig, const pool<SigBit>& T_bits,
-	                            pool<Cell*>* evaluated = nullptr) {
-		pool<SigBit> visited;
-		std::queue<SigBit> worklist;
-		for (auto bit : sigmap(S_sig)) {
-			if (!bit.wire) continue;
-			if (visited.insert(bit).second) worklist.push(bit);
-		}
-
-		while (!worklist.empty()) {
-			SigBit bit = worklist.front();
-			worklist.pop();
-
-			if (T_bits.count(bit)) continue;
-			if (input_port_bits.count(bit)) return false;
-
-			auto it = bit_to_driver.find(bit);
-			if (it == bit_to_driver.end()) return false;
-
-			Cell* drv = it->second;
-			if (sequential_cells.count(drv)) return false;
-			if (evaluated) evaluated->insert(drv);
-
-			for (auto& conn : drv->connections()) {
-				if (!drv->input(conn.first)) continue;
-				for (auto in_bit : sigmap(conn.second)) {
-					if (!in_bit.wire) continue;
-					if (visited.insert(in_bit).second) worklist.push(in_bit);
-				}
-			}
-		}
-
-		return true;
+	// A candidate S=f(T) is usable only if the cone of S closes on T's bits:
+	// ConstEval will assign nothing else, so any other variable leaf guarantees
+	// the fingerprint fails. That is exactly the shared cut walk, which stops at
+	// the cut (letting T be an internal wire produced outside the region), runs
+	// on the cone graph interned once per root and reused by every candidate,
+	// and charges the module walk budget. `evaluated` collects the cells the
+	// walk entered, which is the set the fingerprint's cut check reasons about.
+	//
+	// `full_leaves` / `full_cells` are the discovery walk's own verdict for this
+	// root and unlock a walk-free answer for cuts made only of leaf bits: such a
+	// cut closes iff it covers every cone leaf. Pass them ONLY for a cone that
+	// actually closed -- a `-partial-cone` prefix has fewer leaves than the real
+	// cone, and taking its leaf set as complete would accept a cut that does not.
+	bool cone_depends_only_on_T(const SigSpec& S_sig, const pool<SigBit>& T_bits,
+	                            pool<Cell*>* evaluated = nullptr,
+	                            const pool<SigBit>* full_leaves = nullptr,
+	                            const pool<Cell*>* full_cells = nullptr) {
+		return cut_cone_walk(S_sig, T_bits, cut_max_cells, /*hit_bits=*/nullptr,
+		                     evaluated, /*forced_bits=*/&T_bits,
+		                     full_leaves, full_cells);
 	}
 
 	void run() {
 		vector<Wire*> wires_snapshot(module->wires().begin(), module->wires().end());
-		build_wire_index(wires_snapshot);
+		build_cand_wire_index(wires_snapshot);
 		// One ConstEval for the whole module: ctor indexes every cell once.
 		// Fingerprints only run before we mutate the netlist.
 		ConstEval ce_store(module);
@@ -2091,6 +2070,11 @@ struct OptPriEncWorker {
 		int max_W = clog2_int(max_input_width + 1);
 		int max_cone_cells = std::max(128, max_input_width * 16);
 		int probe_cone_cells = std::min(64, max_cone_cells);
+		// Prove a candidate against the same cell cap discovery used. Without
+		// it a -partial-cone candidate -- kept precisely because its cone did
+		// not fit -- would have every one of its candidate buses walk the whole
+		// design behind it, which is the shape that made the option expensive.
+		cut_max_cells = max_cone_cells;
 		int large_cone_budget = 24;
 		// req[N]+start[W] leaves for RR, plus a little slack for aliases/opt junk.
 		int max_leaf_bits = max_input_width + max_W + max_input_width / 4 + 16;
@@ -2131,7 +2115,7 @@ struct OptPriEncWorker {
 			pool<Cell*> cone_cells;
 			pool<SigBit> leaf_bits;
 			bool cone_partial = false;
-			int st = get_cone(SigSpec(S_wire), cone_cells, leaf_bits,
+			int st = cone_status(SigSpec(S_wire), cone_cells, leaf_bits,
 			                  probe_cone_cells, max_leaf_bits);
 			if (st < 0) {
 				// Rank 0/1 (ports + mux/add/and tails) always get a full rewalk;
@@ -2140,7 +2124,7 @@ struct OptPriEncWorker {
 					if (large_cone_budget <= 0) continue;
 					large_cone_budget--;
 				}
-				st = get_cone(SigSpec(S_wire), cone_cells, leaf_bits,
+				st = cone_status(SigSpec(S_wire), cone_cells, leaf_bits,
 				              max_cone_cells, max_leaf_bits);
 				// Overrunning even the full budget leaves a breadth-first prefix
 				// of the cone, which is all discovery needs: candidate T wires
@@ -2209,23 +2193,34 @@ struct OptPriEncWorker {
 		pool<Wire*> claimed_outputs;
 		pool<Cell*> claimed_drivers;
 
+		int skipped_roots = 0;
 		for (auto& cand : candidates) {
 			if (claimed_outputs.count(cand.S_wire)) continue;
 			if (claimed_drivers.count(cand.sole_driver)) continue;
+			if (walk_exhausted() || eval_exhausted()) { skipped_roots++; continue; }
 
 			int Wbits = cand.S_wire->width;
 			SigSpec S_sig = sigmap(SigSpec(cand.S_wire));
 
+			// A cone that closed knows its own leaves, which lets the cut walk
+			// answer a leaf-only candidate bus without walking at all. A
+			// -partial-cone prefix knows no such thing.
+			const pool<SigBit>* full_leaves = cand.cone_partial ? nullptr : &cand.leaf_bits;
+			const pool<Cell*>* full_cells = cand.cone_partial ? nullptr : &cand.cone_cells;
+
 			vector<Wire*> Ts = find_candidate_Ts(cand.S_wire, cand.cone_bits,
 			                                     cand.control_bits, Wbits);
+			int tried = 0;
 			for (Wire* T_wire : Ts) {
+				if (++tried > max_t_cands || walk_exhausted()) break;
 				int N = T_wire->width;
 				SigSpec T_sig = sigmap(SigSpec(T_wire));
 				pool<SigBit> T_bits;
 				for (auto bit : T_sig)
 					if (bit.wire) T_bits.insert(bit);
 				pool<Cell*> evaluated;
-				if (!cone_depends_only_on_T(S_sig, T_bits, &evaluated)) continue;
+				if (!cone_depends_only_on_T(S_sig, T_bits, &evaluated,
+				                            full_leaves, full_cells)) continue;
 
 				PinnedBus pb = make_pinned_bus(T_sig);
 				if (!pb.ok) continue;
@@ -2264,6 +2259,7 @@ struct OptPriEncWorker {
 			for (auto& cand : candidates) {
 				if (claimed_outputs.count(cand.S_wire)) continue;
 				if (claimed_drivers.count(cand.sole_driver)) continue;
+				if (walk_exhausted() || eval_exhausted()) { skipped_roots++; continue; }
 				if (!cone_looks_like_rr(cand.cone_cells)) continue;
 				// RR emits a whole pointer word; a partly tied S is not one.
 				if (GetSize(cand.driven) != cand.S_wire->width) continue;
@@ -2304,7 +2300,7 @@ struct OptPriEncWorker {
 					int pairs = 0;
 					for (Wire* start_wire : start_cands) {
 						if (start_wire == req_wire) continue;
-						if (++pairs > max_pairs) break;
+						if (++pairs > max_pairs || walk_exhausted()) break;
 						SigSpec start_sig = sigmap(SigSpec(start_wire));
 						pool<SigBit> allowed = req_bits;
 						for (auto bit : start_sig)
@@ -2328,6 +2324,8 @@ struct OptPriEncWorker {
 				}
 			}
 		}
+
+		note_budget("opt_prienc", skipped_roots);
 
 		// Apply rewrites. We collected first to avoid the index growing stale
 		// while we add new cells/wires.
@@ -2486,6 +2484,12 @@ struct OptPriEncPass : public Pass {
 		log("    -no-rr\n");
 		log("        disable round-robin / rotated-priority detection.\n");
 		log("\n");
+		log("    -max-t-cands N\n");
+		log("        candidate input buses to prove against one matched output\n");
+		log("        (default 64). A cone crowded with same-width internal buses\n");
+		log("        offers more than are worth trying; the search is\n");
+		log("        best-effort, so a cap costs recall rather than soundness.\n");
+		log("\n");
 		log("    -max-width N\n");
 		log("        maximum input bus width to consider (default 64).\n");
 		log("\n");
@@ -2510,6 +2514,7 @@ struct OptPriEncPass : public Pass {
 		int max_width = 64;
 		int min_width = 4;
 		int max_push_arms = 24;
+		int max_t_cands = 64;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -2523,6 +2528,9 @@ struct OptPriEncPass : public Pass {
 			if (args[argidx] == "-partial-cone") { partial_cone = true; continue; }
 			if (args[argidx] == "-max-push-arms" && argidx + 1 < args.size()) {
 				max_push_arms = std::stoi(args[++argidx]); continue;
+			}
+			if (args[argidx] == "-max-t-cands" && argidx + 1 < args.size()) {
+				max_t_cands = std::stoi(args[++argidx]); continue;
 			}
 			if (args[argidx] == "-max-width" && argidx + 1 < args.size()) {
 				max_width = std::stoi(args[++argidx]); continue;
@@ -2555,6 +2563,7 @@ struct OptPriEncPass : public Pass {
 			worker.max_input_width = max_width;
 			worker.min_input_width = min_width;
 			worker.max_push_arms = max_push_arms;
+			worker.max_t_cands = max_t_cands;
 			worker.run();
 			total_regions += worker.regions_rewritten;
 			total_roundtrips += worker.roundtrips_collapsed;
