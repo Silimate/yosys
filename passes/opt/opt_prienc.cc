@@ -559,6 +559,10 @@ struct OptPriEncWorker : CutRegionWorker {
 			auto it = bit_to_driver.find(bit);
 			if (it == bit_to_driver.end()) continue;   // safe leaf
 			Cell* d = it->second;
+			// Recorded as multiply driven: there is no single cell whose
+			// output could be checked against the cut, so the bit cannot be
+			// shown safe to pin.
+			if (d == nullptr) return false;
 			for (auto& conn : d->connections()) {
 				if (!d->output(conn.first)) continue;
 				for (auto ob : sigmap(conn.second))
@@ -578,6 +582,7 @@ struct OptPriEncWorker : CutRegionWorker {
 			if (bit.wire == nullptr) return false;
 			auto it = bit_to_driver.find(bit);
 			if (it == bit_to_driver.end()) continue;   // safe leaf
+			if (it->second == nullptr) return false;   // multiply driven
 			if (evaluated.count(it->second)) return false;
 		}
 		return true;
@@ -1992,9 +1997,13 @@ struct OptPriEncWorker : CutRegionWorker {
 		for (int i = 0; i < GetSize(S_sig); i++) {
 			SigBit bit = S_sig[i];
 			if (!bit.wire) continue;
-			auto it = bit_to_driver.find(bit);
-			if (it == bit_to_driver.end()) return false;
-			drivers.insert(it->second);
+			// A null entry is the shared index's record of a bit more than
+			// one cell drives. Such a bit has no sole driver, so it fails the
+			// same way an undriven one does -- and collecting the null instead
+			// would leave a one-element driver set to dereference below.
+			Cell* drv = bit_to_driver.at(bit, nullptr);
+			if (drv == nullptr) return false;
+			drivers.insert(drv);
 			driven.append(bit);
 			driven_pos.push_back(i);
 		}
