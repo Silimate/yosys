@@ -740,3 +740,32 @@ opt_vps -wrap-atom; opt_clean
 select -assert-count 2 t:$shr
 design -reset
 log -pop
+
+# =============================================================================
+# Test 23: SAT equivalence — two pipeline stages of one index are not one index
+# Both reads' shift variables trace back to the same root bits, so the old
+# root-set grouping merged them onto a single shared barrel shifter driven by
+# one of the two shift signals. This miter fails without the affine key.
+# =============================================================================
+log -header "SAT equivalence: pipelined indices must not share a barrel shifter"
+log -push
+design -reset
+
+read -sv opt_vps_pipe_idx.sv
+verific -import opt_vps_pipe_idx
+proc; opt_clean
+opt_vps; opt_clean
+rename opt_vps_pipe_idx gate
+
+read -sv opt_vps_pipe_idx.sv
+verific -import opt_vps_pipe_idx
+proc; opt_clean
+rename opt_vps_pipe_idx gold
+
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt; memory; opt
+clk2fflogic
+sat -set-init-zero -tempinduct -prove-asserts -verify
+design -reset
+log -pop
