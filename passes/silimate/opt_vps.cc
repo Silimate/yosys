@@ -975,8 +975,22 @@ struct OptVpsWorker
 	IndexKey index_key(SigSpec sig)
 	{
 		Affine a = affine_of(sig, 0);
-		if (!a.ok)
-			return IndexKey(CoeffMap(), -1);
+		// A key match is read as "these differ by exactly the constant
+		// eval_at_zero measured", so only a fully exact form earns a shared
+		// key. A form that holds merely modulo 2^exact_bits does not: 8-bit
+		// `n + 31` and `n + 63` have the same coefficients, but at n = 200
+		// they are 231 and 7, which is not 32 apart, and the merge would
+		// slice the second read at +32 anyway. Wrapping forms, forms that
+		// ran out of affine depth, and the empty spec all fall back to a key
+		// naming the signal itself, so a read groups only with another
+		// spelling of the same signal (and constant-only shifts, whose
+		// variable part is empty, still group -- they really do differ by
+		// exactly their constants).
+		if (!a.ok || a.exact_bits < AFFINE_EXACT) {
+			CoeffMap self;
+			self[AffineAtom(sigmap(sig), false)] = 1;
+			return IndexKey(self, -1);
+		}
 		return IndexKey(a.coeffs, a.exact_bits);
 	}
 

@@ -2519,8 +2519,9 @@ struct OptPriEncPass : public Pass {
 		log("        free-bit width up to which a bus whose positions the netlist\n");
 		log("        pins has its surviving variant confirmed by enumerating the\n");
 		log("        whole reachable domain rather than trusted from the test\n");
-		log("        deck (default 12, i.e. up to 4096 evaluations). Only a bus\n");
-		log("        that already survived the deck reaches the enumeration.\n");
+		log("        deck (default 12, i.e. up to 4096 evaluations; 0..20).\n");
+		log("        Only a bus that already survived the deck reaches the\n");
+		log("        enumeration.\n");
 		log("\n");
 		log("    -max-t-cands N\n");
 		log("        candidate input buses to prove against one matched output\n");
@@ -2572,7 +2573,17 @@ struct OptPriEncPass : public Pass {
 				max_t_cands = std::stoi(args[++argidx]); continue;
 			}
 			if (args[argidx] == "-max-exhaustive-bits" && argidx + 1 < args.size()) {
-				max_exhaustive_bits = std::stoi(args[++argidx]); continue;
+				max_exhaustive_bits = std::stoi(args[++argidx]);
+				// The enumeration is a signed `1 << nf` over the free bits,
+				// so a width at or past the width of int is undefined rather
+				// than merely slow; well before that the eval count is
+				// hopeless. Refuse the value instead of accepting one the
+				// loop cannot honour.
+				if (max_exhaustive_bits < 0 || max_exhaustive_bits > 20)
+					log_cmd_error("-max-exhaustive-bits must be in 0..20 "
+					              "(2^20 evaluations); got %d.\n",
+					              max_exhaustive_bits);
+				continue;
 			}
 			if (args[argidx] == "-max-width" && argidx + 1 < args.size()) {
 				max_width = std::stoi(args[++argidx]); continue;
