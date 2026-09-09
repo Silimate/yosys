@@ -767,5 +767,105 @@ hierarchy -top miter
 proc; opt; memory; opt
 clk2fflogic
 sat -set-init-zero -tempinduct -prove-asserts -verify
+
+# Test: SAT self-equivalence — uniform scatter before vs after opt_vps
+#
+# A loop of writes at an affine index lowers to one one-hot decoder per lane
+# and an N-wide stage of element muxes per lane: N*L muxes for L writes. The
+# scatter fold rotates the lane data by the base instead, leaving one mux per
+# entry.
+#
+# Proven at 32x8 -- big enough for the modular wrap to bite (an off-by-one in
+# the rotate amount mismatches on exactly the entries that wrap) and small
+# enough to stay a few-second SAT problem. The real 256x64 geometry is covered
+# by the cell-count tests below.
+# =============================================================================
+log -header "SAT self-equivalence: uniform scatter before vs after opt_vps"
+log -push
+design -reset
+read -sv opt_vps_scatter.sv
+verific -import opt_vps_scatter_write
+prep -top opt_vps_scatter_write
+design -save gold_scatter
+opt_vps opt_vps_scatter_write
+opt_clean
+rename opt_vps_scatter_write gate
+design -stash gate_scatter
+design -load gold_scatter
+rename opt_vps_scatter_write gold
+design -copy-from gate_scatter -as gate gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+opt -full
+sat -verify -prove-asserts miter
+design -reset
+log -pop
+
+# =============================================================================
+# Test: SAT self-equivalence — scatter with a self-copy else arm
+#
+# Writing the entry back onto itself on the else arm is a no-op, but it makes
+# every decoder bit drive two parallel stages joined by a wide mux. That
+# collapses to one 2:1 mux per lane feeding the same rotate. Real RTL writes
+# the scatter this way far more often than the bare form above, so a fold that
+# only handles the single-stage shape is worth nothing in practice.
+# =============================================================================
+log -header "SAT self-equivalence: scatter with self-copy else arm"
+log -push
+design -reset
+read -sv opt_vps_scatter.sv
+verific -import opt_vps_scatter_readback
+prep -top opt_vps_scatter_readback
+design -save gold_readback
+opt_vps opt_vps_scatter_readback
+opt_clean
+rename opt_vps_scatter_readback gate
+design -stash gate_readback
+design -load gold_readback
+rename opt_vps_scatter_readback gold
+design -copy-from gate_readback -as gate gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+opt -full
+sat -verify -prove-asserts miter
+design -reset
+log -pop
+
+# =============================================================================
+# Test: the scatter fold actually fires, at the geometry it matters at
+#
+# Self-equivalence alone passes whether or not the fold ran: gold and gate are
+# both correct when nothing happened. These assertions are what make the tests
+# above mean something -- they fail if the tower survives.
+#
+# 256 entries x 64 lanes: 16449 muxes for the bare form, 32833 for the
+# self-copy form, both down to one barrel pair plus one mux per entry (plus one
+# per lane where the two arms merge).
+# =============================================================================
+log -header "cell counts: scatter fold fires at 256x64"
+log -push
+design -reset
+read -sv opt_vps_scatter.sv
+verific -import opt_vps_scatter_write_wide
+prep -top opt_vps_scatter_write_wide
+flatten
+opt -full
+select -assert-min 16000 t:$mux
+opt_vps
+opt_clean
+select -assert-count 2 t:$shr
+select -assert-max 300 t:$mux
+design -reset
+
+read -sv opt_vps_scatter.sv
+verific -import opt_vps_scatter_readback_wide
+prep -top opt_vps_scatter_readback_wide
+flatten
+opt -full
+select -assert-min 32000 t:$mux
+opt_vps
+opt_clean
+select -assert-max 12 t:$shr
+select -assert-max 400 t:$mux
 design -reset
 log -pop
