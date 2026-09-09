@@ -19,6 +19,7 @@
 
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"
+#include "kernel/utils.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -48,6 +49,7 @@ struct OptVpsWorker
 	int feedback_collapsed = 0;
 	int vps_reads_replaced = 0;
 	int gathers_folded = 0;
+	int scatters_folded = 0;
 	int min_stride;
 	bool msb_inv_sext;
 	bool dead_mod;
@@ -1300,13 +1302,393 @@ struct OptVpsWorker
 		groups_optimized++;
 	}
 
-	void run(int min_gather, int max_gather_table)
+	// ------------------------------------------------------------------
+	// UNIFORM SCATTERS -- the write dual of process_uniform_gathers().
+	//
+	// Verific lowers
+	//
+	//     for (i = 0; i < L; i++) arr[base + i] = data[i];
+	//
+	// into L one-hot decoders ($shl of 1 by `base + i`, one per lane) and
+	// one stage of N element-wide 2:1 $mux cells per lane: stage i asks,
+	// for each of the N array entries, "is my decoder's one-hot bit set
+	// here?", and passes the previous stage's value through when it is not.
+	// That is N*L muxes to express L writes.
+	//
+	// The positions base+i are distinct while L <= N, so at most one stage
+	// can claim a given entry and the whole tower collapses to
+	//
+	//     out[e] = (e - base) mod N < L ? data[(e - base) mod N] : in[e]
+	//
+	// which is one rotate of the lane data by `base` plus one 2:1 mux per
+	// entry.  Rotating a zero-padded enable vector by the same amount
+	// carries the per-lane enables along with it and supplies that mux's
+	// select, so the range check costs nothing: N*L muxes become N muxes
+	// and two barrel shifts.
+	// ------------------------------------------------------------------
+
+	// Decoder position of a select bit, plus the enable it was ANDed with.
+	// Mirrors trace_to_decoder_pos(), but keeps the other AND input.
+	int scatter_sel_pos(SigBit bit, Cell *decoder, SigBit &en, bool &has_en)
+	{
+		SigBit mapped = sigmap(bit);
+		has_en = false;
+		int pos = decoder_pos_of(mapped, decoder);
+		if (pos >= 0)
+			return pos;
+		Cell *driver = bit_drivers.at(mapped, nullptr);
+		SigBit a, b;
+		if (!driver || !and_gate_inputs(driver, a, b))
+			return -1;
+		int pa = decoder_pos_of(a, decoder);
+		if (pa >= 0) { en = b; has_en = true; return pa; }
+		int pb = decoder_pos_of(b, decoder);
+		if (pb >= 0) { en = a; has_en = true; return pb; }
+		return -1;
+	}
+
+	struct ScatterLane {
+		Cell *decoder = nullptr;
+		int64_t konst = 0;
+		// One element-mux stage per branch of the source conditional.  A
+		// plain `arr[base+i] = d` gives one; an if/else that writes the same
+		// entry on both arms gives two parallel stages sharing the decoder
+		// and the incoming state, joined by a wide mux downstream.
+		std::vector<Cell *> muxes[2];
+		SigSpec bdata[2];   // each branch's lane-uniform written value
+		int branches = 1;
+		SigSpec data;       // the value this lane writes
+		SigSpec data_a, data_b; // two-branch case: the mux inputs
+		SigBit sel;         // two-branch case: which arm won
+		SigBit en;          // per-lane write enable
+	};
+
+	void process_uniform_scatters(int min_scatter, int max_table)
+	{
+		if (min_scatter <= 0)
+			return;
+
+		std::vector<Cell *> decoders;
+		for (auto cell : module->selected_cells())
+			if (is_decoder_shl(cell))
+				decoders.push_back(cell);
+		if (GetSize(decoders) < 2)
+			return;
+		index_decoders(decoders);
+
+		// Group decoders by the dynamic part of their shift index: same
+		// coefficients and same one-hot width, differing only by a constant.
+		typedef std::pair<int, CoeffMap> LaneKey; // (one-hot width, dynamic part)
+		std::map<LaneKey, std::vector<std::pair<int64_t, Cell *>>> groups;
+
+		for (auto dec : decoders) {
+			int n = GetSize(dec->getPort(ID::Y));
+			// A power-of-two width makes the wrap the decoder already
+			// performs the same modulus the emitted rotate uses.
+			if (n < 2 || n > max_table || (n & (n - 1)) != 0)
+				continue;
+			SigSpec b = strip_dead_mod(dec->getPort(ID::B));
+			int bw = ceil_log2(n);
+			if (GetSize(b) < bw)
+				continue;
+			Affine idx = affine_of(b, 0);
+			if (!idx.ok || idx.coeffs.empty() || idx.exact_bits < bw)
+				continue;
+			int64_t k = ((idx.konst % n) + n) % n;
+			groups[LaneKey(n, idx.coeffs)].push_back(std::make_pair(k, dec));
+		}
+
+		for (auto &grp : groups) {
+			int n = grp.first.first;
+			auto lanes_in = grp.second;
+			if (GetSize(lanes_in) < min_scatter)
+				continue;
+			std::sort(lanes_in.begin(), lanes_in.end(),
+				  [](const std::pair<int64_t, Cell *> &a,
+				     const std::pair<int64_t, Cell *> &b) {
+					  return a.first < b.first;
+				  });
+			// Lane offsets must be the contiguous run 0..L-1 off a common
+			// base; a hole would leave an entry no stage writes, and a
+			// repeat would make two stages race for one entry.
+			int L = GetSize(lanes_in);
+			if (L > n)
+				continue;
+			bool contiguous = true;
+			for (int i = 1; i < L && contiguous; i++)
+				if (lanes_in[i].first != lanes_in[i - 1].first + 1)
+					contiguous = false;
+			if (!contiguous)
+				continue;
+
+			if (try_fold_scatter(lanes_in, n))
+				scatters_folded++;
+		}
+	}
+
+	// Verify the N-wide, L-deep mux tower hanging off `lanes_in` really is
+	// one uniform scatter, and if so replace it with a rotate plus one mux
+	// per entry.  Changes nothing and returns false on the first mismatch.
+	bool try_fold_scatter(const std::vector<std::pair<int64_t, Cell *>> &lanes_in, int n)
+	{
+		int L = GetSize(lanes_in);
+		std::vector<ScatterLane> lanes(L);
+		int W = -1;
+
+		// --- each lane's element muxes, one stage per conditional branch ---
+		for (int i = 0; i < L; i++) {
+			ScatterLane &ln = lanes[i];
+			ln.decoder = lanes_in[i].second;
+			ln.konst = lanes_in[i].first;
+
+			SigSpec y = ln.decoder->getPort(ID::Y);
+			std::vector<std::vector<Cell *>> per_entry(n);
+			for (int e = 0; e < n; e++) {
+				SigBit yb = sigmap(y[e]);
+				auto it = bit_consumers.find(yb);
+				if (it == bit_consumers.end())
+					return false;
+				for (auto m : it->second) {
+					// Every use of the one-hot bit has to be an element mux
+					// selecting on it; another reader would not survive.
+					if (m->type != ID($mux))
+						return false;
+					SigSpec sp = m->getPort(ID::S);
+					if (GetSize(sp) != 1 || sigmap(sp[0]) != yb)
+						return false;
+					int w = GetSize(m->getPort(ID::Y));
+					if (W < 0)
+						W = w;
+					else if (w != W)
+						return false;
+					per_entry[e].push_back(m);
+				}
+				if (GetSize(per_entry[e]) < 1 || GetSize(per_entry[e]) > 2)
+					return false;
+			}
+			ln.branches = GetSize(per_entry[0]);
+			for (int e = 1; e < n; e++)
+				if (GetSize(per_entry[e]) != ln.branches)
+					return false;
+
+			// Split the muxes into stages by the value written: each branch
+			// writes one lane-uniform value across every entry, so the value
+			// identifies the stage.
+			for (int b = 0; b < ln.branches; b++) {
+				ln.bdata[b] = sigmap(per_entry[0][b]->getPort(ID::B));
+				ln.muxes[b].assign(n, nullptr);
+			}
+			if (ln.branches == 2 && ln.bdata[0] == ln.bdata[1])
+				return false; // indistinguishable stages
+			for (int e = 0; e < n; e++)
+				for (auto m : per_entry[e]) {
+					SigSpec b = sigmap(m->getPort(ID::B));
+					int slot = -1;
+					for (int k = 0; k < ln.branches; k++)
+						if (b == ln.bdata[k]) { slot = k; break; }
+					// A per-entry value means this is not a lane scatter.
+					if (slot < 0 || ln.muxes[slot][e])
+						return false;
+					ln.muxes[slot][e] = m;
+				}
+		}
+		// A power-of-two element width keeps the rotate's shift amount a
+		// plain concatenation instead of a multiply.
+		if (W < 1 || (W & (W - 1)) != 0)
+			return false;
+
+		// --- walk the tower: stage(s), wide join/enable mux, next lane ---
+		SigSpec state0;
+		for (int e = 0; e < n; e++)
+			state0.append(sigmap(lanes[0].muxes[0][e]->getPort(ID::A)));
+
+		SigSpec state = state0;
+		std::vector<Cell *> join_muxes;
+		std::vector<SigSpec> inter_states;
+		for (int i = 0; i < L; i++) {
+			ScatterLane &ln = lanes[i];
+			for (int b = 0; b < ln.branches; b++)
+				for (int e = 0; e < n; e++)
+					if (sigmap(ln.muxes[b][e]->getPort(ID::A)) !=
+					    state.extract(e * W, W))
+						return false;
+
+			SigSpec stage[2];
+			for (int b = 0; b < ln.branches; b++)
+				for (int e = 0; e < n; e++)
+					stage[b].append(sigmap(ln.muxes[b][e]->getPort(ID::Y)));
+
+			Cell *emux = nullptr;
+			SigBit yb = sigmap(ln.muxes[0][0]->getPort(ID::Y))[0];
+			auto it = bit_consumers.find(yb);
+			if (it == bit_consumers.end())
+				return false;
+			for (auto c : it->second)
+				if (c->type == ID($mux) && GetSize(c->getPort(ID::Y)) == n * W) {
+					emux = c;
+					break;
+				}
+
+			if (ln.branches == 2) {
+				// Both arms write, so the lane writes unconditionally and the
+				// value it writes is whichever arm the wide mux selects.
+				if (!emux)
+					return false;
+				SigSpec ea = sigmap(emux->getPort(ID::A));
+				SigSpec eb = sigmap(emux->getPort(ID::B));
+				int ia = (ea == stage[0]) ? 0 : (ea == stage[1]) ? 1 : -1;
+				int ib = (eb == stage[0]) ? 0 : (eb == stage[1]) ? 1 : -1;
+				if (ia < 0 || ib < 0 || ia == ib)
+					return false;
+				SigSpec es = emux->getPort(ID::S);
+				if (GetSize(es) != 1)
+					return false;
+				ln.sel = sigmap(es[0]);
+				ln.data_a = ln.bdata[ia];
+				ln.data_b = ln.bdata[ib];
+				ln.en = State::S1;
+				join_muxes.push_back(emux);
+				state = sigmap(emux->getPort(ID::Y));
+			} else if (emux) {
+				// One stage behind a wide mux whose other input is the
+				// incoming state: that mux is this lane's write enable.
+				if (sigmap(emux->getPort(ID::B)) != stage[0])
+					return false;
+				if (sigmap(emux->getPort(ID::A)) != state)
+					return false;
+				SigSpec es = emux->getPort(ID::S);
+				if (GetSize(es) != 1)
+					return false;
+				ln.en = sigmap(es[0]);
+				ln.data = ln.bdata[0];
+				join_muxes.push_back(emux);
+				state = sigmap(emux->getPort(ID::Y));
+			} else {
+				ln.en = State::S1;
+				ln.data = ln.bdata[0];
+				state = stage[0];
+			}
+			if (i + 1 < L)
+				inter_states.push_back(state);
+		}
+
+		// Nothing outside the tower may observe anything the rewrite deletes:
+		// stage outputs and the states between lanes.  An inter-lane value
+		// legitimately feeds both the next stage's mux and the next join mux,
+		// so confine the consumers to the tower rather than counting them.
+		pool<Cell *> tower;
+		for (int i = 0; i < L; i++)
+			for (int b = 0; b < lanes[i].branches; b++)
+				for (int e = 0; e < n; e++)
+					tower.insert(lanes[i].muxes[b][e]);
+		for (auto c : join_muxes)
+			tower.insert(c);
+		std::vector<SigSpec> confined = inter_states;
+		for (int i = 0; i < L; i++)
+			for (int b = 0; b < lanes[i].branches; b++) {
+				SigSpec stage;
+				for (int e = 0; e < n; e++)
+					stage.append(sigmap(lanes[i].muxes[b][e]->getPort(ID::Y)));
+				confined.push_back(stage);
+			}
+		for (auto &st : confined)
+			for (auto &bit : st) {
+				auto cit = bit_consumers.find(sigmap(bit));
+				if (cit == bit_consumers.end())
+					return false;
+				for (auto c : cit->second)
+					if (!tower.count(c))
+						return false;
+			}
+
+		// --- emit: rotate the lane vectors by the base, one mux per entry ---
+		Cell *ref = lanes[0].decoder;
+		SigSpec base = ref->getPort(ID::B);
+		int bw = ceil_log2(n);
+		base = base.extract(0, std::min(bw, GetSize(base)));
+		if (GetSize(base) < bw)
+			base.append(SigSpec(State::S0, bw - GetSize(base)));
+
+		// rot[e] = padded[(e - base) mod n], so shift the doubled vector by
+		// (n - base) mod n, which at a power-of-two n is just -base.
+		Wire *amt = module->addWire(NEW_ID_SUFFIX("vps_scatter_amt"), bw);
+		module->addSub(NEW_ID_SUFFIX("vps_scatter_sub"), const_u64(0, bw), base,
+			       SigSpec(amt), false, cell_src(ref));
+
+		SigSpec pad_data, pad_en;
+		for (int i = 0; i < L; i++) {
+			ScatterLane &ln = lanes[i];
+			// Two arms collapse to one per-lane 2:1 mux -- L of them, instead
+			// of the L*N element muxes the two stages cost.
+			if (ln.branches == 2) {
+				Wire *d = module->addWire(NEW_ID_SUFFIX("vps_scatter_lane"), W);
+				module->addMux(NEW_ID_SUFFIX("vps_scatter_lanemux"),
+					       ln.data_a, ln.data_b, ln.sel, SigSpec(d),
+					       cell_src(ln.decoder));
+				ln.data = SigSpec(d);
+			}
+			pad_data.append(ln.data);
+			pad_en.append(ln.en);
+		}
+		pad_data.append(SigSpec(State::S0, (n - L) * W));
+		pad_en.append(SigSpec(State::S0, n - L));
+
+		SigSpec dbl_data = pad_data;
+		dbl_data.append(pad_data);
+		SigSpec dbl_en = pad_en;
+		dbl_en.append(pad_en);
+
+		// The data barrel shifts in element units scaled by W; with W a power
+		// of two that scaling is log2(W) zero bits under the amount.
+		SigSpec amt_bits = SigSpec(State::S0, ceil_log2(W));
+		amt_bits.append(SigSpec(amt));
+
+		Wire *rot_data = module->addWire(NEW_ID_SUFFIX("vps_scatter_data"), n * W);
+		module->addShr(NEW_ID_SUFFIX("vps_scatter_shr"), dbl_data, amt_bits,
+			       SigSpec(rot_data), false, cell_src(ref));
+		Wire *rot_en = module->addWire(NEW_ID_SUFFIX("vps_scatter_en"), n);
+		module->addShr(NEW_ID_SUFFIX("vps_scatter_shr"), dbl_en, SigSpec(amt),
+			       SigSpec(rot_en), false, cell_src(ref));
+
+		for (int i = 0; i < L; i++)
+			for (int b = 0; b < lanes[i].branches; b++)
+				for (int e = 0; e < n; e++)
+					remove_cell(lanes[i].muxes[b][e]);
+		for (auto c : join_muxes)
+			remove_cell(c);
+
+		for (int e = 0; e < n; e++)
+			module->addMux(NEW_ID_SUFFIX("vps_scatter_mux"),
+				       state0.extract(e * W, W),
+				       SigSpec(rot_data).extract(e * W, W),
+				       SigBit(rot_en, e), state.extract(e * W, W),
+				       cell_src(ref));
+
+		int two_arm = 0;
+		for (int i = 0; i < L; i++)
+			if (lanes[i].branches == 2)
+				two_arm++;
+		log("  VPS scatter: %d lane(s) x %d entries (elem=%d, %d two-arm) -> "
+		    "2 $shr + %d $mux\n", L, n, W, two_arm, n + two_arm);
+		groups_optimized++;
+		return true;
+	}
+
+	void run(int min_gather, int max_gather_table, int min_scatter)
 	{
 		// Runs first: it works on the raw Verific per-bit gathers, and the
 		// decoder phases below never look at $bmux.
 		if (min_gather > 0) {
 			process_uniform_gathers(min_gather, max_gather_table);
 			if (gathers_folded)
+				rebuild_maps();
+		}
+
+		// The scatter tower is built from the same decoders the phases
+		// below consume, so fold it before they claim them.
+		if (min_scatter > 0) {
+			process_uniform_scatters(min_scatter, max_gather_table);
+			if (scatters_folded)
 				rebuild_maps();
 		}
 
@@ -2506,6 +2888,18 @@ struct OptVpsPass : public Pass {
 		log("        Minimum number of bit-selects in a uniform gather group.\n");
 		log("        0 disables gather folding. Default: 4.\n");
 		log("\n");
+		log("UNIFORM SCATTERS: the write dual of the above. A loop of writes\n");
+		log("at an affine index, `arr[base + i] = data[i]`, becomes one one-hot\n");
+		log("decoder per lane and one stage of N element-wide 2:1 $mux cells\n");
+		log("per lane -- N*L muxes for L writes. At most one lane can claim a\n");
+		log("given entry, so this pass rotates the lane data by `base` and\n");
+		log("leaves a single mux per entry, with a matching rotate of the\n");
+		log("zero-padded per-lane enables supplying its select.\n");
+		log("\n");
+		log("    -min_scatter <n>\n");
+		log("        Minimum number of lanes in a uniform scatter group.\n");
+		log("        0 disables scatter folding. Default: 4.\n");
+		log("\n");
 		log("    -max_gather_table <n>\n");
 		log("        Maximum gather table entries to consider. Default: 4096.\n");
 		log("\n");
@@ -2553,6 +2947,7 @@ struct OptVpsPass : public Pass {
 		int min_stride = 4;
 		int min_gather = 4;
 		int max_gather_table = 4096;
+		int min_scatter = 4;
 		bool msb_inv_sext = false;
 		bool dead_mod = false;
 		bool wrap_atom = false;
@@ -2567,6 +2962,10 @@ struct OptVpsPass : public Pass {
 			}
 			if (args[argidx] == "-min_gather" && argidx + 1 < args.size()) {
 				min_gather = std::stoi(args[++argidx]);
+				continue;
+			}
+			if (args[argidx] == "-min_scatter" && argidx + 1 < args.size()) {
+				min_scatter = std::stoi(args[++argidx]);
 				continue;
 			}
 			if (args[argidx] == "-max_gather_table" && argidx + 1 < args.size()) {
@@ -2590,23 +2989,24 @@ struct OptVpsPass : public Pass {
 		extra_args(args, argidx, design);
 
 		int total_groups = 0, total_pmux = 0, total_ror = 0, total_fb = 0, total_rd = 0;
-		int total_gather = 0;
+		int total_gather = 0, total_scatter = 0;
 
 		for (auto module : design->selected_modules()) {
 			if (module->has_processes_warn())
 				continue;
 
 			OptVpsWorker worker(module, min_stride, msb_inv_sext, dead_mod, wrap_atom);
-			worker.run(min_gather, max_gather_table);
+			worker.run(min_gather, max_gather_table, min_scatter);
 
 			if (worker.groups_optimized > 0)
 				log("  Module %s: %d VPS group(s), %d $pmux replaced, "
 				    "%d $reduce_or replaced, %d feedback collapsed, "
-				    "%d VPS reads -> $shr, %d uniform gather(s) -> barrel.\n",
+				    "%d VPS reads -> $shr, %d uniform gather(s) -> barrel, "
+				    "%d uniform scatter(s) -> rotate.\n",
 				    log_id(module->name), worker.groups_optimized,
 				    worker.pmux_replaced, worker.reduce_or_replaced,
 				    worker.feedback_collapsed, worker.vps_reads_replaced,
-				    worker.gathers_folded);
+				    worker.gathers_folded, worker.scatters_folded);
 
 			total_groups += worker.groups_optimized;
 			total_pmux += worker.pmux_replaced;
@@ -2614,12 +3014,15 @@ struct OptVpsPass : public Pass {
 			total_fb += worker.feedback_collapsed;
 			total_rd += worker.vps_reads_replaced;
 			total_gather += worker.gathers_folded;
+			total_scatter += worker.scatters_folded;
 		}
 
 		log("Optimized %d VPS group(s), %d $pmux replaced, "
 		    "%d $reduce_or replaced, %d feedback collapsed, "
-		    "%d VPS reads -> $shr, %d uniform gather(s) -> barrel.\n",
-		    total_groups, total_pmux, total_ror, total_fb, total_rd, total_gather);
+		    "%d VPS reads -> $shr, %d uniform gather(s) -> barrel, "
+		    "%d uniform scatter(s) -> rotate.\n",
+		    total_groups, total_pmux, total_ror, total_fb, total_rd, total_gather,
+		    total_scatter);
 	}
 } OptVpsPass;
 
