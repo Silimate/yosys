@@ -1,0 +1,23 @@
+# OPER_WIDE_NOR / OPER_WIDE_NAND import as word-level $or/$and + $not rather
+# than falling back to Verific's bit-blasted gate-level implementation.
+logger -expect-no-warnings
+verific -vhdl import_wide_nor_nand.vhd
+verific -import top
+logger -check-expected
+
+select -assert-count 1 t:$or
+select -assert-count 1 t:$and
+select -assert-count 2 t:$not
+select -assert-count 4 t:$*
+
+# Prove the word-level import matches an explicit ~(a|b) / ~(a&b) reference.
+prep -flatten -top top
+design -stash gold
+read_verilog -sv import_wide_nor_nand_ref.sv
+prep -flatten -top ref
+design -stash gate
+design -copy-from gold -as gold top
+design -copy-from gate -as gate ref
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -prove-asserts miter
+design -reset

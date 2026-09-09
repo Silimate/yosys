@@ -1224,6 +1224,30 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 		return true;
 	}
 
+	if (inst->Type() == OPER_WIDE_NAND) {
+		// RTLIL has no word-level $nand cell, so emit $and + $not,
+		// mirroring how OPER_REDUCE_NOR is decomposed above.
+		RTLIL::SigSpec out = OUT;
+		Wire *tmp = module->addWire(new_verific_id_suffix(inst_name, "mid"), GetSize(out));
+		cell = module->addAnd(new_verific_id_suffix(inst_name, "and"), IN1, IN2, tmp, SIGNED);
+		Cell *inv = module->addNot(new_verific_id_suffix(inst_name, "inv"), tmp, out);
+		import_attributes(cell->attributes, inst);
+		import_attributes(inv->attributes, inst);
+		return true;
+	}
+
+	if (inst->Type() == OPER_WIDE_NOR) {
+		// RTLIL has no word-level $nor cell, so emit $or + $not,
+		// mirroring how OPER_REDUCE_NOR is decomposed above.
+		RTLIL::SigSpec out = OUT;
+		Wire *tmp = module->addWire(new_verific_id_suffix(inst_name, "mid"), GetSize(out));
+		cell = module->addOr(new_verific_id_suffix(inst_name, "or"), IN1, IN2, tmp, SIGNED);
+		Cell *inv = module->addNot(new_verific_id_suffix(inst_name, "inv"), tmp, out);
+		import_attributes(cell->attributes, inst);
+		import_attributes(inv->attributes, inst);
+		return true;
+	}
+
 	if (inst->Type() == OPER_WIDE_BUF) {
 		cell = module->addPos(inst_name, IN, FILTERED_OUT, SIGNED);
 		import_attributes(cell->attributes, inst);
