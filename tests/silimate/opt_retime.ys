@@ -1,0 +1,17 @@
+# Hand-written first move on the retime_probe chain:
+# push f1 forward across b2 (f0-b0-b1-f1-b2-b3-f2).
+log -header "Load retime_probe and apply one hand-written move"
+log -push
+design -reset
+read_verilog -icells opt_retime.v
+hierarchy -top retime_probe
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+select -assert-count 1 c:f1
+select -assert-count 1 c:b2
+opt_retime -flop f1 -cut b2 -forward
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+design -reset
+log -pop

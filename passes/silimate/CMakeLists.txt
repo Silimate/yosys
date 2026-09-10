@@ -74,6 +74,9 @@ yosys_pass(opt_concat_add
 yosys_pass(opt_muldist
 	opt_muldist.cc
 )
+yosys_pass(opt_retime
+	opt_retime.cc
+)
 yosys_pass(infer_icg
 	infer_icg.cc
 )
