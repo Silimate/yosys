@@ -1,0 +1,68 @@
+# write_rtlil -attr-keep restricts the attributes written, with `src` additionally
+# kept on the message/formal cells where it labels the message.
+! mkdir -p temp
+
+read_rtlil <<EOT
+module \top
+  wire width 1 input 1 \a
+  attribute \keep 1
+  attribute \dont_touch 1
+  wire width 1 \w
+  attribute \src "foo.v:3.1-3.9"
+  attribute \keep 1
+  cell $not \n
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \a
+    connect \Y \w
+  end
+end
+EOT
+
+# Without the option nothing is filtered.
+write_rtlil temp/attr_keep_all.il
+! grep -F -q "attribute \keep 1" temp/attr_keep_all.il
+! grep -F -q "attribute \dont_touch 1" temp/attr_keep_all.il
+! grep -F -q "attribute \src" temp/attr_keep_all.il
+
+# With it, only the listed attribute survives. `src` is not listed and $not is
+# not a message cell, so it goes as well.
+write_rtlil -attr-keep keep temp/attr_keep_one.il
+! grep -F -q "attribute \keep 1" temp/attr_keep_one.il
+! if grep -F -q "attribute \dont_touch" temp/attr_keep_one.il; then exit 1; fi
+! if grep -F -q "attribute \src" temp/attr_keep_one.il; then exit 1; fi
+
+# Several names, comma separated.
+write_rtlil -attr-keep keep,dont_touch temp/attr_keep_two.il
+! grep -F -q "attribute \keep 1" temp/attr_keep_two.il
+! grep -F -q "attribute \dont_touch 1" temp/attr_keep_two.il
+
+# The filter does not leak into a later write.
+write_rtlil temp/attr_keep_after.il
+! grep -F -q "attribute \dont_touch 1" temp/attr_keep_after.il
+! grep -F -q "attribute \src" temp/attr_keep_after.il
+
+# The kept attributes still read back.
+design -reset
+read_rtlil temp/attr_keep_one.il
+select -assert-count 1 w:w a:keep=1
+
+# On a formal cell, `src` survives a filter that does not name it, because it is
+# what labels the message.
+design -reset
+read_rtlil <<EOT
+module \top
+  wire width 1 input 1 \a
+  attribute \src "bar.v:7.1-7.9"
+  cell $assert \chk
+    connect \A \a
+    connect \EN 1'1
+  end
+end
+EOT
+
+write_rtlil -attr-keep keep temp/attr_keep_assert.il
+! grep -F -q "attribute \src" temp/attr_keep_assert.il
+
+design -reset
