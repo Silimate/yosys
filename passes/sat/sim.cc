@@ -189,6 +189,23 @@ struct SimInstance
 	// All wires that drive FF Q outputs
 	pool<Wire*> register_wires;
 
+	// Only what update_ph2/ph3 read from an FfData: the type flags plus the port
+	// signals. FfData itself also carries the cell, module, name, val_init and a full
+	// copy of the cell's attribute dict, which the simulator never looks at.
+	struct ff_sigs_t : FfTypeData
+	{
+		SigSpec sig_q, sig_d, sig_ad, sig_clr, sig_set;
+		SigBit sig_clk, sig_ce, sig_aload, sig_arst, sig_srst;
+		int width = 0;
+
+		ff_sigs_t() {}
+		ff_sigs_t(const FfData &ff) : FfTypeData(ff),
+			sig_q(ff.sig_q), sig_d(ff.sig_d), sig_ad(ff.sig_ad), sig_clr(ff.sig_clr), sig_set(ff.sig_set),
+			sig_clk(ff.has_clk ? ff.sig_clk[0] : SigBit()), sig_ce(ff.has_ce ? ff.sig_ce[0] : SigBit()),
+			sig_aload(ff.has_aload ? ff.sig_aload[0] : SigBit()), sig_arst(ff.has_arst ? ff.sig_arst[0] : SigBit()),
+			sig_srst(ff.has_srst ? ff.sig_srst[0] : SigBit()), width(ff.width) {}
+	};
+
 	struct ff_state_t
 	{
 		Const past_d;
@@ -197,7 +214,7 @@ struct SimInstance
 		State past_ce;
 		State past_srst;
 
-		FfData data;
+		ff_sigs_t data;
 	};
 
 	struct mem_state_t
@@ -351,6 +368,12 @@ struct SimInstance
 			}
 		}
 
+		int ff_count = 0;
+		for (auto cell : module->cells())
+			if (cell->is_builtin_ff() || cell->type == ID($anyinit))
+				ff_count++;
+		ff_database.reserve(ff_count);
+
 		memories = Mem::get_all_memories(module);
 		for (auto &mem : memories) {
 			auto &mdb = mem_database[mem.memid];
@@ -419,8 +442,8 @@ struct SimInstance
 				ff.past_clk = State::Sx;
 				ff.past_ce = State::Sx;
 				ff.past_srst = State::Sx;
-				ff.data = ff_data;
-				ff_database[cell] = ff;
+				ff.data = ff_sigs_t(ff_data);
+				ff_database[cell] = std::move(ff);
 
 				if (cell->get_bool_attribute(ID(clk2fflogic))) {
 					for (int i = 0; i < ff_data.width; i++)
@@ -831,7 +854,7 @@ struct SimInstance
 		for (auto &it : ff_database)
 		{
 			ff_state_t &ff = it.second;
-			FfData &ff_data = ff.data;
+			ff_sigs_t &ff_data = ff.data;
 
 			Const current_q = get_state(ff.data.sig_q);
 
@@ -1149,6 +1172,7 @@ struct SimInstance
 
 	void register_signals(int &id)
 	{
+		signal_database.reserve(GetSize(module->wires()));
 		for (auto wire : module->wires())
 		{
 			if (shared->hide_internal && wire->name[0] == '$')
@@ -2947,19 +2971,21 @@ struct VCDWriter : public OutputWriter
 struct AnnotateActivity : public OutputWriter {
 	AnnotateActivity(SimWorker *worker) : OutputWriter(worker) {}
 
-	struct SignalActivityData {
-		std::vector<uint64_t> lastValues;
-		std::vector<uint64_t> prevTimes;
-		std::vector<double_t> toggleCounts;
-		std::vector<uint64_t> highTimes;
+	// Running tallies for one bit. One record per bit in one vector per signal, instead
+	// of five separate vectors per signal: 40 bytes and one allocation per bit.
+	struct BitActivity {
+		uint64_t prevTime;
+		uint64_t highTime;
 		// Time the bit held a known 0 or 1, which is what duty is a fraction of
-		std::vector<uint64_t> knownTimes;
+		uint64_t knownTime;
+		double toggles;
+		uint8_t last;  // '0', '1', 'x', 'z', or 0 before the first sample
 	};
 
-	typedef std::unordered_map<int, SignalActivityData> SignalActivityDataMap;
+	// Indexed by output id (dense, assigned by register_signals); empty until first seen.
+	std::vector<std::vector<BitActivity>> dataMap;
 
-	// Running per-bit tallies for each signal in the design.
-	SignalActivityDataMap dataMap;
+	bool has_activity(int id) const { return id >= 0 && id < GetSize(dataMap) && !dataMap[id].empty(); }
 	// Bounds of the sampled window. Activity and duty are relative to this window, which
 	// does not necessarily start at time 0 (-start/-stop).
 	uint64_t min_time = UINT64_MAX;
@@ -2980,24 +3006,16 @@ struct AnnotateActivity : public OutputWriter {
 		for (auto &sigval : data) {
 			int sig = sigval.first;
 			const Const &value = sigval.second;
-			SignalActivityDataMap::iterator itr = dataMap.find(sig);
-			if (itr == dataMap.end()) {
+			if (sig >= GetSize(dataMap))
+				dataMap.resize(sig + 1);
+			std::vector<BitActivity> &bits = dataMap[sig];
+			if (bits.empty()) {
 				// First sighting of this signal
-				SignalActivityData entry;
-				entry.lastValues.assign(GetSize(value), 0);
-				entry.prevTimes.assign(GetSize(value), time);
-				entry.highTimes.assign(GetSize(value), 0);
-				entry.knownTimes.assign(GetSize(value), 0);
-				entry.toggleCounts.assign(GetSize(value), 0);
-				itr = dataMap.emplace(sig, std::move(entry)).first;
+				bits.assign(GetSize(value), BitActivity{time, 0, 0, 0.0, 0});
 			}
-			std::vector<uint64_t> &lastVals = itr->second.lastValues;
-			std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
-			std::vector<uint64_t> &prevTimes = itr->second.prevTimes;
-			std::vector<uint64_t> &highTimes = itr->second.highTimes;
-			std::vector<uint64_t> &knownTimes = itr->second.knownTimes;
 			for (int i = GetSize(value) - 1; i >= 0; i--) {
-				uint64_t val = '-';
+				BitActivity &b = bits[i];
+				uint8_t val = '-';
 				if (worker->norm_xz) {
 					val = value[i] == State::S1 ? '1' : '0';
 				} else {
@@ -3015,30 +3033,30 @@ struct AnnotateActivity : public OutputWriter {
 						val = 'z';
 					}
 				}
-				if (lastVals[i] == 0) {
-					lastVals[i] = val;
+				if (b.last == 0) {
+					b.last = val;
 				}
 				// Only a known 0 or 1 says anything about duty, so an x/z stretch is
 				// left out of both sides rather than counted as time spent low
-				if (lastVals[i] == '1' || lastVals[i] == '0') {
-					knownTimes[i] += time - prevTimes[i];
-					if (lastVals[i] == '1') {
-						highTimes[i] += time - prevTimes[i];
+				if (b.last == '1' || b.last == '0') {
+					b.knownTime += time - b.prevTime;
+					if (b.last == '1') {
+						b.highTime += time - b.prevTime;
 					}
 				}
-				prevTimes[i] = time;
+				b.prevTime = time;
 				// If signal toggled
-				if (val != lastVals[i]) {
-					if (val == 'x' || val == 'z' || lastVals[i] == 'x' || lastVals[i] == 'z')
-						toggleCounts[i] += 0.5;
+				if (val != b.last) {
+					if (val == 'x' || val == 'z' || b.last == 'x' || b.last == 'z')
+						b.toggles += 0.5;
 					else
-						toggleCounts[i] += 1.0;
-					if (toggleCounts[i] > highest_toggle) {
-						highest_toggle = toggleCounts[i];
+						b.toggles += 1.0;
+					if (b.toggles > highest_toggle) {
+						highest_toggle = b.toggles;
 						clk = sig;
 						clk_bit = i;
 					}
-					lastVals[i] = val;
+					b.last = val;
 				}
 			}
 		}
@@ -3059,10 +3077,10 @@ struct AnnotateActivity : public OutputWriter {
 	{
 		// Only signals surviving the -x filter count toward the reported averages
 		uint32_t nbTotalBits = 0;
-		for (auto &entry : dataMap) {
-			auto used = use_signal.find(entry.first);
+		for (int id = 0; id < GetSize(dataMap); id++) {
+			auto used = use_signal.find(id);
 			if (used != use_signal.end() && used->second)
-				nbTotalBits += GetSize(entry.second.lastValues);
+				nbTotalBits += GetSize(dataMap[id]);
 		}
 		log("Computing signal activity for %ld signals (%d bits)\n", use_signal.size(), nbTotalBits);
 		log_flush();
@@ -3076,17 +3094,13 @@ struct AnnotateActivity : public OutputWriter {
 		}
 
 		// Credit every bit from its last event out to the end of the window.
-		for (auto &entry : dataMap) {
-			std::vector<uint64_t> &lastVals = entry.second.lastValues;
-			std::vector<uint64_t> &prevTimes = entry.second.prevTimes;
-			std::vector<uint64_t> &highTimes = entry.second.highTimes;
-			std::vector<uint64_t> &knownTimes = entry.second.knownTimes;
-			for (size_t i = 0; i < lastVals.size(); i++) {
-				if (lastVals[i] != '1' && lastVals[i] != '0')
+		for (auto &bits : dataMap) {
+			for (BitActivity &b : bits) {
+				if (b.last != '1' && b.last != '0')
 					continue;
-				knownTimes[i] += max_time - prevTimes[i];
-				if (lastVals[i] == '1')
-					highTimes[i] += max_time - prevTimes[i];
+				b.knownTime += max_time - b.prevTime;
+				if (b.last == '1')
+					b.highTime += max_time - b.prevTime;
 			}
 		}
 
@@ -3104,12 +3118,11 @@ struct AnnotateActivity : public OutputWriter {
 		if (worker->clk_period_override > 0) {
 			clk_period = worker->clk_period_override;
 		} else {
-			SignalActivityDataMap::iterator itr = dataMap.find(clk);
-			if (itr == dataMap.end()) { // if clock signal can't be identified, set frequency to 1GHz
+			if (!has_activity(clk)) { // if clock signal can't be identified, set frequency to 1GHz
 				log_warning("Clock signal not found, setting frequency to 1GHz...\n");
 				clk_period = 1.0 / 1.0e9;
 			} else {
-				double_t clk_toggles = itr->second.toggleCounts[clk_bit];
+				double_t clk_toggles = dataMap[clk][clk_bit].toggles;
 				if (clk_toggles < 2.0) {
 					log_warning("No toggling clock found in the sampled window, setting frequency to 1GHz...\n");
 					clk_period = 1.0 / 1.0e9;
@@ -3150,37 +3163,34 @@ struct AnnotateActivity : public OutputWriter {
 		  [&](const char *name, int size, Wire *w, int id, bool) {
 			  if (!use_signal.at(id) || (w == nullptr))
 				  return;
-			  SignalActivityDataMap::const_iterator itr = dataMap.find(id);
 			  // Every wire in use_signal was emitted at sample 0 and
 			  // so accumulated, and traced memory words carry a null wire and returned above
-			  if (itr == dataMap.end())
+			  if (!has_activity(id))
 				  return;
-			  const std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
-			  const std::vector<uint64_t> &highTimes = itr->second.highTimes;
-			  const std::vector<uint64_t> &knownTimes = itr->second.knownTimes;
+			  const std::vector<BitActivity> &bits = dataMap[id];
 			  if (worker->debug) {
 				  std::string full_name = form_vcd_name(name, size, w);
 				  std::cout << full_name << " " << id << ":\n";
 				  std::cout << "     TC: ";
 				  for (uint32_t i = 0; i < (uint32_t)size; i++) {
-					  std::cout << toggleCounts[i] << " ";
+					  std::cout << bits[i].toggles << " ";
 				  }
 				  std::cout << "\n";
 				  std::cout << "     HT: ";
 				  for (uint32_t i = 0; i < (uint32_t)size; i++) {
-					  std::cout << highTimes[i] << " ";
+					  std::cout << bits[i].highTime << " ";
 				  }
 				  std::cout << "\n";
 				  std::cout << "     ACK: ";
 			  }
 			  std::string activity_str;
-			  if ((uint32_t) size != toggleCounts.size()) {
+			  if ((uint32_t) size != bits.size()) {
 				  std::string full_name = form_vcd_name(name, size, w);
-				  log_warning("Signal size/value mismatch for %s: %d vs %ld", full_name.c_str(), size, toggleCounts.size());
+				  log_warning("Signal size/value mismatch for %s: %d vs %ld", full_name.c_str(), size, bits.size());
 			  }
 			  for (uint32_t i = 0; i < (uint32_t)size; i++) {
 				  // Compute Activity
-				  double activity = toggleCounts[i] / (cycles * 2.0);
+				  double activity = bits[i].toggles / (cycles * 2.0);
 				  totalActivity += activity;
 				  activity_str += std::to_string(activity) + " ";
 			  }
@@ -3191,7 +3201,7 @@ struct AnnotateActivity : public OutputWriter {
 			  for (uint32_t i = 0; i < (uint32_t)size; i++) {
 				  // Compute Duty cycle over the time the bit was actually driven, so a
 				  // dump that goes dark ($dumpoff) does not read as time spent low
-				  double duty = knownTimes[i] ? (double)highTimes[i] / (double)knownTimes[i] : 0.0;
+				  double duty = bits[i].knownTime ? (double)bits[i].highTime / (double)bits[i].knownTime : 0.0;
 					totalDuty += duty;
 				  duty_str += std::to_string(duty) + " ";
 			  }
