@@ -2439,7 +2439,7 @@ public:
 };
 
 namespace RTLIL_BACKEND {
-void dump_wire(std::ostream &f, std::string indent, const RTLIL::Wire *wire);
+void dump_wire(std::ostream &f, std::string indent, const RTLIL::Wire *wire, const pool<RTLIL::IdString> *attr_keep = nullptr);
 }
 
 struct RTLIL::Wire : public RTLIL::NamedObject
@@ -2455,7 +2455,7 @@ protected:
 
 	friend struct RTLIL::Design;
 	friend struct RTLIL::Cell;
-	friend void RTLIL_BACKEND::dump_wire(std::ostream &f, std::string indent, const RTLIL::Wire *wire);
+	friend void RTLIL_BACKEND::dump_wire(std::ostream &f, std::string indent, const RTLIL::Wire *wire, const pool<RTLIL::IdString> *attr_keep);
 	RTLIL::Cell *driverCell_ = nullptr;
 	RTLIL::IdString driverPort_;
 

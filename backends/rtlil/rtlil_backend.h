@@ -31,20 +31,20 @@
 YOSYS_NAMESPACE_BEGIN
 
 namespace RTLIL_BACKEND {
-	void dump_attributes(std::ostream &f, std::string indent, const RTLIL::AttrObject *obj, bool keep_src = false);
+	void dump_attributes(std::ostream &f, std::string indent, const RTLIL::AttrObject *obj, const pool<RTLIL::IdString> *attr_keep = nullptr, bool keep_src = false);
 	void dump_const(std::ostream &f, const RTLIL::Const &data, int width = -1, int offset = 0, bool autoint = true);
 	void dump_sigchunk(std::ostream &f, const RTLIL::SigChunk &chunk, bool autoint = true);
 	void dump_sigspec(std::ostream &f, const RTLIL::SigSpec &sig, bool autoint = true);
-	void dump_wire(std::ostream &f, std::string indent, const RTLIL::Wire *wire);
-	void dump_memory(std::ostream &f, std::string indent, const RTLIL::Memory *memory);
-	void dump_cell(std::ostream &f, std::string indent, const RTLIL::Cell *cell);
-	void dump_proc_case_body(std::ostream &f, std::string indent, const RTLIL::CaseRule *cs);
-	void dump_proc_switch(std::ostream &f, std::string indent, const RTLIL::SwitchRule *sw);
-	void dump_proc_sync(std::ostream &f, std::string indent, const RTLIL::SyncRule *sy);
-	void dump_proc(std::ostream &f, std::string indent, const RTLIL::Process *proc);
+	void dump_wire(std::ostream &f, std::string indent, const RTLIL::Wire *wire, const pool<RTLIL::IdString> *attr_keep);
+	void dump_memory(std::ostream &f, std::string indent, const RTLIL::Memory *memory, const pool<RTLIL::IdString> *attr_keep = nullptr);
+	void dump_cell(std::ostream &f, std::string indent, const RTLIL::Cell *cell, const pool<RTLIL::IdString> *attr_keep = nullptr);
+	void dump_proc_case_body(std::ostream &f, std::string indent, const RTLIL::CaseRule *cs, const pool<RTLIL::IdString> *attr_keep = nullptr);
+	void dump_proc_switch(std::ostream &f, std::string indent, const RTLIL::SwitchRule *sw, const pool<RTLIL::IdString> *attr_keep = nullptr);
+	void dump_proc_sync(std::ostream &f, std::string indent, const RTLIL::SyncRule *sy, const pool<RTLIL::IdString> *attr_keep = nullptr);
+	void dump_proc(std::ostream &f, std::string indent, const RTLIL::Process *proc, const pool<RTLIL::IdString> *attr_keep = nullptr);
 	void dump_conn(std::ostream &f, std::string indent, const RTLIL::SigSpec &left, const RTLIL::SigSpec &right);
-	void dump_module(std::ostream &f, std::string indent, RTLIL::Module *module, RTLIL::Design *design, bool only_selected, bool flag_m = true, bool flag_n = false);
-	void dump_design(std::ostream &f, RTLIL::Design *design, bool only_selected, bool flag_m = true, bool flag_n = false);
+	void dump_module(std::ostream &f, std::string indent, RTLIL::Module *module, RTLIL::Design *design, bool only_selected, bool flag_m = true, bool flag_n = false, const pool<RTLIL::IdString> *attr_keep = nullptr);
+	void dump_design(std::ostream &f, RTLIL::Design *design, bool only_selected, bool flag_m = true, bool flag_n = false, const pool<RTLIL::IdString> *attr_keep = nullptr);
 }
 
 YOSYS_NAMESPACE_END

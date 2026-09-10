@@ -32,13 +32,10 @@ USING_YOSYS_NAMESPACE
 using namespace RTLIL_BACKEND;
 YOSYS_NAMESPACE_BEGIN
 
-// When non-empty, only these attributes are written (write_rtlil -attr-keep).
-static pool<RTLIL::IdString> attr_keep;
-
-void RTLIL_BACKEND::dump_attributes(std::ostream &f, std::string indent, const RTLIL::AttrObject *obj, bool keep_src)
+void RTLIL_BACKEND::dump_attributes(std::ostream &f, std::string indent, const RTLIL::AttrObject *obj, const pool<RTLIL::IdString> *attr_keep, bool keep_src)
 {
 	for (const auto& [name, value] : reversed(obj->attributes)) {
-		if (!attr_keep.empty() && !attr_keep.count(name) && !(keep_src && name == ID::src))
+		if (attr_keep && !attr_keep->count(name) && !(keep_src && name == ID::src))
 			continue;
 		f << stringf("%s" "attribute %s ", indent, name);
 		dump_const(f, value);
@@ -137,9 +134,9 @@ void RTLIL_BACKEND::dump_sigspec(std::ostream &f, const RTLIL::SigSpec &sig, boo
 	}
 }
 
-void RTLIL_BACKEND::dump_wire(std::ostream &f, std::string indent, const RTLIL::Wire *wire)
+void RTLIL_BACKEND::dump_wire(std::ostream &f, std::string indent, const RTLIL::Wire *wire, const pool<RTLIL::IdString> *attr_keep)
 {
-	dump_attributes(f, indent, wire);
+	dump_attributes(f, indent, wire, attr_keep);
 	if (wire->driverCell_) {
 		f << stringf("%s" "# driver %s %s\n", indent,
 				wire->driverCell()->name, wire->driverPort());
@@ -162,9 +159,9 @@ void RTLIL_BACKEND::dump_wire(std::ostream &f, std::string indent, const RTLIL::
 	f << stringf("%s\n", wire->name);
 }
 
-void RTLIL_BACKEND::dump_memory(std::ostream &f, std::string indent, const RTLIL::Memory *memory)
+void RTLIL_BACKEND::dump_memory(std::ostream &f, std::string indent, const RTLIL::Memory *memory, const pool<RTLIL::IdString> *attr_keep)
 {
-	dump_attributes(f, indent, memory);
+	dump_attributes(f, indent, memory, attr_keep);
 	f << stringf("%s" "memory ", indent);
 	if (memory->width != 1)
 		f << stringf("width %d ", memory->width);
@@ -175,11 +172,11 @@ void RTLIL_BACKEND::dump_memory(std::ostream &f, std::string indent, const RTLIL
 	f << stringf("%s\n", memory->name);
 }
 
-void RTLIL_BACKEND::dump_cell(std::ostream &f, std::string indent, const RTLIL::Cell *cell)
+void RTLIL_BACKEND::dump_cell(std::ostream &f, std::string indent, const RTLIL::Cell *cell, const pool<RTLIL::IdString> *attr_keep)
 {
 	// `src` on message/formal cells labels their output; with -attr-keep it is kept there only.
 	bool keep_src = cell->type.in(ID($print), ID($check), ID($assert), ID($assume), ID($cover), ID($live), ID($fair));
-	dump_attributes(f, indent, cell, keep_src);
+	dump_attributes(f, indent, cell, attr_keep, keep_src);
 	f << stringf("%s" "cell %s %s\n", indent, cell->type, cell->name);
 	for (const auto& [name, param] : reversed(cell->parameters)) {
 		f << stringf("%s  parameter%s%s%s %s ", indent,
@@ -198,7 +195,7 @@ void RTLIL_BACKEND::dump_cell(std::ostream &f, std::string indent, const RTLIL::
 	f << stringf("%s" "end\n", indent);
 }
 
-void RTLIL_BACKEND::dump_proc_case_body(std::ostream &f, std::string indent, const RTLIL::CaseRule *cs)
+void RTLIL_BACKEND::dump_proc_case_body(std::ostream &f, std::string indent, const RTLIL::CaseRule *cs, const pool<RTLIL::IdString> *attr_keep)
 {
 	for (const auto& [lhs, rhs] : cs->actions) {
 		f << stringf("%s" "assign ", indent);
@@ -209,12 +206,12 @@ void RTLIL_BACKEND::dump_proc_case_body(std::ostream &f, std::string indent, con
 	}
 
 	for (const auto& sw : cs->switches)
-		dump_proc_switch(f, indent, sw);
+		dump_proc_switch(f, indent, sw, attr_keep);
 }
 
-void RTLIL_BACKEND::dump_proc_switch(std::ostream &f, std::string indent, const RTLIL::SwitchRule *sw)
+void RTLIL_BACKEND::dump_proc_switch(std::ostream &f, std::string indent, const RTLIL::SwitchRule *sw, const pool<RTLIL::IdString> *attr_keep)
 {
-	dump_attributes(f, indent, sw);
+	dump_attributes(f, indent, sw, attr_keep);
 
 	f << stringf("%s" "switch ", indent);
 	dump_sigspec(f, sw->signal);
@@ -222,7 +219,7 @@ void RTLIL_BACKEND::dump_proc_switch(std::ostream &f, std::string indent, const 
 
 	for (const auto case_ : sw->cases)
 	{
-		dump_attributes(f, indent, case_);
+		dump_attributes(f, indent, case_, attr_keep);
 		f << stringf("%s  case ", indent);
 		for (size_t i = 0; i < case_->compare.size(); i++) {
 			if (i > 0)
@@ -231,13 +228,13 @@ void RTLIL_BACKEND::dump_proc_switch(std::ostream &f, std::string indent, const 
 		}
 		f << stringf("\n");
 
-		dump_proc_case_body(f, indent + "    ", case_);
+		dump_proc_case_body(f, indent + "    ", case_, attr_keep);
 	}
 
 	f << stringf("%s" "end\n", indent);
 }
 
-void RTLIL_BACKEND::dump_proc_sync(std::ostream &f, std::string indent, const RTLIL::SyncRule *sy)
+void RTLIL_BACKEND::dump_proc_sync(std::ostream &f, std::string indent, const RTLIL::SyncRule *sy, const pool<RTLIL::IdString> *attr_keep)
 {
 	f << stringf("%s" "sync ", indent);
 	switch (sy->type) {
@@ -263,7 +260,7 @@ void RTLIL_BACKEND::dump_proc_sync(std::ostream &f, std::string indent, const RT
 	}
 
 	for (auto &it: sy->mem_write_actions) {
-		dump_attributes(f, indent, &it);
+		dump_attributes(f, indent, &it, attr_keep);
 		f << stringf("%s  memwr %s ", indent, it.memid);
 		dump_sigspec(f, it.address);
 		f << stringf(" ");
@@ -276,13 +273,13 @@ void RTLIL_BACKEND::dump_proc_sync(std::ostream &f, std::string indent, const RT
 	}
 }
 
-void RTLIL_BACKEND::dump_proc(std::ostream &f, std::string indent, const RTLIL::Process *proc)
+void RTLIL_BACKEND::dump_proc(std::ostream &f, std::string indent, const RTLIL::Process *proc, const pool<RTLIL::IdString> *attr_keep)
 {
-	dump_attributes(f, indent, proc);
+	dump_attributes(f, indent, proc, attr_keep);
 	f << stringf("%s" "process %s\n", indent, proc->name);
-	dump_proc_case_body(f, indent + "  ", &proc->root_case);
+	dump_proc_case_body(f, indent + "  ", &proc->root_case, attr_keep);
 	for (auto* sync : proc->syncs)
-		dump_proc_sync(f, indent + "  ", sync);
+		dump_proc_sync(f, indent + "  ", sync, attr_keep);
 	f << stringf("%s" "end\n", indent);
 }
 
@@ -295,14 +292,14 @@ void RTLIL_BACKEND::dump_conn(std::ostream &f, std::string indent, const RTLIL::
 	f << stringf("\n");
 }
 
-void RTLIL_BACKEND::dump_module(std::ostream &f, std::string indent, RTLIL::Module *module, RTLIL::Design *design, bool only_selected, bool flag_m, bool flag_n)
+void RTLIL_BACKEND::dump_module(std::ostream &f, std::string indent, RTLIL::Module *module, RTLIL::Design *design, bool only_selected, bool flag_m, bool flag_n, const pool<RTLIL::IdString> *attr_keep)
 {
 	bool print_header = flag_m || module->is_selected_whole();
 	bool print_body = !flag_n || !module->is_selected_whole();
 
 	if (print_header)
 	{
-		dump_attributes(f, indent, module);
+		dump_attributes(f, indent, module, attr_keep);
 
 		f << stringf("%s" "module %s\n", indent, module->name);
 
@@ -328,28 +325,28 @@ void RTLIL_BACKEND::dump_module(std::ostream &f, std::string indent, RTLIL::Modu
 			if (!only_selected || design->selected(module, wire)) {
 				if (only_selected)
 					f << stringf("\n");
-				dump_wire(f, indent + "  ", wire);
+				dump_wire(f, indent + "  ", wire, attr_keep);
 			}
 
 		for (const auto& [_, mem] : reversed(module->memories))
 			if (!only_selected || design->selected(module, mem)) {
 				if (only_selected)
 					f << stringf("\n");
-				dump_memory(f, indent + "  ", mem);
+				dump_memory(f, indent + "  ", mem, attr_keep);
 			}
 
 		for (const auto& [_, cell] : reversed(module->cells_))
 			if (!only_selected || design->selected(module, cell)) {
 				if (only_selected)
 					f << stringf("\n");
-				dump_cell(f, indent + "  ", cell);
+				dump_cell(f, indent + "  ", cell, attr_keep);
 			}
 
 		for (const auto& [_, process] : reversed(module->processes))
 			if (!only_selected || design->selected(module, process)) {
 				if (only_selected)
 					f << stringf("\n");
-				dump_proc(f, indent + "  ", process);
+				dump_proc(f, indent + "  ", process, attr_keep);
 			}
 
 		bool first_conn_line = true;
@@ -377,7 +374,7 @@ void RTLIL_BACKEND::dump_module(std::ostream &f, std::string indent, RTLIL::Modu
 		f << stringf("%s" "end\n", indent);
 }
 
-void RTLIL_BACKEND::dump_design(std::ostream &f, RTLIL::Design *design, bool only_selected, bool flag_m, bool flag_n)
+void RTLIL_BACKEND::dump_design(std::ostream &f, RTLIL::Design *design, bool only_selected, bool flag_m, bool flag_n, const pool<RTLIL::IdString> *attr_keep)
 {
 	int init_autoidx = autoidx;
 
@@ -403,7 +400,7 @@ void RTLIL_BACKEND::dump_design(std::ostream &f, RTLIL::Design *design, bool onl
 		if (!only_selected || design->selected(module)) {
 			if (only_selected)
 				f << stringf("\n");
-			dump_module(f, "", module, design, only_selected, flag_m, flag_n);
+			dump_module(f, "", module, design, only_selected, flag_m, flag_n, attr_keep);
 		}
 	}
 
@@ -439,7 +436,8 @@ struct RTLILBackend : public Backend {
 	{
 		bool selected = false;
 		bool do_sort = false;
-		attr_keep.clear();
+		bool attr_keep_given = false;
+		std::string attr_keep_arg;
 
 		log_header(design, "Executing RTLIL backend.\n");
 
@@ -455,8 +453,8 @@ struct RTLILBackend : public Backend {
 				continue;
 			}
 			if (arg == "-attr-keep" && argidx+1 < args.size()) {
-				for (auto &name : split_tokens(args[++argidx], ","))
-					attr_keep.insert(RTLIL::escape_id(name));
+				attr_keep_arg = args[++argidx];
+				attr_keep_given = true;
 				continue;
 			}
 			break;
@@ -468,9 +466,16 @@ struct RTLILBackend : public Backend {
 		if (do_sort)
 			design->sort();
 
+		pool<RTLIL::IdString> attr_keep;
+		const pool<RTLIL::IdString> *attr_keep_p = nullptr;
+		if (attr_keep_given) {
+			for (auto &name : split_tokens(attr_keep_arg, ","))
+				attr_keep.insert(RTLIL::escape_id(name));
+			attr_keep_p = &attr_keep;
+		}
+
 		*f << stringf("# Generated by %s\n", yosys_maybe_version());
-		RTLIL_BACKEND::dump_design(*f, design, selected, true, false);
-		attr_keep.clear();
+		RTLIL_BACKEND::dump_design(*f, design, selected, true, false, attr_keep_p);
 	}
 } RTLILBackend;
 
