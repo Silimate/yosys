@@ -124,6 +124,8 @@ static std::vector<Cell *> collect_buf_chain(Module *module, SigMap &sigmap, Cel
 		Cell *next = forward ? unique_reader(module, sigmap, cur, port)
 				     : unique_driver(module, sigmap, cur, port);
 		IdString need_port = forward ? ID::A : ID::Y;
+
+		// TODO generalize beyond $buf cells
 		if (!next || port != need_port || !is_buf(next))
 			break;
 		if (seen.count(next))
@@ -133,6 +135,7 @@ static std::vector<Cell *> collect_buf_chain(Module *module, SigMap &sigmap, Cel
 		chain.push_back(next);
 		if (next == cut)
 			break;
+		// TODO generalize beyond $buf cells
 		cur = sigmap(next->getPort(forward ? ID::Y : ID::A));
 	}
 
