@@ -4827,7 +4827,11 @@ struct VerificPass : public Pass {
 			bool mode_names = false, mode_verific = false;
 			bool mode_autocover = false, mode_fullinit = false;
 			bool flatten = false, extnets = false, mode_cells = false;
-			bool split_struct_ports = true, split_array_ports = true;
+			// SILIMATE: seed from the sticky `verific -no_split_*_ports` globals so a flag set by an
+			// earlier `verific` command is honored here too. Without this, `-import` silently
+			// ignored them -- it only read its own hyphenated `-no-split-*-ports` spellings.
+			bool split_struct_ports = !(verific_no_split_struct_ports || verific_no_split_complex_ports);
+			bool split_array_ports = !(verific_no_split_array_ports || verific_no_split_complex_ports);
 			string dumpfile;
 			string ppfile;
 			Map parameters(STRING_HASH);
@@ -4845,16 +4849,16 @@ struct VerificPass : public Pass {
 					flatten = true;
 					continue;
 				}
-				if (args[argidx] == "-no-split-complex-ports") {
+				if (args[argidx] == "-no-split-complex-ports" || args[argidx] == "-no_split_complex_ports") {
 					split_struct_ports = false;
 					split_array_ports = false;
 					continue;
 				}
-				if (args[argidx] == "-no-split-struct-ports") {
+				if (args[argidx] == "-no-split-struct-ports" || args[argidx] == "-no_split_struct_ports") {
 					split_struct_ports = false;
 					continue;
 				}
-				if (args[argidx] == "-no-split-array-ports") {
+				if (args[argidx] == "-no-split-array-ports" || args[argidx] == "-no_split_array_ports") {
 					split_array_ports = false;
 					continue;
 				}
