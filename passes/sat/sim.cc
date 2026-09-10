@@ -556,7 +556,7 @@ struct SimInstance
 		return value;
 	}
 
-	Const get_state(SigSpec sig)
+	Const get_state(const SigSpec &sig)
 	{
 		Const value = get_state_mapped(sigmap(sig));
 		if (shared->debug)
@@ -1172,7 +1172,12 @@ struct SimInstance
 
 	void register_signals(int &id)
 	{
-		signal_database.reserve(GetSize(module->wires()));
+		int signal_count = 0;
+		for (auto wire : module->wires())
+			if (!(shared->hide_internal && wire->name[0] == '$'))
+				signal_count++;
+		signal_database.reserve(signal_count);
+
 		for (auto wire : module->wires())
 		{
 			if (shared->hide_internal && wire->name[0] == '$')
@@ -2971,15 +2976,17 @@ struct VCDWriter : public OutputWriter
 struct AnnotateActivity : public OutputWriter {
 	AnnotateActivity(SimWorker *worker) : OutputWriter(worker) {}
 
-	// Running tallies for one bit. One record per bit in one vector per signal, instead
-	// of five separate vectors per signal: 40 bytes and one allocation per bit.
+	// Struct to track activity for one bit in one vector per signal. Every field
+	// is optimized for packing for optimal memory usage.
 	struct BitActivity {
-		uint64_t prevTime;
-		uint64_t highTime;
+		uint64_t prevTime = 0;
+		uint64_t highTime = 0;
 		// Time the bit held a known 0 or 1, which is what duty is a fraction of
-		uint64_t knownTime;
-		double toggles;
-		uint8_t last;  // '0', '1', 'x', 'z', or 0 before the first sample
+		uint64_t knownTime = 0;
+		// Count half-toggles, so we can use an integer. 64 bits so no run can
+		// overflow it and the accumulate needs no range check.
+		uint64_t halfToggles = 0;
+		uint8_t last = 0;  // '0', '1', 'x', 'z', or 0 before the first sample
 	};
 
 	// Indexed by output id (dense, assigned by register_signals); empty until first seen.
@@ -2993,7 +3000,7 @@ struct AnnotateActivity : public OutputWriter {
 	// clock pin id and bit (highest toggling bit)
 	int clk = 0;
 	int clk_bit = 0;
-	double_t highest_toggle = 0;
+	uint64_t highest_toggle = 0;  // in halves, matching BitActivity::halfToggles
 
 	// Accumulate one sample in a running total.
 	void step(uint64_t time, const std::map<int, RTLIL::Const> &data) override
@@ -3011,7 +3018,9 @@ struct AnnotateActivity : public OutputWriter {
 			std::vector<BitActivity> &bits = dataMap[sig];
 			if (bits.empty()) {
 				// First sighting of this signal
-				bits.assign(GetSize(value), BitActivity{time, 0, 0, 0.0, 0});
+				BitActivity fresh;
+				fresh.prevTime = time;
+				bits.assign(GetSize(value), fresh);
 			}
 			for (int i = GetSize(value) - 1; i >= 0; i--) {
 				BitActivity &b = bits[i];
@@ -3047,12 +3056,10 @@ struct AnnotateActivity : public OutputWriter {
 				b.prevTime = time;
 				// If signal toggled
 				if (val != b.last) {
-					if (val == 'x' || val == 'z' || b.last == 'x' || b.last == 'z')
-						b.toggles += 0.5;
-					else
-						b.toggles += 1.0;
-					if (b.toggles > highest_toggle) {
-						highest_toggle = b.toggles;
+					// An edge to or from x/z counts as half a toggle
+					b.halfToggles += (val == 'x' || val == 'z' || b.last == 'x' || b.last == 'z') ? 1 : 2;
+					if (b.halfToggles > highest_toggle) {
+						highest_toggle = b.halfToggles;
 						clk = sig;
 						clk_bit = i;
 					}
@@ -3122,7 +3129,7 @@ struct AnnotateActivity : public OutputWriter {
 				log_warning("Clock signal not found, setting frequency to 1GHz...\n");
 				clk_period = 1.0 / 1.0e9;
 			} else {
-				double_t clk_toggles = dataMap[clk][clk_bit].toggles;
+				double_t clk_toggles = dataMap[clk][clk_bit].halfToggles / 2.0;
 				if (clk_toggles < 2.0) {
 					log_warning("No toggling clock found in the sampled window, setting frequency to 1GHz...\n");
 					clk_period = 1.0 / 1.0e9;
@@ -3168,12 +3175,20 @@ struct AnnotateActivity : public OutputWriter {
 			  if (!has_activity(id))
 				  return;
 			  const std::vector<BitActivity> &bits = dataMap[id];
+			  // Everything below indexes bits[] out to `size`, so a short record has
+			  // to stop here rather than be reported and then read past its end.
+			  if ((uint32_t) size != bits.size()) {
+				  std::string full_name = form_vcd_name(name, size, w);
+				  log_warning("Signal size/value mismatch for %s: %d vs %ld; not annotating it.\n",
+						  full_name.c_str(), size, bits.size());
+				  return;
+			  }
 			  if (worker->debug) {
 				  std::string full_name = form_vcd_name(name, size, w);
 				  std::cout << full_name << " " << id << ":\n";
 				  std::cout << "     TC: ";
 				  for (uint32_t i = 0; i < (uint32_t)size; i++) {
-					  std::cout << bits[i].toggles << " ";
+					  std::cout << (bits[i].halfToggles / 2.0) << " ";
 				  }
 				  std::cout << "\n";
 				  std::cout << "     HT: ";
@@ -3184,13 +3199,9 @@ struct AnnotateActivity : public OutputWriter {
 				  std::cout << "     ACK: ";
 			  }
 			  std::string activity_str;
-			  if ((uint32_t) size != bits.size()) {
-				  std::string full_name = form_vcd_name(name, size, w);
-				  log_warning("Signal size/value mismatch for %s: %d vs %ld", full_name.c_str(), size, bits.size());
-			  }
 			  for (uint32_t i = 0; i < (uint32_t)size; i++) {
 				  // Compute Activity
-				  double activity = bits[i].toggles / (cycles * 2.0);
+				  double activity = (bits[i].halfToggles / 2.0) / (cycles * 2.0);
 				  totalActivity += activity;
 				  activity_str += std::to_string(activity) + " ";
 			  }
