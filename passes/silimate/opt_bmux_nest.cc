@@ -84,6 +84,11 @@ struct OptBmuxNestWorker {
 		// The rewrite retires the outer, so a kept outer is off limits.
 		if (outer->get_bool_attribute(ID::keep))
 			return false;
+		// muxpush -gather-reindex splits a gather into two stages precisely to keep a
+		// late index off the wide select, and marks what it built. Flattening that
+		// undoes the timing win and costs area, so leave a staged nest alone.
+		if (outer->get_bool_attribute(ID::staged_gather))
+			return false;
 		int w = outer->getParam(ID::WIDTH).as_int();
 		int lo = outer->getParam(ID::S_WIDTH).as_int();
 		if (w < 1 || lo < 1 || lo > MAX_SEL_BITS)
@@ -127,6 +132,8 @@ struct OptBmuxNestWorker {
 			// which is strictly worse than the nest we started from. A kept inner
 			// survives opt_clean for the same reason, so it counts as a consumer.
 			if (in->get_bool_attribute(ID::keep))
+				return false;
+			if (in->get_bool_attribute(ID::staged_gather))
 				return false;
 			for (auto bit : chunk)
 				if (escaped.count(bit) || !readers.count(bit) ||
@@ -223,6 +230,11 @@ struct OptBmuxNestPass : public Pass {
 		log("\n");
 		log("Only folds when the outer is each inner's sole consumer: a shared inner would\n");
 		log("survive the rewrite, costing its mux tree plus the wider flat one.\n");
+		log("\n");
+		log("Skips cells marked `staged_gather`. muxpush -gather-reindex splits a gather\n");
+		log("into two stages precisely to keep a late index off the wide select; merging\n");
+		log("them back costs both the depth it bought and area, since the flat table then\n");
+		log("has to be selected as a whole.\n");
 		log("\n");
 		log("    -max-entries N\n");
 		log("        skip nests whose flattened table would exceed N entries\n");

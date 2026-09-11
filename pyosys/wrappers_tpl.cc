@@ -168,8 +168,8 @@ namespace pyosys {
 	void log_to_stream(py::object o)
 	{
 		auto output = new py::python_ostream(o);
-		Yosys::log_streams.clear();
-		Yosys::log_streams.push_back(output);
+		Yosys::logger().clear();
+		Yosys::logger().add_sink<Yosys::StreamLogSink>(*output);
 	}
 
 	PYBIND11_MODULE(libyosys, m) {

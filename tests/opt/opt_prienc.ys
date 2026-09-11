@@ -1696,3 +1696,33 @@ equiv_opt -assert opt_prienc -cto -max-width 16 -partial-cone
 logger -check-expected
 design -reset
 log -pop
+
+# ============================================================================
+# Group X: malformed netlists must be rejected, not crashed on
+# ============================================================================
+
+# X1: a candidate output whose every bit has more than one driver. The shared
+# cut-region index records that as a null driver rather than naming one of the
+# cells, so the sole-driver lookups have to reject it instead of collecting the
+# null and dereferencing it.
+log -header "X1: multiply driven candidate output (no sole driver)"
+log -push
+design -reset
+read_verilog <<VEOF
+module top (
+  input  wire [3:0] a,
+  input  wire [3:0] b,
+  output wire [3:0] y
+);
+  wire [2:0] s;
+  assign s = a[2:0] & b[2:0];
+  assign s = a[2:0] | b[2:0];
+  assign y = {1'b0, s};
+endmodule
+VEOF
+proc
+logger -expect log "Rewrote 0 region" 1
+opt_prienc -smear -partial-cone
+logger -check-expected
+design -reset
+log -pop

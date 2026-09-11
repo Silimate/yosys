@@ -159,6 +159,17 @@ static std::string object_root(const std::string &name)
 	return cut == std::string::npos ? name : name.substr(0, cut);
 }
 
+// Parse a signed decimal, rejecting anything else. Fixed-point RTL declares vectors down
+// past zero, as in `logic [19:-1] ripple_counter`, so a declared bound carries a sign.
+static bool parse_bound(const std::string &text, int &out)
+{
+	size_t start = !text.empty() && text[0] == '-' ? 1 : 0;
+	if (text.size() == start || text.find_first_not_of("0123456789", start) != std::string::npos)
+		return false;
+	out = std::stoi(text);
+	return true;
+}
+
 // Strip a trailing bit range and report the declared lsb. A range written with no space
 // before it is a packed dimension (SHM's "deep_out[1:0]"), not a bit range, but either way
 // the dumped width is authoritative and the name without it is the signal.
@@ -171,11 +182,15 @@ static std::string split_bit_range(const std::string &name, int &offset)
 	if (open == std::string::npos)
 		return name;
 	std::string inner = name.substr(open + 1, name.size() - open - 2);
-	if (inner.empty() || inner.find(':') == std::string::npos ||
-			inner.find_first_not_of("0123456789:") != std::string::npos)
-		return name;
 	size_t colon = inner.find(':');
-	offset = std::min(std::stoi(inner.substr(0, colon)), std::stoi(inner.substr(colon + 1)));
+	if (colon == std::string::npos) // a single index is part of the name, not a range
+		return name;
+	int msb = 0, lsb = 0;
+	if (inner.find(':', colon + 1) != std::string::npos ||
+			!parse_bound(inner.substr(0, colon), msb) ||
+			!parse_bound(inner.substr(colon + 1), lsb))
+		return name;
+	offset = std::min(msb, lsb);
 	return name.substr(0, open);
 }
 

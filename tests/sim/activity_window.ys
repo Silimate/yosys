@@ -12,6 +12,11 @@
 # All three describe the same waveform, so all three must produce the same numbers, and
 # those numbers must be the ones derived by hand in activity_window_gen.py.
 #
+# `y` is a flop, so it holds x until the first clock edge: it is driven for 127 of the
+# 128 cycles, not all 128. Duty is a fraction of the time a bit was actually driven, so
+# y's 64_000_000 high ticks are over 127_000_000, giving 0.503937 rather than 0.5. The
+# inputs are driven from the first sample, so they are unaffected.
+#
 # Measuring absolute time instead gives, on the late dump, a $DURATION of 1_153_032_704
 # (the int32-wrapped absolute end time), a 111_011_595 Hz clock, and duty cycles pushed to
 # the rails: 0.944494 for clk and a, 0.027753 for d. Activity survives, because the same
@@ -38,7 +43,7 @@ select -assert-count 1 w:c a:$ACKT=0.000000* %i
 select -assert-count 1 w:c a:$DUTY=1.000000* %i
 select -assert-count 1 w:d a:$ACKT=0.125000* %i
 select -assert-count 1 w:d a:$DUTY=0.250000* %i
-select -assert-count 1 w:y a:$DUTY=0.500000* %i
+select -assert-count 1 w:y a:$DUTY=0.503937* %i
 
 design -load gold
 sim -r activity_window_late.vcd -scope tb.uut -activity -q
@@ -55,7 +60,7 @@ select -assert-count 1 w:c a:$ACKT=0.000000* %i
 select -assert-count 1 w:c a:$DUTY=1.000000* %i
 select -assert-count 1 w:d a:$ACKT=0.125000* %i
 select -assert-count 1 w:d a:$DUTY=0.250000* %i
-select -assert-count 1 w:y a:$DUTY=0.500000* %i
+select -assert-count 1 w:y a:$DUTY=0.503937* %i
 
 design -load gold
 sim -r activity_window_cross.vcd -scope tb.uut -activity -q
@@ -71,4 +76,4 @@ select -assert-count 1 w:c a:$ACKT=0.000000* %i
 select -assert-count 1 w:c a:$DUTY=1.000000* %i
 select -assert-count 1 w:d a:$ACKT=0.125000* %i
 select -assert-count 1 w:d a:$DUTY=0.250000* %i
-select -assert-count 1 w:y a:$DUTY=0.500000* %i
+select -assert-count 1 w:y a:$DUTY=0.503937* %i

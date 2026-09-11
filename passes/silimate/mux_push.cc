@@ -1025,13 +1025,12 @@ struct OptMuxPushWorker : UnitDelayTiming
 
   // Emit a gather in the same spelling as the nest that is being replaced, so a
   // flow that has already lowered one of the two forms does not get it back.
-  void add_gather(IdString type, const RTLIL::SigSpec &table, const RTLIL::SigSpec &sel,
+  RTLIL::Cell *add_gather(IdString type, const RTLIL::SigSpec &table, const RTLIL::SigSpec &sel,
       const RTLIL::SigSpec &y, const std::string &src, RTLIL::IdString name)
   {
     if (type == ID($bmux))
-      module->addBmux(name, table, sel, y, src);
-    else
-      module->addShiftx(name, table, sel, y, false, src);
+      return module->addBmux(name, table, sel, y, src);
+    return module->addShiftx(name, table, sel, y, false, src);
   }
 
   // bmux(J, [bmux(I, col_p)]) -> bmux(I, [bmux(E, perm_i(row_i))])
@@ -1058,11 +1057,13 @@ struct OptMuxPushWorker : UnitDelayTiming
             .extract(i * lane_width, lane_width));
       RTLIL::SigSpec row_y = module->addWire(NEW_ID2_SUFFIX("reindex_col"), lane_width);
       add_gather(cell->type, permuted, early, row_y, src,
-          NEW_ID2_SUFFIX("reindex_colmux"));
+          NEW_ID2_SUFFIX("reindex_colmux"))->set_bool_attribute(ID::staged_gather);
       rows_out.append(row_y);
     }
+    // The two stages are split on purpose, to keep the late index off the wide
+    // select; opt_bmux_nest would otherwise merge them straight back.
     add_gather(cell->type, rows_out, inner_geo[0].sel, cell->getPort(ID::Y), src,
-        NEW_ID2_SUFFIX("reindex_rowmux"));
+        NEW_ID2_SUFFIX("reindex_rowmux"))->set_bool_attribute(ID::staged_gather);
 
     cells_to_remove.insert(cell);
     for (auto col : inner)

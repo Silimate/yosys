@@ -39,6 +39,9 @@ opt_clean
 # row index instead, leaving the row xor and the emitted rebase.
 select -assert-count 65 t:$shiftx
 select -assert-count 2 t:$xor
+# Both stages carry the mark that stops opt_bmux_nest merging them back into the
+# one wide select the reindex just broke apart.
+select -assert-count 65 a:staged_gather
 
 # The two indices must be offsets of one shared base. Here the column index is
 # computed from an unrelated input, so no xor identity relates them and the swap
@@ -96,3 +99,52 @@ proc
 opt_clean
 muxpush
 select -assert-count 17 t:$shiftx
+
+# The same nest imported as $bmux instead of $shiftx, then run through both passes
+# in the order the flow uses them. This is the composition the mark exists for:
+# pinning the two halves separately leaves them both passing if the reindex marks
+# cells opt_bmux_nest never inspects, or if the two disagree about which cell is
+# the outer.
+design -reset
+verific -cfg veri_optimize_wide_selector 1
+verific -cfg db_infer_wide_muxes_post_elaboration 0
+read -sv <<EOT
+module bmuxpos(input [5:0] s0, input [5:0] s1, input [5:0] s2,
+               input [5:0] ka, input [3:0] kb, input [1023:0] tab, output y);
+  wire [5:0] base = (s0 + s1) + s2;
+  wire [5:0] row = ka ^ base;
+  wire [3:0] col = kb ^ base[3:0];
+  wire [63:0] cols [0:15];
+  wire [15:0] picked;
+  genvar p, r;
+  generate
+    for (p = 0; p < 16; p = p + 1) begin
+      for (r = 0; r < 64; r = r + 1)
+        assign cols[p][r] = tab[r*16 + p];
+      assign picked[p] = cols[p][row];
+    end
+  endgenerate
+  assign y = picked[col];
+endmodule
+EOT
+verific -import bmuxpos
+proc; opt_clean
+select -assert-count 17 t:$bmux
+muxpush -gather-reindex
+opt_clean
+select -assert-count 65 t:$bmux
+select -assert-count 65 a:staged_gather
+
+# opt_bmux_nest has to leave the staged pair alone.
+opt_bmux_nest
+opt_clean
+select -assert-count 65 t:$bmux
+
+# Strip the marks and the identical nest folds to one 1024-entry select. That is
+# what makes the arm above discriminating: the pass does reach this shape, so
+# declining it was the mark and not a failure to match.
+setattr -unset staged_gather t:$bmux
+select -clear
+opt_bmux_nest
+opt_clean
+select -assert-count 1 t:$bmux
