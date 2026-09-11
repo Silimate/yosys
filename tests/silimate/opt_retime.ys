@@ -3,7 +3,7 @@
 log -header "Forward: push f1 across b2"
 log -push
 design -reset
-read_verilog -icells opt_retime.v
+read_verilog -icells opt_retime_buf.v
 hierarchy -top retime_probe
 check -assert
 select -assert-count 3 t:$dff
@@ -25,7 +25,7 @@ log -pop
 log -header "Backward: push f1 across b1"
 log -push
 design -reset
-read_verilog -icells opt_retime.v
+read_verilog -icells opt_retime_buf.v
 hierarchy -top retime_probe
 check -assert
 opt_retime -flop f1 -cut b1 -backward
@@ -45,7 +45,7 @@ log -pop
 log -header "Forward: push f1 across b3 (two buffers)"
 log -push
 design -reset
-read_verilog -icells opt_retime.v
+read_verilog -icells opt_retime_buf.v
 hierarchy -top retime_probe
 check -assert
 opt_retime -flop f1 -cut b3 -forward
@@ -68,7 +68,7 @@ log -pop
 log -header "Backward: push f1 across b0 (two buffers)"
 log -push
 design -reset
-read_verilog -icells opt_retime.v
+read_verilog -icells opt_retime_buf.v
 hierarchy -top retime_probe
 check -assert
 opt_retime -flop f1 -cut b0 -backward
