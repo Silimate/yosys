@@ -233,11 +233,23 @@ static std::vector<Merge> collect_merges(Module *module, SigMap &sigmap, FfInitV
 			if (port == step.port)
 				continue;
 
+			SigSpec in = sigmap(step.cell->getPort(port));
+
+			// A constant operand needs no register to merge, because it is
+			// already time invariant: reg(c) is c on every cycle, so
+			// f(reg(x), c) equals reg(f(x, c)) for the same reason it holds
+			// when every input is registered. Nothing is folded away and
+			// nothing is rewired, the cut goes on reading the constant where
+			// it sits. A partly constant input still refuses below, since
+			// unique_driver will not find a single flop behind it.
+			if (in.is_fully_const())
+				continue;
+
 			IdString drv_port;
-			Cell *drv = unique_driver(module, sigmap, sigmap(step.cell->getPort(port)), drv_port);
+			Cell *drv = unique_driver(module, sigmap, in, drv_port);
 			if (!drv || drv_port != ID::Q || !drv->is_builtin_ff())
-				log_cmd_error("Input %s of cell %s is not driven by a flop, so flop %s cannot "
-						"move forward across it.\n",
+				log_cmd_error("Input %s of cell %s is not driven by a flop or a constant, so "
+						"flop %s cannot move forward across it.\n",
 						log_id(port), log_id(step.cell), log_id(flop));
 
 			FfData ff(&initvals, drv);
@@ -402,7 +414,7 @@ struct OptRetimePass : public Pass {
 		log("        $shr, the comparators ($eq, $ne, $lt, $le, $gt, $ge) and the\n");
 		log("        $reduce_* cells. Every input of the cut counts as a data\n");
 		log("        input, the $mux select and a shift amount included, so all\n");
-		log("        of them have to be registered.\n");
+		log("        of them have to be registered or constant.\n");
 		log("\n");
 		log("    -forward\n");
 		log("        move the register downstream, past -cut. Required. Where the\n");

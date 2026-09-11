@@ -8,8 +8,9 @@
 //                                    readers), then famt merges with it
 //   -flop famt -cut s_var -forward : the same move entered on B, which widens
 //                                    the surviving flop from 3 bits to 8
-// s_const stays refused, but on its constant amount rather than its type: the
-// merge has no flop to take on B. That needs constant-operand support.
+//   -flop fd -cut s_const -forward  : proved in opt_retime_const.ys instead,
+//                                     since its amount is a constant and so
+//                                     has no register to merge
 
 module retime_shift (clk, d, amt, q0, q1);
   input clk;

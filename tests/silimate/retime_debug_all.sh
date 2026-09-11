@@ -56,6 +56,7 @@ moves=(
 	"retime_debug_designs.v|notpath|-flop fa -cut n0 -forward"
 	"retime_debug_designs.v|zeroinit|-flop fa -cut c_ne -forward + -flop fc -cut c_lt -forward + -flop fi -cut c_gt -forward + -flop fe -cut r_and -forward + -flop fg -cut r_xor -forward + -flop fh -cut r_bool -forward"
 	"opt_retime_shift.v|retime_shift|-flop famt -cut s_var -forward|splitfanout"
+	"opt_retime_shift.v|retime_shift|-flop fd -cut s_const -forward|splitfanout"
 	"retime_debug_designs.v|onesinit|-flop fa -cut c_xnor -forward + -flop fc -cut r_xnor -forward + -flop fd -cut c_le -forward + -flop fg -cut c_ge -forward"
 )
 

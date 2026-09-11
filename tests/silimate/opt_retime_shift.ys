@@ -10,7 +10,10 @@
 # walk, so splitfanout runs first. That is the workflow "help opt_retime"
 # points users at, and section 1 is the only place the suite exercises it.
 #
-# Still refused: the constant shift amount on s_const, pinned at the end.
+# s_const, whose amount is a constant, is proved in opt_retime_const.ys: that
+# move needs constant-operand support rather than anything about shifts.
+#
+# Still refused: the signed shifts, pinned at the end.
 
 # ---------------------------------------------------------------------------
 log -header "Forward: \$shr entered on the amount, after splitfanout"
@@ -93,16 +96,25 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# A constant shift amount is not a flop, so the merge has nothing to take and
-# the move is refused. The fix is constant-operand support, not shift support:
-# reg(A) << 3 equals reg(A << 3) is just as true, the pass simply cannot build
-# the merge yet. Note this used to fail on the cut type instead.
+# $shl and $shr are in, their signed counterparts are not. $sshr differs in
+# what it does with the vacated high bits, not in its port list, so it obeys
+# the same rule and is one entry away; it stays out until something proves it.
+# This pins where shift support currently stops.
 #
 # logger -expect error exits yosys successfully, so it has to come last.
 design -reset
-read_verilog -icells opt_retime_shift.v
-hierarchy -top retime_shift
-splitfanout
-select -assert-count 1 c:s_const
-logger -expect error "Input B of cell s_const is not driven by a flop" 1
-opt_retime -flop fd -cut s_const -forward
+read_verilog -icells <<EOF
+module signedshift(input clk, input [7:0] a, input [2:0] amt, output [7:0] q);
+  wire [7:0] ra, y;
+  wire [2:0] ramt;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa   (.CLK(clk), .D(a),   .Q(ra));
+  $dff #(.WIDTH(3), .CLK_POLARITY(1'b1)) famt (.CLK(clk), .D(amt), .Q(ramt));
+  $sshr #(.A_WIDTH(8), .B_WIDTH(3), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(0))
+    s0 (.A(ra), .B(ramt), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq   (.CLK(clk), .D(y),   .Q(q));
+endmodule
+EOF
+hierarchy -top signedshift
+check -assert
+logger -expect error "Cut cell s0 has type \$sshr, which opt_retime cannot move across yet" 1
+opt_retime -flop fa -cut s0 -forward

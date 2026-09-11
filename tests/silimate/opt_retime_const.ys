@@ -1,0 +1,127 @@
+# Constant operands on a cut.
+#
+# A constant needs no register to merge, because it is already time invariant:
+# reg(c) is c on every cycle, so f(reg(x), c) equals reg(f(x, c)) for the same
+# reason the rule holds when every input is registered. The move folds nothing
+# away on that port and leaves the constant wired where it sits, which is why
+# the register count here drops by zero even though a move happened.
+#
+# The initial state is the part worth care. A constant makes it easy to get
+# wrong: an $and against a mask keeps the all-zero state at zero, but an $add
+# against a constant does not, since 0 + c is c. So this section maps the
+# initial state through each cell rather than using -set-init-zero, and the
+# $add register starts at the constant.
+#
+# Only a fully constant input qualifies. A partly constant one, such as a
+# concatenation of a constant and a wire, still refuses; that is pinned at the
+# end of the file.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: constant operands on \$add and \$and"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module constops(input clk, input [7:0] a, b, output [7:0] qinc, qmask);
+  wire [7:0] ra, rb, yinc, ymask;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a_inc (.A(ra), .B(8'd1), .Y(yinc));
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a_mask (.A(rb), .B(8'h0f), .Y(ymask));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqi (.CLK(clk), .D(yinc),  .Q(qinc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqm (.CLK(clk), .D(ymask), .Q(qmask));
+endmodule
+EOF
+hierarchy -top constops
+check -assert
+select -assert-count 4 t:$dff
+design -save orig
+opt_retime -flop fa -cut a_inc -forward
+opt_retime -flop fb -cut a_mask -forward
+check -assert
+# Nothing merged and nothing resized: both cuts keep their width and their
+# constant operand, so all four registers survive at 8 bits. The only change
+# is which side of the cut each one sits on.
+select -assert-count 4 t:$dff
+select -assert-count 1 c:a_inc %x:+[A] w:a %i
+select -assert-count 1 c:a_mask %x:+[A] w:b %i
+# the constants are still wired straight to the cuts, untouched by the move
+select -assert-count 1 c:a_inc %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:yinc %i
+select -assert-count 1 c:a_mask %x:+[Y] w:rb %i
+select -assert-count 1 c:fb %x:+[Q] w:ymask %i
+rename constops gate
+# 0 + 1 is 1, so the incrementer's register starts at the constant. The mask
+# leaves zero alone, so that one starts at zero like its gold counterpart;
+# it shares this section only because one sat call covers both.
+setattr -set init 8'd1 gate/w:yinc
+setattr -set init 8'h00 gate/w:ymask
+setattr -set init 8'h00 gate/w:qinc
+setattr -set init 8'h00 gate/w:qmask
+design -import orig -as gold
+setattr -set init 8'h00 gold/w:ra
+setattr -set init 8'h00 gold/w:rb
+setattr -set init 8'h00 gold/w:qinc
+setattr -set init 8'h00 gold/w:qmask
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A constant operand on a cut whose output is wider than its input, so the
+# register resizes even though nothing merges. This is opt_retime_shift.v's
+# s_const, the move that motivated constant support: reg(d) << 3 equals
+# reg(d << 3), and 0 << 3 is 0, so the ordinary zero-init proof is fair here.
+log -header "Forward: constant shift amount, widening the register"
+log -push
+design -reset
+read_verilog -icells opt_retime_shift.v
+hierarchy -top retime_shift
+check -assert
+design -save orig
+# rd feeds both shifters, so the path walk needs a fanout-1 copy first
+splitfanout
+select -assert-count 1 c:s_const %x:+[A] w:fd_splfon0 %i
+opt_retime -flop fd -cut s_const -forward
+check -assert
+# fd widens 8 bits to 11 and merges nothing, the amount being a constant
+select -assert-count 5 t:$dff
+select -assert-count 1 c:s_const %x:+[A] w:d %i
+select -assert-count 1 c:s_const %x:+[Y] w:fd_retimed %i
+select -assert-count 1 c:fd %x:+[Q] w:sl %i
+rename retime_shift gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Half a constant is not enough. {4'h0, rb[3:0]} is neither fully constant nor
+# driven by one flop, so there is no single register to merge and no constant
+# to leave in place. Supporting it would mean merging a register that only
+# feeds part of the port, which is a different transform.
+#
+# logger -expect error exits yosys successfully, so it has to come last.
+design -reset
+read_verilog -icells <<EOF
+module halfconst(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B({4'h0, rb[3:0]}), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top halfconst
+check -assert
+logger -expect error "Input B of cell a0 is not driven by a flop or a constant" 1
+opt_retime -flop fa -cut a0 -forward

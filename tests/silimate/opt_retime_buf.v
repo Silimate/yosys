@@ -7,13 +7,14 @@
 //   opt_retime_add.v    $add / $sub, the first non-$buf cuts        supported
 //   opt_retime_mux.v    $mux, a port that is not an operand         supported
 //   opt_retime_cmp.v    comparators and reductions: wide in, one bit out  supported
-//   opt_retime_shift.v  variable shifts: fanout and width growth    supported
-//                       (a constant shift amount still refuses)
+//   opt_retime_shift.v  shifts: fanout and width growth              supported
 //   opt_retime_acc.v    accumulator / incrementer: the path is a cycle
 //
 // opt_retime_ops.ys covers the comparators beyond $eq, $xnor, and the rest of
 // the $reduce_* family, with designs inline in the script, since they add no
 // new rule and only differ in whether the initial state survives the move.
+// opt_retime_const.ys covers constant operands, which need no register to
+// merge; it also proves this directory's one constant-amount move, s_const.
 //
 // Forward moves only. Backward moves are out of scope: the pass rejects
 // -backward while parsing arguments, so do not add designs or tests for them.
