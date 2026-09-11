@@ -1,0 +1,249 @@
+# Design test for opt_retime_cmp.v, plus the bitwise types with no committed
+# design of their own.
+#
+# These are the first cuts whose output is narrower than their inputs, so a
+# move here is the interesting direction for area: it collapses wide operand
+# registers into a one-bit result register. opt_retime_width.ys covers resizing
+# on an $add; what is new here is that a reduction resizes with no merge at
+# all, and that one move can merge registers of different widths.
+#
+# A note on the proofs. A retiming move shifts the initial state: the register
+# ends up holding f(state) rather than state. Every cut type up to now mapped
+# the all-zero state to zero (0+0, 0-0, 0|0, 0^0, 0&0, |0 and 0?0:0 are all
+# zero), so -set-init-zero compared the two designs fairly. $not is the first
+# supported cut where f(0) is not 0, so its section below has to map the
+# initial state through the cell instead.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fc across r_or, 8 register bits to 1"
+log -push
+design -reset
+read_verilog -icells opt_retime_cmp.v
+hierarchy -top retime_cmp
+check -assert
+select -assert-count 4 t:$dff
+opt_retime -flop fc -cut r_or -forward
+check -assert
+# a reduction has one data input, so nothing merges: the register count is
+# unchanged and only the width moves, 25 register bits to 18
+select -assert-count 4 t:$dff
+select -assert-count 1 c:r_or %x:+[A] w:c %i
+# the old Q net rc was 8 bits and r_or.Y is 1, so the link is a fresh wire
+select -assert-count 1 c:r_or %x:+[Y] w:fc_retimed %i
+select -assert-count 1 c:fc %x:+[D] w:fc_retimed %i
+select -assert-count 1 c:fc %x:+[Q] w:r %i
+select -assert-count 1 c:g0 %x:+[B] w:r %i
+rename retime_cmp gate
+read_verilog -icells opt_retime_cmp.v
+rename retime_cmp gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fa across c_eq, 16 register bits to 1"
+log -push
+design -reset
+read_verilog -icells opt_retime_cmp.v
+hierarchy -top retime_cmp
+opt_retime -flop fa -cut c_eq -forward
+check -assert
+# fb merges away and the survivor narrows from 8 bits to 1: 25 bits to 10
+select -assert-count 3 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 1 c:c_eq %x:+[A] w:a %i
+select -assert-count 1 c:c_eq %x:+[B] w:b %i
+select -assert-count 1 c:c_eq %x:+[Y] w:fa_retimed %i
+select -assert-count 1 c:fa %x:+[D] w:fa_retimed %i
+select -assert-count 1 c:fa %x:+[Q] w:e %i
+select -assert-count 1 c:g0 %x:+[A] w:e %i
+rename retime_cmp gate
+read_verilog -icells opt_retime_cmp.v
+rename retime_cmp gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# $eq is the one exception to the note at the top that survives anyway: it maps
+# the all-zero state to 1, not 0, but g0 ands the result with r, which is 0 in
+# the first cycle either way, so the difference never reaches q. Do not copy
+# this section as evidence that zero-init proofs always work on an $eq.
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: two moves compose, merging an 8-bit and a 1-bit register"
+log -push
+design -reset
+read_verilog -icells opt_retime_cmp.v
+hierarchy -top retime_cmp
+# the first move puts a 1-bit register on r, which the second one then needs:
+# without it g0.B would not be registered and the second move would refuse
+opt_retime -flop fc -cut r_or -forward
+opt_retime -flop fa -cut g0 -forward
+check -assert
+# fb (8 bits) and fc (1 bit, after its own resize) merge into the same move,
+# which is why mismatch_reason() deliberately ignores width. 25 bits to 2.
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fc
+select -assert-count 1 c:c_eq %x:+[Y] w:e %i
+select -assert-count 1 c:r_or %x:+[Y] w:fc_retimed %i
+select -assert-count 1 c:g0 %x:+[A] w:e %i
+select -assert-count 1 c:g0 %x:+[B] w:fc_retimed %i
+select -assert-count 1 c:g0 %x:+[Y] w:fa_retimed %i
+select -assert-count 1 c:fa %x:+[D] w:fa_retimed %i
+select -assert-count 1 c:fa %x:+[Q] w:g %i
+select -assert-count 1 c:bg %x:+[A] w:g %i
+rename retime_cmp gate
+read_verilog -icells opt_retime_cmp.v
+rename retime_cmp gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$or and \$xor"
+log -push
+design -reset
+# Two independent cones rather than a chain, so one read covers both types.
+# They get no committed design because they are the same rule as the $and in
+# opt_retime_cmp.v with a different operator.
+read_verilog -icells <<EOF
+module bitwise(input clk, input [7:0] a, b, c, d, output [7:0] qo, qx);
+  wire [7:0] ra, rb, rc, rd, o, x;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $or #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    o0 (.A(ra), .B(rb), .Y(o));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(rc), .B(rd), .Y(x));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqo (.CLK(clk), .D(o), .Q(qo));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqx (.CLK(clk), .D(x), .Q(qx));
+endmodule
+EOF
+hierarchy -top bitwise
+check -assert
+select -assert-count 6 t:$dff
+opt_retime -flop fa -cut o0 -forward
+opt_retime -flop fc -cut x0 -forward
+check -assert
+# each cut merged its other operand away, 6 registers to 4
+select -assert-count 4 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fd
+select -assert-count 1 c:o0 %x:+[A] w:a %i
+select -assert-count 1 c:o0 %x:+[B] w:b %i
+select -assert-count 1 c:o0 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:o %i
+select -assert-count 1 c:x0 %x:+[A] w:c %i
+select -assert-count 1 c:x0 %x:+[B] w:d %i
+select -assert-count 1 c:x0 %x:+[Y] w:rc %i
+select -assert-count 1 c:fc %x:+[Q] w:x %i
+rename bitwise gate
+read_verilog -icells <<EOF
+module bitwise(input clk, input [7:0] a, b, c, d, output [7:0] qo, qx);
+  wire [7:0] ra, rb, rc, rd, o, x;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $or #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    o0 (.A(ra), .B(rb), .Y(o));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(rc), .B(rd), .Y(x));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqo (.CLK(clk), .D(o), .Q(qo));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqx (.CLK(clk), .D(x), .Q(qx));
+endmodule
+EOF
+rename bitwise gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$not, where the initial state has to be mapped"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module notpath(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] ra, n;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(n));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(n), .Q(q));
+endmodule
+EOF
+hierarchy -top notpath
+check -assert
+opt_retime -flop fa -cut n0 -forward
+check -assert
+# $not is width-preserving and merges nothing, so the Q net is reused and no
+# _retimed wire appears: all that changes is which side of n0 the register sits
+select -assert-count 2 t:$dff
+select -assert-count 1 c:n0 %x:+[A] w:a %i
+select -assert-count 1 c:n0 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:n %i
+rename notpath gate
+# The move leaves fa holding ~value where it used to hold value, so a fair
+# proof has to start the two designs from corresponding states. Computing that
+# correspondence is exactly what the pass cannot do yet, which is why the
+# refusal below exists. -set-init-zero would compare 0 against ~0 and fail,
+# with a counterexample that needs no input stimulus at all.
+setattr -set init 8'hff gate/w:n
+setattr -set init 8'h00 gate/w:q
+read_verilog -icells <<EOF
+module notpath(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] ra, n;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(n));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(n), .Q(q));
+endmodule
+EOF
+rename notpath gold
+setattr -set init 8'h00 gold/w:ra
+setattr -set init 8'h00 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to be last.
+#
+# A $buf is the identity, so it passes a stored value through untouched. Every
+# other cut transforms it, and the section above shows what that costs. $not is
+# the smallest case that needs the rule: it merges nothing and does not change
+# width, so neither the merge rule nor the resize path catches it. Without this
+# check the move is accepted and the result is not equivalent.
+# TODO: push the init and reset values through the chain instead of refusing.
+log -header "Refused: a stored value cannot cross a cell that transforms it"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module notinit(input clk, input [7:0] a, output [7:0] q);
+  (* init = 8'h00 *)
+  wire [7:0] ra;
+  wire [7:0] n;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(n));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(n), .Q(q));
+endmodule
+EOF
+hierarchy -top notinit
+check -assert
+logger -expect error "Flop fa cannot move across cell n0 because it has an init value" 1
+opt_retime -flop fa -cut n0 -forward

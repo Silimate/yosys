@@ -1,0 +1,115 @@
+# Design test for opt_retime_add.v. Forward moves only for now.
+#
+# A forward move across an $add merges the registers on both operands into the
+# single register it leaves on the output, so each move here drops one flop.
+# Register reuse means the wire names end up misleading: the wire that used to
+# carry a register output now carries the sum. That matches what the pass
+# already does for $buf chains.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fa across a0, merging fb away"
+log -push
+design -reset
+read_verilog -icells opt_retime_add.v
+hierarchy -top retime_add
+opt_retime -flop fa -cut a0 -forward
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 0 c:fb
+# a0 -> fa: a0 reads the module inputs directly, fa registers the sum
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:a0 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:s0 %i
+# downstream is untouched
+select -assert-count 1 c:b0 %x:+[A] w:s0 %i
+rename retime_add gate
+read_verilog -icells opt_retime_add.v
+rename retime_add gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fb across a0, merging fa away"
+log -push
+design -reset
+read_verilog -icells opt_retime_add.v
+hierarchy -top retime_add
+# the chain enters a0 on B rather than A, which is the whole point of tracking
+# which data input the path runs through
+opt_retime -flop fb -cut a0 -forward
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 0 c:fa
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:a0 %x:+[Y] w:rb %i
+select -assert-count 1 c:fb %x:+[D] w:rb %i
+select -assert-count 1 c:fb %x:+[Q] w:s0 %i
+rename retime_add gate
+read_verilog -icells opt_retime_add.v
+rename retime_add gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fa across b0, a mixed \$add + \$buf chain"
+log -push
+design -reset
+read_verilog -icells opt_retime_add.v
+hierarchy -top retime_add
+opt_retime -flop fa -cut b0 -forward
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 0 c:fb
+# a0 -> b0 -> fa: the register ends up past both cells
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:a0 %x:+[Y] w:s0 %i
+select -assert-count 1 c:b0 %x:+[A] w:s0 %i
+select -assert-count 1 c:b0 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:s0b %i
+select -assert-count 1 c:a1 %x:+[A] w:s0b %i
+rename retime_add gate
+read_verilog -icells opt_retime_add.v
+rename retime_add gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to be the last
+# section in the file. The other merge rules get their own files, since only
+# one expected error fits per run.
+#
+# TODO: the pass still refuses to merge registers whose stored values the merge
+# would have to recompute: a different clock, an enable or reset, or an init
+# value. Those want a value-combining implementation and a test each.
+log -header "Refused: a forward move needs every operand registered"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module unflopped(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(b), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top unflopped
+logger -expect error "Input B of cell a0 is not driven by a flop" 1
+opt_retime -flop fa -cut a0 -forward

@@ -4,10 +4,12 @@
 //   fb -/                            ^
 //   fc ------------------------------/
 // Every net is single-fanout, so this is the smallest design that needs a
-// non-$buf cut. Moves it should cover once the pass grows past buffers:
-//   -flop fa -cut a0 -forward   : fa and fb must merge into one flop on s0
-//   -flop fq -cut a1 -backward  : one flop must split onto s0b and rc
-//   -flop fa -cut b0 -forward   : $buf and $add mixed in one chain
+// non-$buf cut. Forward moves it covers:
+//   -flop fa -cut a0 -forward : fa and fb merge into one flop on the sum
+//   -flop fb -cut a0 -forward : same move, entering a0 on B instead of A
+//   -flop fa -cut b0 -forward : $buf and $add mixed in one chain
+//   -flop fa -cut a1 -forward : the longest chain here, merging at two cells
+//                               (covered by opt_retime_sub.ys)
 
 module retime_add (clk, a, b, c, q);
   input clk;

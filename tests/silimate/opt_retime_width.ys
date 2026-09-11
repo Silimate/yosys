@@ -1,0 +1,134 @@
+# Width-changing forward moves.
+#
+# The register a forward move leaves behind takes the width of the cut output,
+# not the width it started with. An $add exercises both directions on its own:
+# keeping the carry makes Y wider than the operands, and truncating makes it
+# narrower. The moved register keeps its cell name and gets a resized WIDTH,
+# and the net from the cut to it is a new <flop>_retimed wire rather than the
+# reused Q net, since the old one is the wrong width.
+#
+# This replaces an earlier test that only pinned the refusal these moves used
+# to get.
+
+# ---------------------------------------------------------------------------
+log -header "Widening: an \$add that keeps its carry, 8 bits to 9"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module carryout(input clk, input [7:0] a, b, output [8:0] q);
+  wire [7:0] ra, rb;
+  wire [8:0] s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(9), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(9), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top carryout
+check -assert
+select -assert-count 3 t:$dff
+opt_retime -flop fa -cut a0 -forward
+check -assert
+# two 8-bit operand registers became one 9-bit register: 25 register bits to 18
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:fa %x:+[Q] w:s %i
+select -assert-count 1 c:fq %x:+[D] w:s %i
+# the Q net was 8 bits, so the link from a0 is a fresh 9-bit wire
+select -assert-count 1 c:a0 %x:+[Y] w:fa_retimed %i
+select -assert-count 1 c:fa %x:+[D] w:fa_retimed %i
+rename carryout gate
+read_verilog -icells <<EOF
+module carryout(input clk, input [7:0] a, b, output [8:0] q);
+  wire [7:0] ra, rb;
+  wire [8:0] s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(9), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(9), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+rename carryout gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Narrowing: a truncating \$add, 8 bits to 4"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module narrow(input clk, input [7:0] a, b, output [3:0] q);
+  wire [7:0] ra, rb;
+  wire [3:0] s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top narrow
+check -assert
+opt_retime -flop fa -cut a0 -forward
+check -assert
+# 16 register bits on the operands became 4
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 1 c:fa %x:+[Q] w:s %i
+select -assert-count 1 c:a0 %x:+[Y] w:fa_retimed %i
+rename narrow gate
+read_verilog -icells <<EOF
+module narrow(input clk, input [7:0] a, b, output [3:0] q);
+  wire [7:0] ra, rb;
+  wire [3:0] s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+rename narrow gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to be last.
+#
+# Resizing rewrites the WIDTH parameter of the register being moved, which a
+# single-bit cell does not have. A 1-bit $add that keeps its carry is the
+# smallest way to ask for that.
+# A register holding a value is refused before resizing is even considered,
+# since only a non-$buf chain can change the width and such a chain transforms
+# the stored value. opt_retime_cmp.ys covers that refusal on a $not, which is
+# the smallest cell that needs it.
+log -header "Refused: a single-bit cell cannot be resized"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module fine(input clk, input a, b, output [1:0] q);
+  wire ra, rb;
+  wire [1:0] s;
+  \$_DFF_P_ fa (.C(clk), .D(a), .Q(ra));
+  \$_DFF_P_ fb (.C(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(2), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top fine
+check -assert
+logger -expect error "Flop fa is a single-bit cell and cannot widen to 2 bits" 1
+opt_retime -flop fa -cut a0 -forward

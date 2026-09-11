@@ -1,14 +1,17 @@
-// Mux: the first design where a cut has a control port distinct from its data
-// ports, and the first that is a DAG rather than a chain.
+// Mux: the first design where a cut has a port that is not an operand, and the
+// first that is a DAG rather than a chain.
 //   fa -> m0.A
 //   fb -> m0.B   m0 ($mux) -> b0 ($buf) -> fq
 //   fs -> m0.S
-// Moves it should cover once the pass grows past buffers:
-//   -flop fq -cut m0 -backward : must fan out onto A and B, and must NOT put
-//                                a flop on S (or must flop S separately)
-//   -flop fa -cut m0 -forward  : illegal unless fb moves too; fs stays put
-//   -flop fs -cut m0 -forward  : select is not on the data path, must refuse
-// TODO: add a $pmux design once $mux works; one-hot select changes the rules.
+// Every net is single-fanout. Forward moves it covers:
+//   -flop fa -cut m0 -forward : folds fa, fb and fs into one register. S is
+//                               not an exception: reg(S)?reg(B):reg(A) equals
+//                               reg(S?B:A) only when all three are
+//                               registered.
+//   -flop fs -cut m0 -forward : the same move entered on S, which widens the
+//                               surviving register from 1 bit to 8.
+//   -flop fa -cut b0 -forward : $mux and $buf mixed in one chain
+// TODO: add a $pmux design; a one-hot select changes the rules.
 
 module retime_mux (clk, a, b, sel, q);
   input clk;

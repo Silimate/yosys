@@ -4,12 +4,13 @@
 //        c_eq ($eq) -> e -\
 //   fb -/                  g0 ($and) -> bg ($buf) -> fq
 //   fc -> r_or ($reduce_or) -> r -/
-// Every net is single-fanout. Moves it should cover once the pass grows past
-// buffers:
-//   -flop fq -cut g0 -backward   : 1 flop bit becomes 2
-//   -flop fq -cut c_eq -backward : 1 flop bit becomes 16, across g0 and c_eq
-//   -flop fc -cut r_or -forward  : 8 flop bits collapse to 1
-//   -flop fa -cut c_eq -forward  : illegal unless fb moves too
+// Every net is single-fanout. Forward moves it covers:
+//   -flop fc -cut r_or -forward : 8 flop bits collapse to 1, with no merge at
+//                                 all, since a reduction has one data input
+//   -flop fa -cut c_eq -forward : 16 flop bits collapse to 1, merging fb
+//   -flop fa -cut g0 -forward   : legal only after fc has moved across r_or to
+//                                 put a register on g0.B. Then it merges an
+//                                 8-bit fb and a 1-bit fc in the same move.
 
 module retime_cmp (clk, a, b, c, q);
   input clk;

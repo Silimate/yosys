@@ -29,6 +29,60 @@ static bool is_buf(Cell *cell)
 	return cell->type.in(ID($buf), ID($_BUF_));
 }
 
+// Data input ports of a cell a register can be moved across, in port order. An
+// empty list means the type is not supported as a cut.
+//
+// For any pure function f, f(reg(x1), .., reg(xn)) equals reg(f(x1, .., xn)) as
+// long as every input is registered on the same clock, so what matters is the
+// port list and not what the cell computes. Retiming does not care whether the
+// operator commutes ($sub follows $add), how wide Y is next to A and B (a
+// reduction narrows the register, a carry-out widens it), or whether a port is
+// conventionally called control: a $mux select is listed here because
+// reg(S) ? reg(B) : reg(A) equals reg(S ? B : A) only when S is registered too.
+//
+// Remaining siblings ($le, $gt, $ge, $logic_and and so on) are one entry each
+// and follow the same rule, but are left out until something tests them.
+// TODO: the shifts need their amount port merged the way $mux merges S.
+static std::vector<IdString> data_inputs(Cell *cell)
+{
+	if (is_buf(cell))
+		return {ID::A};
+	if (cell->type.in(ID($add), ID($sub), ID($and), ID($or), ID($xor), ID($xnor),
+			ID($eq), ID($ne), ID($lt)))
+		return {ID::A, ID::B};
+	if (cell->type.in(ID($not), ID($reduce_and), ID($reduce_or), ID($reduce_xor),
+			ID($reduce_xnor), ID($reduce_bool)))
+		return {ID::A};
+	if (cell->type == ID($mux))
+		return {ID::A, ID::B, ID::S};
+	return {};
+}
+
+static bool is_data_input(Cell *cell, IdString port)
+{
+	for (auto candidate : data_inputs(cell))
+		if (candidate == port)
+			return true;
+	return false;
+}
+
+// One cell on the path between the flop and the cut, plus the data input the
+// path enters it on. That is always A for a single-input cell; for $add the
+// path may run through either operand, and for $mux through the select as well.
+struct ChainStep {
+	Cell *cell;
+	IdString port;
+};
+
+// A register on a data input of a chain cell that a forward move folds into the
+// single register the move leaves behind.
+struct Merge {
+	Cell *flop;
+	Cell *cell;
+	IdString port;
+	SigSpec sig_d;
+};
+
 static pool<SigBit> wire_bits(const SigSpec &sig)
 {
 	pool<SigBit> bits;
@@ -111,38 +165,100 @@ static Cell *unique_driver(Module *module, SigMap &sigmap, const SigSpec &sig, I
 	return found;
 }
 
-static std::vector<Cell *> collect_buf_chain(Module *module, SigMap &sigmap, Cell *flop, Cell *cut, bool forward)
+static std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap, Cell *flop, Cell *cut)
 {
-	std::vector<Cell *> chain;
+	std::vector<ChainStep> chain;
 	pool<Cell *> seen;
-	SigSpec cur = sigmap(forward ? flop->getPort(ID::Q) : flop->getPort(ID::D));
+	SigSpec cur = sigmap(flop->getPort(ID::Q));
 
 	while (true) {
 		IdString port;
 
 		// Generalize to beyond single-fanout
-		Cell *next = forward ? unique_reader(module, sigmap, cur, port)
-				     : unique_driver(module, sigmap, cur, port);
-		IdString need_port = forward ? ID::A : ID::Y;
-
-		// TODO generalize beyond $buf cells
-		if (!next || port != need_port || !is_buf(next))
+		Cell *next = unique_reader(module, sigmap, cur, port);
+		if (!next || !is_data_input(next, port))
 			break;
+
 		if (seen.count(next))
-			log_cmd_error("Cycle on the %s-path of flop %s.\n",
-					forward ? "after" : "before", log_id(flop));
+			log_cmd_error("Cycle on the after-path of flop %s.\n", log_id(flop));
 		seen.insert(next);
-		chain.push_back(next);
+		chain.push_back({next, port});
 		if (next == cut)
 			break;
-		// TODO generalize beyond $buf cells
-		cur = sigmap(next->getPort(forward ? ID::Y : ID::A));
+		cur = sigmap(next->getPort(ID::Y));
 	}
 
-	if (chain.empty() || chain.back() != cut)
-		log_cmd_error("Cut %s is not on the %s-path of flop %s.\n",
-				log_id(cut), forward ? "after" : "before", log_id(flop));
+	if (chain.empty() || chain.back().cell != cut)
+		log_cmd_error("Cut %s is not on the after-path of flop %s.\n", log_id(cut), log_id(flop));
 	return chain;
+}
+
+// A move relocates the register's stored value across the chain, so it only
+// holds if the value survives the trip. That is free for a $buf, which is the
+// identity, but any other cell transforms it: moving an init value of 0 across
+// a $not would have to store ~0 instead. The same goes for a merged register,
+// whose value is folded through the cut along with everything else.
+// TODO: support enables, resets and init values by pushing their values through
+// the chain rather than refusing.
+static const char *unmovable_reason(FfData &ff)
+{
+	if (ff.has_ce || ff.has_aload || ff.has_sr)
+		return "it has an enable";
+	if (ff.has_arst || ff.has_srst)
+		return "it has a reset";
+	if (!ff.val_init.is_fully_undef())
+		return "it has an init value";
+	return nullptr;
+}
+
+static const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
+{
+	if (ff.cell->type != ref.cell->type)
+		return "a different cell type";
+	if (!ff.has_clk || ff.pol_clk != ref.pol_clk || sigmap(ff.sig_clk) != sigmap(ref.sig_clk))
+		return "a different clock";
+	// Widths are deliberately not compared: a $mux merges a 1-bit select
+	// register with its wide data registers.
+	return nullptr;
+}
+
+// A forward move across a multi-input cell only removes a register if every
+// other data input is fed by an equivalent register that nothing else reads.
+static std::vector<Merge> collect_merges(Module *module, SigMap &sigmap, FfInitVals &initvals,
+		Cell *flop, FfData &ref, const std::vector<ChainStep> &chain)
+{
+	std::vector<Merge> merges;
+	for (auto &step : chain) {
+		for (auto port : data_inputs(step.cell)) {
+			if (port == step.port)
+				continue;
+
+			IdString drv_port;
+			Cell *drv = unique_driver(module, sigmap, sigmap(step.cell->getPort(port)), drv_port);
+			if (!drv || drv_port != ID::Q || !drv->is_builtin_ff())
+				log_cmd_error("Input %s of cell %s is not driven by a flop, so flop %s cannot "
+						"move forward across it.\n",
+						log_id(port), log_id(step.cell), log_id(flop));
+
+			FfData ff(&initvals, drv);
+			if (const char *why = mismatch_reason(sigmap, ref, ff))
+				log_cmd_error("Flop %s on input %s of cell %s has %s than flop %s.\n",
+						log_id(drv), log_id(port), log_id(step.cell), why, log_id(flop));
+			if (const char *why = unmovable_reason(ff))
+				log_cmd_error("Flop %s on input %s of cell %s cannot be merged because %s.\n",
+						log_id(drv), log_id(port), log_id(step.cell), why);
+
+			IdString reader_port;
+			Cell *reader = unique_reader(module, sigmap, sigmap(drv->getPort(ID::Q)), reader_port);
+			if (reader != step.cell || reader_port != port)
+				log_cmd_error("Flop %s on input %s of cell %s has other readers, so it cannot "
+						"be merged away.\n",
+						log_id(drv), log_id(port), log_id(step.cell));
+
+			merges.push_back({drv, step.cell, port, drv->getPort(ID::D)});
+		}
+	}
+	return merges;
 }
 
 static void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbidden)
@@ -167,36 +283,54 @@ static void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbi
 	}
 }
 
-static void apply_buf_move(Module *module, Cell *flop, Cell *cut, bool forward)
+static void apply_move(Module *module, Cell *flop, Cell *cut)
 {
 	if (!flop->is_builtin_ff())
 		log_cmd_error("Cell %s is not a built-in flip-flop.\n", log_id(flop));
-	if (!is_buf(cut))
-		log_cmd_error("Cut cell %s is not a $buf (only buffer cuts are supported).\n", log_id(cut));
+	if (data_inputs(cut).empty())
+		log_cmd_error("Cut cell %s has type %s, which opt_retime cannot move across yet.\n",
+				log_id(cut), log_id(cut->type));
 	if (flop == cut)
 		log_cmd_error("Flop and cut must be different cells.\n");
 
-	FfData ff(nullptr, flop);
+	SigMap sigmap(module);
+	FfInitVals initvals(&sigmap, module);
+
+	FfData ff(&initvals, flop);
 	if (!ff.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
 		log_cmd_error("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
-	if (!cut->hasPort(ID::A) || !cut->hasPort(ID::Y))
-		log_cmd_error("Cut cell %s is missing A/Y ports.\n", log_id(cut));
 
-	SigMap sigmap(module);
-	// TODO: Generalize to beyond just $buf cells
-	std::vector<Cell *> chain = collect_buf_chain(module, sigmap, flop, cut, forward);
+	std::vector<ChainStep> chain = collect_chain(module, sigmap, flop, cut);
 
-	Cell *first = forward ? chain.front() : chain.back();
-	Cell *last = forward ? chain.back() : chain.front();
+	// The chain walk only follows a port when it carries the whole signal, so
+	// every register on the path already matches the width of the port it
+	// drives. What is left to check is the register the move leaves behind,
+	// which takes the width of the cut output.
+	for (auto &step : chain)
+		if (!step.cell->hasPort(ID::Y))
+			log_cmd_error("Cell %s is missing port Y.\n", log_id(step.cell));
+
+	// Every cell on the chain except a $buf transforms the value the register
+	// holds, so the register must not be holding one. This covers both the
+	// multi-input cells, whose merges fold several stored values together, and
+	// the single-input ones like $not, where nothing merges and the width may
+	// not even change, but the stored value is still wrong on the far side.
+	for (auto &step : chain)
+		if (!is_buf(step.cell))
+			if (const char *why = unmovable_reason(ff))
+				log_cmd_error("Flop %s cannot move across cell %s because %s, which the move "
+						"would have to push through the cell.\n",
+						log_id(flop), log_id(step.cell), why);
+
+	std::vector<Merge> merges = collect_merges(module, sigmap, initvals, flop, ff, chain);
+
+	ChainStep first_step = chain.front();
+	Cell *first = first_step.cell;
+	Cell *last = chain.back().cell;
 
 	SigSpec d = flop->getPort(ID::D);
 	SigSpec q = flop->getPort(ID::Q);
-	SigSpec a = first->getPort(ID::A);
 	SigSpec y = last->getPort(ID::Y);
-
-	// TODO Generalize to support bit-width differences
-	if (GetSize(d) != GetSize(q) || GetSize(a) != GetSize(y) || GetSize(q) != GetSize(a))
-		log_cmd_error("Width mismatch between flop %s and cut %s.\n", log_id(flop), log_id(cut));
 
 	SigSpec map_q = sigmap(q);
 	SigSpec map_y = sigmap(y);
@@ -205,24 +339,44 @@ static void apply_buf_move(Module *module, Cell *flop, Cell *cut, bool forward)
 	pool<SigBit> forbidden = wire_bits(map_q);
 	for (auto bit : wire_bits(map_y))
 		forbidden.insert(bit);
+	for (auto &merge : merges)
+		for (auto bit : wire_bits(sigmap(merge.flop->getPort(ID::Q))))
+			forbidden.insert(bit);
 
 	// TODO relax control checks
 	check_controls(ff, sigmap, forbidden);
 
-	if (forward) {
-		first->setPort(ID::A, d);
-		flop->setPort(ID::Q, y);
-		last->setPort(ID::Y, q);
-		flop->setPort(ID::D, q);
-	} else {
-		flop->setPort(ID::D, a);
-		flop->setPort(ID::Q, y);
-		first->setPort(ID::A, y);
-		last->setPort(ID::Y, q);
+	// The register keeps its cell, so the caller can still find the flop it
+	// named, but it takes the width of the cut output. Where that width is
+	// unchanged the old Q net is reused as the link from the cut to the
+	// register, which is what the pass has always done for $buf chains.
+	SigSpec link = q;
+	if (GetSize(y) != GetSize(q)) {
+		// A register holding a value has already been refused above: only a
+		// non-$buf chain can change the width, and that is exactly the case
+		// that check covers. What is left is the mechanics of resizing.
+		if (ff.is_fine)
+			log_cmd_error("Flop %s is a single-bit cell and cannot widen to %d bits.\n",
+					log_id(flop), GetSize(y));
+		if (!flop->hasParam(ID::WIDTH))
+			log_cmd_error("Flop %s has no WIDTH parameter to resize.\n", log_id(flop));
+		log("Resizing flop %s from %d to %d bits.\n", log_id(flop), GetSize(q), GetSize(y));
+		link = module->addWire(module->uniquify(flop->name.str() + "_retimed"), GetSize(y));
+		flop->setParam(ID::WIDTH, GetSize(y));
+	}
+	first->setPort(first_step.port, d);
+	flop->setPort(ID::Q, y);
+	last->setPort(ID::Y, link);
+	flop->setPort(ID::D, link);
+
+	// The merged flops disappear into the one flop the move leaves behind.
+	for (auto &merge : merges) {
+		merge.cell->setPort(merge.port, merge.sig_d);
+		module->remove(merge.flop);
 	}
 
-	log("Retimed %s %s across %d $buf cell(s) ending at %s.\n",
-			log_id(flop), forward ? "forward" : "backward", GetSize(chain), log_id(cut));
+	log("Retimed %s forward across %d cell(s) ending at %s, merging %d flop(s).\n",
+			log_id(flop), GetSize(chain), log_id(cut), GetSize(merges));
 }
 
 struct OptRetimePass : public Pass {
@@ -232,23 +386,40 @@ struct OptRetimePass : public Pass {
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    opt_retime -flop <cell> -cut <cell> -forward|-backward [selection]\n");
+		log("    opt_retime -flop <cell> -cut <cell> -forward [selection]\n");
 		log("\n");
-		log("This pass retimes one register across a chain of $buf cells.\n");
+		log("This pass retimes one register forward across a chain of combinational\n");
+		log("cells. Only forward moves are supported: -backward is rejected.\n");
 		log("\n");
 		log("    -flop <cell>\n");
 		log("        register to move.\n");
 		log("\n");
 		log("    -cut <cell>\n");
-		log("        $buf on the after-path (forward) or before-path (backward).\n");
-		log("        May be one or more cells away; every $buf between the flop\n");
-		log("        and the cut moves with it. The path must be a unique chain.\n");
+		log("        cell on the after-path of the register. May be one or more\n");
+		log("        cells away; every cell between the flop and the cut moves with\n");
+		log("        it. The path must be a unique chain. Supported cut types are\n");
+		log("        $buf, $mux, $add, $sub, $and, $or, $xor, $xnor, $eq, $ne,\n");
+		log("        $lt, $not and the $reduce_* cells. Every input of the cut\n");
+		log("        counts as a data input, the $mux select included, so all of\n");
+		log("        them have to be registered.\n");
 		log("\n");
 		log("    -forward\n");
-		log("        move the register downstream, past -cut.\n");
+		log("        move the register downstream, past -cut. Required. Where the\n");
+		log("        path runs through a cell with several data inputs, the\n");
+		log("        registers on the other inputs are merged into the moved\n");
+		log("        register, so they must share its clock and must not be read\n");
+		log("        anywhere else. The moved register keeps its cell but takes the\n");
+		log("        width of the cut output, so a move across a reduction narrows\n");
+		log("        it, and a move across an adder that keeps its carry, or one\n");
+		log("        entered on a $mux select, widens it.\n");
 		log("\n");
-		log("    -backward\n");
-		log("        move the register upstream, past -cut.\n");
+		log("        A $buf is the identity, so it passes the register's stored\n");
+		log("        value through untouched. Every other cut transforms it, and\n");
+		log("        the pass cannot yet recompute it, so moving across one needs a\n");
+		log("        plain clocked register with no enable, reset or init value.\n");
+		log("\n");
+		log("A register read by more than one cell blocks the path walk. Run\n");
+		log("splitfanout on it first to get a fanout-1 copy to move.\n");
 		log("\n");
 	}
 
@@ -257,7 +428,7 @@ struct OptRetimePass : public Pass {
 		log_header(design, "Executing OPT_RETIME pass.\n");
 
 		std::string flop, cut_cell;
-		bool forward = false, backward = false;
+		bool forward = false;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -273,10 +444,13 @@ struct OptRetimePass : public Pass {
 				forward = true;
 				continue;
 			}
-			if (args[argidx] == "-backward") {
-				backward = true;
-				continue;
-			}
+			// Backward retiming was dropped: a backward move has to split the
+			// register onto every data input of the cut, which is a different
+			// transform than the merge a forward move does. Reject it here
+			// rather than silently doing something else.
+			if (args[argidx] == "-backward")
+				log_cmd_error("Backward moves are not supported, opt_retime only moves "
+						"registers forward.\n");
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -285,8 +459,8 @@ struct OptRetimePass : public Pass {
 			log_cmd_error("Missing required -flop <cell> option.\n");
 		if (cut_cell.empty())
 			log_cmd_error("Missing required -cut <cell> option.\n");
-		if (forward == backward)
-			log_cmd_error("Must specify exactly one of -forward or -backward.\n");
+		if (!forward)
+			log_cmd_error("Missing required -forward option.\n");
 
 		Module *module = nullptr;
 		Cell *flop_cell = nullptr;
@@ -306,11 +480,10 @@ struct OptRetimePass : public Pass {
 		if (!cut)
 			log_cmd_error("Cut cell '%s' not found in module %s.\n", cut_cell.c_str(), log_id(module));
 
-		log("Move: module=%s flop=%s direction=%s cut=%s\n",
-				log_id(module), log_id(flop_cell), forward ? "forward" : "backward", log_id(cut));
-		
-	 // TODO: Generalize to beyong just $buf cells
-		apply_buf_move(module, flop_cell, cut, forward);
+		log("Move: module=%s flop=%s direction=forward cut=%s\n",
+				log_id(module), log_id(flop_cell), log_id(cut));
+
+		apply_move(module, flop_cell, cut);
 	}
 } OptRetimePass;
 

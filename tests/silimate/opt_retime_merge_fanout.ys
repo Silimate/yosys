@@ -1,0 +1,24 @@
+# A forward move across an $add deletes the registers on the operands it
+# merges. If one of them is read somewhere else, deleting it would change that
+# reader, so the move has to be refused rather than applied.
+#
+# Split out from opt_retime_add.ys because logger -expect error ends the run,
+# so only one expected error fits per file.
+design -reset
+read_verilog -icells <<EOF
+module tapped(input clk, input [7:0] a, b, output [7:0] q, tap);
+  wire [7:0] ra, rb, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $buf #(.WIDTH(8)) bt (.A(rb), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top tapped
+check -assert
+# rb feeds the adder and the tap, so fb cannot be merged away
+select -assert-count 2 w:rb %co c:* %i
+logger -expect error "Flop fb on input B of cell a0 has other readers" 1
+opt_retime -flop fa -cut a0 -forward

@@ -1,0 +1,21 @@
+# Design test for opt_retime_shift.v. Forward moves only for now.
+#
+# Shifts are not supported cuts yet, so all this pins is the refusal. Two of
+# the three things this design was built to exercise are now handled elsewhere:
+# width-changing moves are supported (s_const widens 8 bits to 11), and the
+# fanout on rd can be dealt with by running splitfanout on fd first. What is
+# left is the cut type itself, plus the rule that a shift amount is control and
+# not data, so -flop famt -cut s_var -forward must stay refused.
+#
+# Note the amount still has to be registered and merged, the same way a $mux
+# select does: reg(A) >> reg(B) only equals reg(A >> B) if both are registered.
+#
+# logger -expect error exits yosys successfully, so it has to come last.
+design -reset
+read_verilog -icells opt_retime_shift.v
+hierarchy -top retime_shift
+check -assert
+# the fanout this design is here for, which the refusal below hides for now
+select -assert-count 2 w:rd %co c:* %i
+logger -expect error "Cut cell s_var has type \$shr, which opt_retime cannot move across yet" 1
+opt_retime -flop fd -cut s_var -forward

@@ -1,0 +1,29 @@
+# Design test for opt_retime_acc.v. Forward moves only for now.
+#
+# $add cuts are supported, so this move gets further than the other frontier
+# tests: it walks the after-path and stops there, because acc is read by both
+# a_acc and b_out and the walk only follows single-reader nets. A register in a
+# loop always has at least two readers, the operator and whatever observes it.
+#
+# The fanout itself is not what this category is waiting on. A caller can run
+# splitfanout on the register first and retime the fanout-1 copy; that is a
+# proven-equivalent flow and it leaves the register count unchanged, since the
+# split adds one and the merge removes one. What is missing is reset support:
+# f_acc holds a reset value, and moving it past the adder changes what the
+# accumulator resets to, so the pass would have to rewrite SRST_VALUE. Today it
+# refuses, because merging a register that holds a reset value is not
+# supported.
+#
+# TODO: combine reset and init values through the cut cell, then this becomes a
+# real move via splitfanout.
+#
+# logger -expect error exits yosys successfully, so it has to come last.
+design -reset
+read_verilog -icells opt_retime_acc.v
+hierarchy -top retime_acc
+check -assert
+# the two readers that stop the walk, on both loops
+select -assert-count 2 w:acc %co c:* %i
+select -assert-count 2 w:cnt %co c:* %i
+logger -expect error "Cut a_acc is not on the after-path of flop f_acc" 1
+opt_retime -flop f_acc -cut a_acc -forward

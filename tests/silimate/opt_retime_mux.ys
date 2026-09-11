@@ -1,0 +1,128 @@
+# Design test for opt_retime_mux.v.
+#
+# $mux is the first supported cut with a port that is not an operand, and the
+# select turns out not to be an exception: reg(S) ? reg(B) : reg(A) equals
+# reg(S ? B : A) only when all three inputs are registered. Leaving fs in place
+# would make the output depend on sel one cycle later than on a and b. So a
+# forward move across m0 folds fa, fb and fs into a single register, whichever
+# of the three -flop names.
+#
+# Naming fs is the interesting case: the surviving register has to widen from
+# the 1-bit select to the 8-bit mux output.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fa across m0, merging fb and fs away"
+log -push
+design -reset
+read_verilog -icells opt_retime_mux.v
+hierarchy -top retime_mux
+check -assert
+select -assert-count 4 t:$dff
+opt_retime -flop fa -cut m0 -forward
+check -assert
+# four registers, 8+8+1+8 = 25 bits, became two, 8+8 = 16
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fs
+# m0 now reads the module inputs directly, sel included
+select -assert-count 1 c:m0 %x:+[A] w:a %i
+select -assert-count 1 c:m0 %x:+[B] w:b %i
+select -assert-count 1 c:m0 %x:+[S] w:sel %i
+select -assert-count 1 c:m0 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:m %i
+# downstream is untouched
+select -assert-count 1 c:b0 %x:+[A] w:m %i
+rename retime_mux gate
+read_verilog -icells opt_retime_mux.v
+rename retime_mux gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fs across m0, widening the select register to 8 bits"
+log -push
+design -reset
+read_verilog -icells opt_retime_mux.v
+hierarchy -top retime_mux
+# the chain enters m0 on S, so the register that survives is the 1-bit one
+opt_retime -flop fs -cut m0 -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fa
+select -assert-count 0 c:fb
+select -assert-count 1 c:m0 %x:+[A] w:a %i
+select -assert-count 1 c:m0 %x:+[B] w:b %i
+select -assert-count 1 c:m0 %x:+[S] w:sel %i
+# the old Q net rs was 1 bit, so the link from m0 is a fresh 8-bit wire and
+# WIDTH is rewritten, which check -assert would catch if it were not
+select -assert-count 1 c:m0 %x:+[Y] w:fs_retimed %i
+select -assert-count 1 c:fs %x:+[D] w:fs_retimed %i
+select -assert-count 1 c:fs %x:+[Q] w:m %i
+rename retime_mux gate
+read_verilog -icells opt_retime_mux.v
+rename retime_mux gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fa across b0, a mixed \$mux + \$buf chain"
+log -push
+design -reset
+read_verilog -icells opt_retime_mux.v
+hierarchy -top retime_mux
+opt_retime -flop fa -cut b0 -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fs
+# m0 -> b0 -> fa: the register ends up past both cells
+select -assert-count 1 c:m0 %x:+[S] w:sel %i
+select -assert-count 1 c:m0 %x:+[Y] w:m %i
+select -assert-count 1 c:b0 %x:+[A] w:m %i
+select -assert-count 1 c:b0 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:mb %i
+select -assert-count 1 c:fq %x:+[D] w:mb %i
+rename retime_mux gate
+read_verilog -icells opt_retime_mux.v
+rename retime_mux gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to be last.
+#
+# This is the tripwire for treating S as a control port that gets left behind.
+# If S were dropped from the cut's data inputs, this move would be accepted and
+# would silently change when the output samples sel.
+#
+# TODO: a $pmux design once this is settled; a one-hot select changes the rules.
+log -header "Refused: the select has to be registered too"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module liveselect(input clk, input [7:0] a, b, input sel, output [7:0] q);
+  wire [7:0] ra, rb, m;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $mux #(.WIDTH(8)) m0 (.A(ra), .B(rb), .S(sel), .Y(m));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(m), .Q(q));
+endmodule
+EOF
+hierarchy -top liveselect
+check -assert
+logger -expect error "Input S of cell m0 is not driven by a flop" 1
+opt_retime -flop fa -cut m0 -forward

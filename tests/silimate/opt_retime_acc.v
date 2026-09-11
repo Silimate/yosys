@@ -8,10 +8,10 @@
 // whatever observes it), so both loops here need multi-fanout support.
 // f_acc has a synchronous reset on purpose: moving it across a_acc changes the
 // value the accumulator resets to, so the pass must adjust SRST_VALUE or
-// refuse. Moves it should cover once the pass grows past buffers:
-//   -flop f_acc -cut a_acc -forward  : legal only if it stays inside the loop
-//   -flop f_cnt -cut a_cnt -backward : same shape with a constant operand
-//   -flop f_acc -cut b_acc -forward  : wraps the loop, must not lose the reset
+// refuse. Forward moves it should cover once the pass grows past buffers:
+//   -flop f_acc -cut a_acc -forward : legal only if it stays inside the loop
+//   -flop f_cnt -cut a_cnt -forward : same shape with a constant operand
+//   -flop f_acc -cut b_acc -forward : wraps the loop, must not lose the reset
 
 module retime_acc (clk, rst, x, acc_o, cnt_o);
   input clk, rst;

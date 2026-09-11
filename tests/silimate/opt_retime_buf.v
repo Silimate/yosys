@@ -3,12 +3,19 @@
 // Liberty DFFHQx4 / BUFx2 become $dff / $buf so the Yosys test needs no ASAP7.
 //
 // opt_retime designs in this directory, in the order the pass should learn them:
-//   opt_retime_buf.v        $buf chains (this file)
-//   opt_retime_add.v    $add / $sub, the first non-$buf cut
-//   opt_retime_mux.v    $mux, control port vs data ports
+//   opt_retime_buf.v    $buf chains (this file)                     supported
+//   opt_retime_add.v    $add / $sub, the first non-$buf cuts        supported
+//   opt_retime_mux.v    $mux, a port that is not an operand         supported
+//   opt_retime_cmp.v    comparators and reductions: wide in, one bit out  supported
 //   opt_retime_shift.v  constant and variable shifts: fanout and width growth
-//   opt_retime_cmp.v    comparators and reductions: wide in, one bit out
 //   opt_retime_acc.v    accumulator / incrementer: the path is a cycle
+//
+// opt_retime_ops.ys covers the sibling operators ($ne, $lt, $xnor and the rest
+// of the $reduce_* family) with designs inline in the script, since they add no
+// new rule and only differ in whether the initial state survives the move.
+//
+// Forward moves only. Backward moves are out of scope: the pass rejects
+// -backward while parsing arguments, so do not add designs or tests for them.
 //
 // Memories, FSMs and multipliers are out of scope: do not add designs for them.
 // TODO: revisit after the five categories above pass. $mul is mostly an adder

@@ -1,5 +1,8 @@
 # Hand-written first moves on the retime_probe chain:
 #   f0 -> b0 -> b1 -> f1 -> b2 -> b3 -> f2
+#
+# Backward moves are out of scope, so the two backward moves this file used to
+# cover are replaced by the refusal at the bottom.
 log -header "Forward: push f1 across b2"
 log -push
 design -reset
@@ -21,26 +24,6 @@ design -reset
 log -pop
 
 # forward result: f0 -> b0 -> b1 -> b2 -> f1 -> b3 -> f2
-
-log -header "Backward: push f1 across b1"
-log -push
-design -reset
-read_verilog -icells opt_retime_buf.v
-hierarchy -top retime_probe
-check -assert
-opt_retime -flop f1 -cut b1 -backward
-check -assert
-select -assert-count 3 t:$dff
-select -assert-count 4 t:$buf
-# f1 then b1: f1.D=m0, f1.Q=n0, b1.A=n0, b1.Y=q1
-select -assert-count 1 c:f1 %x:+[D] w:m0 %i
-select -assert-count 1 c:f1 %x:+[Q] w:n0 %i
-select -assert-count 1 c:b1 %x:+[A] w:n0 %i
-select -assert-count 1 c:b1 %x:+[Y] w:q1 %i
-design -reset
-log -pop
-
-# backward result: f0 -> b0 -> f1 -> b1 -> b2 -> b3 -> f2
 
 log -header "Forward: push f1 across b3 (two buffers)"
 log -push
@@ -64,25 +47,15 @@ log -pop
 
 # forward result: f0 -> b0 -> b1 -> b2 -> b3 -> f1 -> f2
 
-
-log -header "Backward: push f1 across b0 (two buffers)"
-log -push
+# -backward is rejected while parsing arguments, before the flop or the cut is
+# even looked up, so this move is refused even though it would otherwise be
+# legal on a $buf chain.
+#
+# logger -expect error exits yosys successfully, so it has to come last.
+log -header "Backward: refused"
 design -reset
 read_verilog -icells opt_retime_buf.v
 hierarchy -top retime_probe
 check -assert
-opt_retime -flop f1 -cut b0 -backward
-check -assert
-select -assert-count 3 t:$dff
-select -assert-count 4 t:$buf
-# f1 -> b0 -> b1: f1.D=q0, f1.Q=n0, b0.A=n0, b1.Y=q1
-select -assert-count 1 c:f1 %x:+[D] w:q0 %i
-select -assert-count 1 c:f1 %x:+[Q] w:n0 %i
-select -assert-count 1 c:b0 %x:+[A] w:n0 %i
-select -assert-count 1 c:b0 %x:+[Y] w:m0 %i
-select -assert-count 1 c:b1 %x:+[A] w:m0 %i
-select -assert-count 1 c:b1 %x:+[Y] w:q1 %i
-design -reset
-log -pop
-
-# backward result: f0 -> f1 -> b0 -> b1 -> b2 -> b3 -> f2
+logger -expect error "Backward moves are not supported" 1
+opt_retime -flop f1 -cut b1 -backward

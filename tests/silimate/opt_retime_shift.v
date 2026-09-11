@@ -3,11 +3,11 @@
 //   famt -> ramt, a shift-amount bus that must not move with the data
 //   s_var  ($shr) keeps the width
 //   s_const ($shl) grows 8 bits to 11, so a moved flop changes width
-// Moves it should cover once the pass grows past buffers:
-//   -flop fd -cut s_var -forward    : needs multi-fanout support (rd has two
-//                                     readers), and famt must stay put
-//   -flop fq1 -cut s_const -backward: an 11-bit flop must become 8-bit
-//   -flop famt -cut s_var -forward  : amount is control, must refuse
+// Forward moves it should cover once the pass grows past buffers:
+//   -flop fd -cut s_var -forward   : needs splitfanout first (rd has two
+//                                    readers), then famt merges with it
+//   -flop famt -cut s_var -forward : the same move entered on B, which widens
+//                                    the surviving flop from 3 bits to 8
 
 module retime_shift (clk, d, amt, q0, q1);
   input clk;

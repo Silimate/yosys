@@ -1,0 +1,134 @@
+# Forward moves across $sub.
+#
+# Retiming does not care whether the operator commutes, only that every data
+# input is registered, so $sub takes the same path through the pass as $add.
+# It is worth its own test anyway: an operand mix-up in the merge would be
+# invisible on an $add and wrong here. Both moves below are proved against a
+# reference that still computes a - b, and a gold/gate pair differing only by
+# swapped operands does fail this same proof, so it is not a blind check.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fa across s0, the A operand"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module subdes(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $sub #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    s0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top subdes
+check -assert
+select -assert-count 3 t:$dff
+opt_retime -flop fa -cut s0 -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+# the operands keep their sides: a on A, b on B
+select -assert-count 1 c:s0 %x:+[A] w:a %i
+select -assert-count 1 c:s0 %x:+[B] w:b %i
+rename subdes gate
+read_verilog -sv <<EOF
+module subdes(input clk, input [7:0] a, b, output reg [7:0] q);
+  reg [7:0] d1;
+  always @(posedge clk) begin
+    d1 <= a - b;
+    q <= d1;
+  end
+endmodule
+EOF
+proc; opt_clean
+rename subdes gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: push fb across s0, the B operand"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module subdes(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $sub #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    s0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top subdes
+opt_retime -flop fb -cut s0 -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fa
+select -assert-count 1 c:s0 %x:+[A] w:a %i
+select -assert-count 1 c:s0 %x:+[B] w:b %i
+rename subdes gate
+read_verilog -sv <<EOF
+module subdes(input clk, input [7:0] a, b, output reg [7:0] q);
+  reg [7:0] d1;
+  always @(posedge clk) begin
+    d1 <= a - b;
+    q <= d1;
+  end
+endmodule
+EOF
+proc; opt_clean
+rename subdes gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# opt_retime_add.v ends in a $sub, so supporting it opens up the longest chain
+# those cells allow: fa across $add, $buf and $sub in one move, merging fb at
+# a0 and fc at a1. Four registers become two.
+log -header "Forward: fa across a1 in opt_retime_add.v, merging at two cells"
+log -push
+design -reset
+read_verilog -icells opt_retime_add.v
+hierarchy -top retime_add
+select -assert-count 4 t:$dff
+opt_retime -flop fa -cut a1 -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fc
+# each merged operand reaches its cell directly now
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:a1 %x:+[B] w:c %i
+select -assert-count 1 c:fa %x:+[Q] w:s1 %i
+rename retime_add gate
+read_verilog -icells opt_retime_add.v
+rename retime_add gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to be last.
+#
+# Moving fc on its own is not a legal retiming: the other input of a1 comes
+# from b0, a $buf, and the register on that path sits further upstream at fa.
+log -header "Refused: fc alone cannot cross a1"
+log -push
+design -reset
+read_verilog -icells opt_retime_add.v
+hierarchy -top retime_add
+logger -expect error "Input A of cell a1 is not driven by a flop" 1
+opt_retime -flop fc -cut a1 -forward

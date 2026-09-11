@@ -1,0 +1,167 @@
+# Fixture check for the opt_retime_*.v designs. This never runs opt_retime.
+#
+# The move tests miter a retimed netlist against the same design file it came
+# from, so they prove the move preserved whatever the design does, not that the
+# design does what its header claims. Nothing else ties these hand-written
+# icell netlists to their stated meaning, so that is what this file is for:
+# each design is proved equal to a behavioral reference. It is also the place
+# to look first when a move test fails for a reason that makes no sense.
+
+# ---------------------------------------------------------------------------
+log -header "opt_retime_buf.v: a three-deep shift register"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module retime_probe(input clk, input d, output reg q);
+  reg q0, q1;
+  always @(posedge clk) begin
+    q0 <= d;
+    q1 <= q0;
+    q  <= q1;
+  end
+endmodule
+EOF
+proc; opt_clean
+rename retime_probe gold
+read_verilog -icells opt_retime_buf.v
+rename retime_probe gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 6 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "opt_retime_add.v: (a + b) - c, one cycle in, one cycle out"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module retime_add(input clk, input [7:0] a, b, c, output reg [7:0] q);
+  reg [7:0] ra, rb, rc;
+  always @(posedge clk) begin
+    ra <= a; rb <= b; rc <= c;
+    q <= (ra + rb) - rc;
+  end
+endmodule
+EOF
+proc; opt_clean
+rename retime_add gold
+read_verilog -icells opt_retime_add.v
+rename retime_add gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 6 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "opt_retime_mux.v: sel picks b, matching \$mux Y = S ? B : A"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module retime_mux(input clk, input [7:0] a, b, input sel, output reg [7:0] q);
+  reg [7:0] ra, rb;
+  reg rs;
+  always @(posedge clk) begin
+    ra <= a; rb <= b; rs <= sel;
+    q <= rs ? rb : ra;
+  end
+endmodule
+EOF
+proc; opt_clean
+rename retime_mux gold
+read_verilog -icells opt_retime_mux.v
+rename retime_mux gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 6 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The interesting half of this one is q1: $shl with A_WIDTH 8 and Y_WIDTH 11
+# has to match a Verilog shift whose left operand is widened to 11 bits by the
+# assignment context before shifting.
+log -header "opt_retime_shift.v: variable right shift and widening left shift"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module retime_shift(input clk, input [7:0] d, input [2:0] amt,
+                    output reg [7:0] q0, output reg [10:0] q1);
+  reg [7:0] rd;
+  reg [2:0] ramt;
+  always @(posedge clk) begin
+    rd <= d; ramt <= amt;
+    q0 <= rd >> ramt;
+    q1 <= rd << 3;
+  end
+endmodule
+EOF
+proc; opt_clean
+rename retime_shift gold
+read_verilog -icells opt_retime_shift.v
+rename retime_shift gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 6 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "opt_retime_cmp.v: (a == b) & |c"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module retime_cmp(input clk, input [7:0] a, b, c, output reg q);
+  reg [7:0] ra, rb, rc;
+  always @(posedge clk) begin
+    ra <= a; rb <= b; rc <= c;
+    q <= (ra == rb) & (|rc);
+  end
+endmodule
+EOF
+proc; opt_clean
+rename retime_cmp gold
+read_verilog -icells opt_retime_cmp.v
+rename retime_cmp gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 6 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The interesting part here is that $sdff gives the reset priority over D, so
+# the reference has to be `rst ? 0 : acc + rx` and not the other way round.
+log -header "opt_retime_acc.v: resettable accumulator and free-running counter"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module retime_acc(input clk, rst, input [7:0] x,
+                  output [7:0] acc_o, output [3:0] cnt_o);
+  reg [7:0] rx, acc;
+  reg [3:0] cnt;
+  always @(posedge clk) begin
+    rx <= x;
+    acc <= rst ? 8'h00 : acc + rx;
+    cnt <= cnt + 1'b1;
+  end
+  assign acc_o = acc;
+  assign cnt_o = cnt;
+endmodule
+EOF
+proc; opt_clean
+rename retime_acc gold
+read_verilog -icells opt_retime_acc.v
+rename retime_acc gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
