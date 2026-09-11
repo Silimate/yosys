@@ -1,0 +1,151 @@
+# Init values folded through a move.
+#
+# An init value is what a register holds on its first cycle. A move has to
+# carry it to the far side of the chain as the value that cycle would have
+# produced there, so the pass evaluates the chain on constants: an init of 0
+# crossing a $not arrives as ~0, and a merge folds the other operands' init
+# values in alongside it. Only fully defined values are folded; a mix of
+# defined and undefined is refused, and that refusal is pinned in
+# opt_retime_cmp.ys next to the $not move that used to be refused outright.
+#
+# Two separate things have to happen, and the $buf chain in section 1 is here
+# because only one of them is arithmetic. A $buf needs no fold, being the
+# identity, but the value still has to move onto the register's new Q net.
+# Leaving it on the old net is not a no-op: that net is combinational after the
+# move, so the init is both ignored where it now sits and missing where it is
+# needed. That case was accepted and silently wrong before folding existed, and
+# the direct assertions below are what would catch it coming back.
+#
+# Every value is asserted directly as well as proved. A sequential proof only
+# pins down an init value if something downstream actually looks at the first
+# cycle, so a proof alone can pass over a wrong fold.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: init values relocated across \$buf and folded through merges"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module initmerge(input clk, input [7:0] a, b, c, d, e, input s_in,
+                 output [7:0] qbuf, qadd, qmux);
+  (* init = 8'h5a *) wire [7:0] rbuf;
+  (* init = 8'h03 *) wire [7:0] ra;
+  (* init = 8'h04 *) wire [7:0] rb;
+  (* init = 8'haa *) wire [7:0] rc;
+  (* init = 8'h55 *) wire [7:0] rd;
+  (* init = 1'b1  *) wire rs;
+  wire [7:0] mid, tail, sum, mx;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fbuf (.CLK(clk), .D(e), .Q(rbuf));
+  $buf #(.WIDTH(8)) b0 (.A(rbuf), .Y(mid));
+  $buf #(.WIDTH(8)) b1 (.A(mid),  .Y(tail));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqb (.CLK(clk), .D(tail), .Q(qbuf));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(sum));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqa (.CLK(clk), .D(sum), .Q(qadd));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fs (.CLK(clk), .D(s_in), .Q(rs));
+  $mux #(.WIDTH(8)) mm (.A(rc), .B(rd), .S(rs), .Y(mx));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqm (.CLK(clk), .D(mx), .Q(qmux));
+endmodule
+EOF
+hierarchy -top initmerge
+# miter -make_assert compares cycle 0, and two undefined registers are
+# independent free variables that need not agree there, so the observing
+# registers need a defined start as well. Set before the save, so gold and gate
+# get the same one.
+setattr -set init 8'h00 w:qbuf w:qadd w:qmux
+check -assert
+select -assert-count 9 t:$dff
+design -save orig
+opt_retime -flop fbuf -cut b1 -forward
+opt_retime -flop fa -cut a0 -forward
+opt_retime -flop fc -cut mm -forward
+check -assert
+select -assert-count 6 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fd
+select -assert-count 0 c:fs
+
+# A $buf is the identity, so the value is unchanged, but it has moved: it is on
+# the register's new Q net and gone from the net it used to drive.
+select -assert-count 1 w:tail a:init=8'h5a %i
+select -assert-count 0 w:rbuf a:init %i
+select -assert-count 0 w:mid  a:init %i
+# 8'h03 + 8'h04, folding the merged register's value in with the mover's
+select -assert-count 1 w:sum a:init=8'h07 %i
+select -assert-count 0 w:ra a:init %i
+select -assert-count 0 w:rb a:init %i
+# a select of 1 picks B, so 8'haa and 8'h55 fold to 8'h55. This is the only
+# fold that goes through the three-operand evaluation path.
+select -assert-count 1 w:mx a:init=8'h55 %i
+select -assert-count 0 w:rc a:init %i
+select -assert-count 0 w:rd a:init %i
+select -assert-count 0 w:rs a:init %i
+
+rename initmerge gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# no -set-init-zero: the point of the section is that the designs start from
+# the corresponding states the pass computed, not from zero
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: a folded init value that also changes width"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module initresize(input clk, input [7:0] a, b, c, output qred, output [8:0] qcar);
+  (* init = 8'h0f *) wire [7:0] rr;
+  (* init = 8'hff *) wire [7:0] rca;
+  (* init = 8'h01 *) wire [7:0] rcb;
+  wire red;
+  wire [8:0] car;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fr (.CLK(clk), .D(a), .Q(rr));
+  $reduce_or #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0)) r0 (.A(rr), .Y(red));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqr (.CLK(clk), .D(red), .Q(qred));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fca (.CLK(clk), .D(b), .Q(rca));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fcb (.CLK(clk), .D(c), .Q(rcb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(9), .A_SIGNED(0), .B_SIGNED(0))
+    c0 (.A(rca), .B(rcb), .Y(car));
+  $dff #(.WIDTH(9), .CLK_POLARITY(1'b1)) fqc (.CLK(clk), .D(car), .Q(qcar));
+endmodule
+EOF
+hierarchy -top initresize
+setattr -set init 1'b0 w:qred
+setattr -set init 9'h000 w:qcar
+check -assert
+design -save orig
+# the register narrows from 8 bits to 1, and the init narrows with it
+opt_retime -flop fr -cut r0 -forward
+# and here it widens from 8 to 9, because the $add keeps its carry
+opt_retime -flop fca -cut c0 -forward
+check -assert
+select -assert-count 4 t:$dff
+select -assert-count 0 c:fcb
+# |8'h0f is 1, so a value that was 8 bits wide arrives as a single bit. The
+# width of the folded value has to follow the cut output rather than the
+# register it came from, which check -assert above would catch either way.
+select -assert-count 1 w:red a:init=1'b1 %i
+select -assert-count 0 w:rr a:init %i
+# 8'hff + 8'h01 is 9'h100: the carry the wider output keeps is exactly the bit
+# a fold done at the old width would have dropped
+select -assert-count 1 w:car a:init=9'h100 %i
+select -assert-count 0 w:rca a:init %i
+select -assert-count 0 w:rcb a:init %i
+# the widened register reaches its cut through a fresh link wire
+select -assert-count 1 w:fca_retimed
+select -assert-count 1 c:fca %x:+[Q] w:car %i
+rename initresize gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop

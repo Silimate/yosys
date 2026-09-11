@@ -1,0 +1,109 @@
+# Clock enables on a moved register.
+#
+# An enable stores no value of its own, it only decides whether the register
+# updates, and holding commutes with a pure function: if the enable is low the
+# output keeps what it had, and f of an unchanged input is an unchanged f. So
+# the enable travels with the register and needs no folding. That is what
+# separates it from a reset or an init value, which are values the move would
+# have to recompute on the far side of the cut and so are still refused.
+#
+# The catch is that everything a move merges must share one enable. If one
+# input held while another updated, the cut would see a mix of old and new
+# operands, and the single register left behind could not reproduce it. Both
+# halves of that are pinned here: matching enables move, and a mismatch of
+# either the net or the polarity refuses.
+#
+# $dffe across a $buf already worked before enables were supported, because
+# the value-preservation guard only ever consulted non-$buf chain cells. What
+# is new is a $dffe across a cell that transforms the value.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$dffe across \$add and \$mux, the enable travelling along"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module enops(input clk, en, input [7:0] a, b, c, d, input s_in,
+             output [7:0] qadd, qmux);
+  wire [7:0] ra, rb, rc, rd, sum, mx;
+  wire rs;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(en), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(en), .D(b), .Q(rb));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fc (.CLK(clk), .EN(en), .D(c), .Q(rc));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fd (.CLK(clk), .EN(en), .D(d), .Q(rd));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fs (.CLK(clk), .EN(en), .D(s_in), .Q(rs));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(sum));
+  $mux #(.WIDTH(8))
+    m0 (.A(rc), .B(rd), .S(rs), .Y(mx));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqa (.CLK(clk), .D(sum), .Q(qadd));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqm (.CLK(clk), .D(mx),  .Q(qmux));
+endmodule
+EOF
+hierarchy -top enops
+check -assert
+select -assert-count 5 t:$dffe
+select -assert-count 2 t:$dff
+design -save orig
+opt_retime -flop fa -cut a0 -forward
+# entered on A, so this one merges both the other data inputs of the $mux,
+# including the 1-bit select register
+opt_retime -flop fc -cut m0 -forward
+check -assert
+# five enabled registers become two, 49 register bits become 32
+select -assert-count 2 t:$dffe
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fd
+select -assert-count 0 c:fs
+# the survivors kept their enable rather than dropping to a plain $dff
+select -assert-count 1 c:fa %x:+[EN] w:en %i
+select -assert-count 1 c:fc %x:+[EN] w:en %i
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:fa %x:+[Q] w:sum %i
+select -assert-count 1 c:m0 %x:+[A] w:c %i
+select -assert-count 1 c:m0 %x:+[B] w:d %i
+select -assert-count 1 c:m0 %x:+[S] w:s_in %i
+select -assert-count 1 c:fc %x:+[Q] w:mx %i
+rename enops gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# en is free stimulus, so the proof covers every pattern of holding and
+# updating, not just the cycles where the register happens to load. $add and
+# $mux both give zero from the all-zero state, so zero-init is fair.
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A mismatched enable polarity, which is the subtler half: EN_POLARITY is a
+# parameter rather than part of the cell type, so the cell-type check passes
+# and only the enable comparison catches it. fb updates when fa holds, so no
+# single register can stand in for both.
+#
+# logger -expect error exits yosys successfully, so it has to come last.
+design -reset
+read_verilog -icells <<EOF
+module enmix(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(en), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b0))
+    fb (.CLK(clk), .EN(en), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top enmix
+check -assert
+select -assert-count 2 t:$dffe
+logger -expect error "Flop fb on input B of cell a0 has a different enable than flop fa" 1
+opt_retime -flop fa -cut a0 -forward

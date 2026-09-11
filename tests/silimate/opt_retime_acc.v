@@ -7,8 +7,10 @@
 // A register in a loop is always read at least twice (by the operator and by
 // whatever observes it), so both loops here need multi-fanout support.
 // f_acc has a synchronous reset on purpose: moving it across a_acc changes the
-// value the accumulator resets to, so the pass must adjust SRST_VALUE or
-// refuse. Forward moves it should cover once the pass grows past buffers:
+// value the accumulator resets to, so SRST_VALUE has to be adjusted. The pass
+// folds reset values now (opt_retime_reset.ys), so what still blocks these
+// moves is the loop and the multi-fanout it forces, not the reset.
+// Forward moves it should cover once the pass grows past buffers:
 //   -flop f_acc -cut a_acc -forward : legal only if it stays inside the loop
 //   -flop f_cnt -cut a_cnt -forward : same shape with a constant operand
 //   -flop f_acc -cut b_acc -forward : wraps the loop, must not lose the reset

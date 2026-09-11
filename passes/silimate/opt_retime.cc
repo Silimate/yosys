@@ -20,11 +20,12 @@
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"
 #include "kernel/ff.h"
+#include "kernel/celltypes.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-static bool is_buf(Cell *cell)
+bool is_buf(Cell *cell)
 {
 	return cell->type.in(ID($buf), ID($_BUF_));
 }
@@ -42,7 +43,7 @@ static bool is_buf(Cell *cell)
 //
 // The same holds for $logic_and, $eqx, $neg and so on: one entry each, left out
 // until something tests them.
-static std::vector<IdString> data_inputs(Cell *cell)
+std::vector<IdString> data_inputs(Cell *cell)
 {
 	if (is_buf(cell))
 		return {ID::A};
@@ -58,7 +59,7 @@ static std::vector<IdString> data_inputs(Cell *cell)
 	return {};
 }
 
-static bool is_data_input(Cell *cell, IdString port)
+bool is_data_input(Cell *cell, IdString port)
 {
 	for (auto candidate : data_inputs(cell))
 		if (candidate == port)
@@ -83,7 +84,7 @@ struct Merge {
 	SigSpec sig_d;
 };
 
-static pool<SigBit> wire_bits(const SigSpec &sig)
+pool<SigBit> wire_bits(const SigSpec &sig)
 {
 	pool<SigBit> bits;
 	for (auto bit : sig) {
@@ -94,7 +95,7 @@ static pool<SigBit> wire_bits(const SigSpec &sig)
 	return bits;
 }
 
-static bool bits_overlap(const pool<SigBit> &bits, const SigSpec &sig)
+bool bits_overlap(const pool<SigBit> &bits, const SigSpec &sig)
 {
 	for (auto bit : sig)
 		if (bit.is_wire() && bits.count(bit))
@@ -102,7 +103,7 @@ static bool bits_overlap(const pool<SigBit> &bits, const SigSpec &sig)
 	return false;
 }
 
-static Cell *unique_reader(Module *module, SigMap &sigmap, const SigSpec &sig, IdString &port)
+Cell *unique_reader(Module *module, SigMap &sigmap, const SigSpec &sig, IdString &port)
 {
 	pool<SigBit> bits = wire_bits(sig);
 	Cell *found = nullptr;
@@ -134,7 +135,7 @@ static Cell *unique_reader(Module *module, SigMap &sigmap, const SigSpec &sig, I
 	return found;
 }
 
-static Cell *unique_driver(Module *module, SigMap &sigmap, const SigSpec &sig, IdString &port)
+Cell *unique_driver(Module *module, SigMap &sigmap, const SigSpec &sig, IdString &port)
 {
 	dict<SigBit, pair<Cell *, IdString>> drivers;
 	for (auto cell : module->cells()) {
@@ -165,7 +166,7 @@ static Cell *unique_driver(Module *module, SigMap &sigmap, const SigSpec &sig, I
 	return found;
 }
 
-static std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap, Cell *flop, Cell *cut)
+std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap, Cell *flop, Cell *cut)
 {
 	std::vector<ChainStep> chain;
 	pool<Cell *> seen;
@@ -193,30 +194,169 @@ static std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap, Cell
 	return chain;
 }
 
-// A move relocates the register's stored value across the chain, so it only
-// holds if the value survives the trip. That is free for a $buf, which is the
-// identity, but any other cell transforms it: moving an init value of 0 across
-// a $not would have to store ~0 instead. The same goes for a merged register,
-// whose value is folded through the cut along with everything else.
-// TODO: support enables, resets and init values by pushing their values through
-// the chain rather than refusing.
-static const char *unmovable_reason(FfData &ff)
+// Controls a move cannot relocate. Both of these load a value into the register
+// from a net rather than from a parameter, so carrying them across a cut would
+// mean building logic to transform that net rather than folding a constant.
+//
+// A clock enable is deliberately absent: it stores no value of its own, it only
+// decides whether the register updates. Holding commutes with a pure function,
+// since f of an unchanged input is an unchanged f, so the enable travels with
+// the register untouched.
+const char *unmovable_reason(FfData &ff)
 {
-	if (ff.has_ce || ff.has_aload || ff.has_sr)
-		return "it has an enable";
-	if (ff.has_arst || ff.has_srst)
-		return "it has a reset";
-	if (!ff.val_init.is_fully_undef())
-		return "it has an init value";
+	if (ff.has_aload)
+		return "it has an async load";
+	if (ff.has_sr)
+		return "it has a set/reset";
 	return nullptr;
 }
 
-static const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
+// Which of a register's stored values a fold is carrying. All three travel the
+// same way, and differ only in where the operands' copies are read from.
+enum class FoldKind { Init, Srst, Arst };
+
+const char *fold_kind_name(FoldKind kind)
 {
-	if (ff.cell->type != ref.cell->type)
-		return "a different cell type";
+	switch (kind) {
+	case FoldKind::Srst:
+		return "sync reset";
+	case FoldKind::Arst:
+		return "async reset";
+	default:
+		return "init";
+	}
+}
+
+// The value a data input of a chain cell contributes to a fold: a merged
+// register's copy of it, or a constant operand, which holds its own value on
+// every cycle, reset cycles and the first cycle alike. Only called once
+// collect_merges has established that every input is one or the other.
+Const operand_value(Module *module, SigMap &sigmap, FfInitVals &initvals, Cell *cell,
+		IdString port, FoldKind kind)
+{
+	SigSpec in = sigmap(cell->getPort(port));
+	if (in.is_fully_const())
+		return in.as_const();
+	IdString drv_port;
+	Cell *drv = unique_driver(module, sigmap, in, drv_port);
+	log_assert(drv && drv_port == ID::Q);
+	FfData ff(&initvals, drv);
+	switch (kind) {
+	case FoldKind::Srst:
+		return ff.val_srst;
+	case FoldKind::Arst:
+		return ff.val_arst;
+	default:
+		return ff.val_init;
+	}
+}
+
+// A stored value has to reach the far side of the chain as the value that cycle
+// would have produced there, so the pass evaluates the chain on constants. An
+// init of 0 crossing a $not arrives as ~0; a reset value crosses the same way,
+// because reset ? f(RSTVAL) : f(x) is f of reset ? RSTVAL : x, so it is enough
+// for the register left behind to reset to f(RSTVAL). A merge folds the other
+// operands' copies in alongside, which is why they all have to reset on the
+// same cycles even though they need not reset to the same value.
+//
+// A $buf chain needs no arithmetic, being the identity, but the value still has
+// to move onto the register's new Q net rather than stay on the old one, so it
+// is not a special case here.
+Const fold_value(Module *module, SigMap &sigmap, FfInitVals &initvals, Cell *flop,
+		const std::vector<ChainStep> &chain, FoldKind kind, Const cur)
+{
+	for (auto &step : chain) {
+		if (is_buf(step.cell))
+			continue;
+
+		std::vector<Const> args;
+		for (auto port : data_inputs(step.cell))
+			args.push_back(port == step.port ? cur
+					: operand_value(module, sigmap, initvals, step.cell, port, kind));
+
+		bool err = false;
+		Const out;
+		if (GetSize(args) == 3)
+			out = CellTypes::eval(step.cell, args[0], args[1], args[2], &err);
+		else if (GetSize(args) == 2)
+			out = CellTypes::eval(step.cell, args[0], args[1], &err);
+		else
+			out = CellTypes::eval(step.cell, args[0], Const(), &err);
+		if (err)
+			log_cmd_error("Flop %s has a %s value that opt_retime cannot fold through "
+					"cell %s, because it cannot evaluate %s on constants.\n",
+					log_id(flop), fold_kind_name(kind), log_id(step.cell),
+					log_id(step.cell->type));
+		cur = out;
+	}
+	return cur;
+}
+
+// Fold one kind of stored value through the chain, if there is one to fold.
+// Returns false when every copy of it is undefined, meaning there is nothing to
+// carry. A mix of defined and undefined copies is refused rather than folded:
+// evaluating one against the other gives undefined bits back, which would
+// quietly discard what the defined side said.
+bool fold_through(Module *module, SigMap &sigmap, FfInitVals &initvals, Cell *flop,
+		const std::vector<ChainStep> &chain, FoldKind kind, Const start, Const &result)
+{
+	bool any = !start.is_fully_undef();
+	bool all = start.is_fully_def();
+	for (auto &step : chain) {
+		if (is_buf(step.cell))
+			continue;
+		for (auto port : data_inputs(step.cell)) {
+			if (port == step.port)
+				continue;
+			// A constant operand is not a stored value. It holds the same value
+			// on every cycle, so it feeds a fold that is already happening but
+			// never causes one, and it can never be the undefined half of a
+			// mix. Counting it here would demand a stored value of every
+			// register moving across a cell with a constant operand.
+			if (sigmap(step.cell->getPort(port)).is_fully_const())
+				continue;
+			Const val = operand_value(module, sigmap, initvals, step.cell, port, kind);
+			any = any || !val.is_fully_undef();
+			all = all && val.is_fully_def();
+		}
+	}
+	if (!any)
+		return false;
+	if (!all)
+		log_cmd_error("Flop %s cannot move because the move would fold %s values together "
+				"and only some of them are defined.\n", log_id(flop), fold_kind_name(kind));
+	result = fold_value(module, sigmap, initvals, flop, chain, kind, start);
+	return true;
+}
+
+const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
+{
+	// Compared as a set of controls rather than by cell type, because the
+	// single-bit cells spell their reset value into the type name and that
+	// value is exactly what a fold is allowed to change: $_SDFF_PP0_ and
+	// $_SDFF_PP1_ are the same kind of register for our purposes.
+	if (ff.has_clk != ref.has_clk || ff.has_ce != ref.has_ce ||
+			ff.has_srst != ref.has_srst || ff.has_arst != ref.has_arst ||
+			ff.has_aload != ref.has_aload || ff.has_sr != ref.has_sr ||
+			ff.is_fine != ref.is_fine)
+		return "a different set of controls";
 	if (!ff.has_clk || ff.pol_clk != ref.pol_clk || sigmap(ff.sig_clk) != sigmap(ref.sig_clk))
 		return "a different clock";
+	// Enables must agree exactly across everything a move merges. One register
+	// holding while another updates feeds the cut a mix of old and new inputs,
+	// and the single register left behind has no way to reproduce that.
+	if (ff.has_ce && (ff.pol_ce != ref.pol_ce || sigmap(ff.sig_ce) != sigmap(ref.sig_ce)))
+		return "a different enable";
+	// Resets have to agree on when they fire, for the same reason enables do,
+	// but deliberately not on what they load: the values are folded together
+	// exactly as init values are, so two registers resetting to different
+	// values on the same net merge into one resetting to f of both.
+	if (ff.has_srst && (ff.pol_srst != ref.pol_srst ||
+			sigmap(ff.sig_srst) != sigmap(ref.sig_srst)))
+		return "a different sync reset";
+	if (ff.has_arst && (ff.pol_arst != ref.pol_arst ||
+			sigmap(ff.sig_arst) != sigmap(ref.sig_arst)))
+		return "a different async reset";
 	// Widths are deliberately not compared: a $mux merges a 1-bit select
 	// register with its wide data registers.
 	return nullptr;
@@ -224,7 +364,7 @@ static const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
 
 // A forward move across a multi-input cell only removes a register if every
 // other data input is fed by an equivalent register that nothing else reads.
-static std::vector<Merge> collect_merges(Module *module, SigMap &sigmap, FfInitVals &initvals,
+std::vector<Merge> collect_merges(Module *module, SigMap &sigmap, FfInitVals &initvals,
 		Cell *flop, FfData &ref, const std::vector<ChainStep> &chain)
 {
 	std::vector<Merge> merges;
@@ -273,7 +413,7 @@ static std::vector<Merge> collect_merges(Module *module, SigMap &sigmap, FfInitV
 	return merges;
 }
 
-static void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbidden)
+void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbidden)
 {
 	auto check = [&](const SigSpec &sig, const char *what) {
 		if (bits_overlap(forbidden, sigmap(sig)))
@@ -295,7 +435,7 @@ static void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbi
 	}
 }
 
-static void apply_move(Module *module, Cell *flop, Cell *cut)
+void apply_move(Module *module, Cell *flop, Cell *cut)
 {
 	if (!flop->is_builtin_ff())
 		log_cmd_error("Cell %s is not a built-in flip-flop.\n", log_id(flop));
@@ -322,11 +462,10 @@ static void apply_move(Module *module, Cell *flop, Cell *cut)
 		if (!step.cell->hasPort(ID::Y))
 			log_cmd_error("Cell %s is missing port Y.\n", log_id(step.cell));
 
-	// Every cell on the chain except a $buf transforms the value the register
-	// holds, so the register must not be holding one. This covers both the
-	// multi-input cells, whose merges fold several stored values together, and
-	// the single-input ones like $not, where nothing merges and the width may
-	// not even change, but the stored value is still wrong on the far side.
+	// Every cell on the chain except a $buf transforms the values the register
+	// loads, and the ones left in unmovable_reason arrive on a net rather than
+	// as a constant, so there is nothing to fold and the move is refused. A
+	// $buf passes them through untouched and needs no such check.
 	for (auto &step : chain)
 		if (!is_buf(step.cell))
 			if (const char *why = unmovable_reason(ff))
@@ -335,6 +474,21 @@ static void apply_move(Module *module, Cell *flop, Cell *cut)
 						log_id(flop), log_id(step.cell), why);
 
 	std::vector<Merge> merges = collect_merges(module, sigmap, initvals, flop, ff, chain);
+
+	// Every stored value the register carries is folded through the chain
+	// before anything is rewired, while the merged registers are still around
+	// to read their copies from.
+	Const init_folded, srst_folded, arst_folded;
+	bool got_init = fold_through(module, sigmap, initvals, flop, chain,
+			FoldKind::Init, ff.val_init, init_folded);
+	bool got_srst = ff.has_srst && fold_through(module, sigmap, initvals, flop, chain,
+			FoldKind::Srst, ff.val_srst, srst_folded);
+	bool got_arst = ff.has_arst && fold_through(module, sigmap, initvals, flop, chain,
+			FoldKind::Arst, ff.val_arst, arst_folded);
+
+	std::vector<SigSpec> merged_q;
+	for (auto &merge : merges)
+		merged_q.push_back(sigmap(merge.flop->getPort(ID::Q)));
 
 	ChainStep first_step = chain.front();
 	Cell *first = first_step.cell;
@@ -358,28 +512,28 @@ static void apply_move(Module *module, Cell *flop, Cell *cut)
 	// TODO relax control checks
 	check_controls(ff, sigmap, forbidden);
 
-	// The register keeps its cell, so the caller can still find the flop it
+	// The register keeps its name, so the caller can still find the flop it
 	// named, but it takes the width of the cut output. Where that width is
 	// unchanged the old Q net is reused as the link from the cut to the
 	// register, which is what the pass has always done for $buf chains.
 	SigSpec link = q;
 	if (GetSize(y) != GetSize(q)) {
-		// A register holding a value has already been refused above: only a
-		// non-$buf chain can change the width, and that is exactly the case
-		// that check covers. What is left is the mechanics of resizing.
 		if (ff.is_fine)
 			log_cmd_error("Flop %s is a single-bit cell and cannot widen to %d bits.\n",
 					log_id(flop), GetSize(y));
-		if (!flop->hasParam(ID::WIDTH))
-			log_cmd_error("Flop %s has no WIDTH parameter to resize.\n", log_id(flop));
 		log("Resizing flop %s from %d to %d bits.\n", log_id(flop), GetSize(q), GetSize(y));
 		link = module->addWire(module->uniquify(flop->name.str() + "_retimed"), GetSize(y));
-		flop->setParam(ID::WIDTH, GetSize(y));
 	}
 	first->setPort(first_step.port, d);
-	flop->setPort(ID::Q, y);
 	last->setPort(ID::Y, link);
-	flop->setPort(ID::D, link);
+
+	// The old Q net has become the combinational link from the cut, and the
+	// merged registers are about to go, so both give up their init values: one
+	// left behind on either would be read as a register's first-cycle value by
+	// everything downstream. Done while sig_q still names the old net.
+	ff.remove_init();
+	for (auto &sig : merged_q)
+		initvals.remove_init(sig);
 
 	// The merged flops disappear into the one flop the move leaves behind.
 	for (auto &merge : merges) {
@@ -387,8 +541,37 @@ static void apply_move(Module *module, Cell *flop, Cell *cut)
 		module->remove(merge.flop);
 	}
 
+	// The register is rebuilt rather than rewired, because a folded reset value
+	// can change which cell it has to be: the single-bit types spell the value
+	// they reset to into their name, so a $_SDFF_PP0_ whose fold inverts that
+	// value has to come back as a $_SDFF_PP1_. Emitting from FfData picks the
+	// type from the values, resizes the parameters, and writes the init value
+	// onto the new Q net on the way. Undefined values still have to be resized,
+	// or emitting a widened register would assert on their width.
+	IdString flop_name = ff.name;
+	ff.sig_d = link;
+	ff.sig_q = y;
+	ff.width = GetSize(y);
+	ff.val_init = got_init ? init_folded : Const(State::Sx, GetSize(y));
+	if (ff.has_srst)
+		ff.val_srst = got_srst ? srst_folded : Const(State::Sx, GetSize(y));
+	if (ff.has_arst)
+		ff.val_arst = got_arst ? arst_folded : Const(State::Sx, GetSize(y));
+	if (!ff.emit())
+		log_cmd_error("Flop %s did not survive being rebuilt after the move.\n",
+				log_id(flop_name));
+
+	if (got_init)
+		log("Folded init value of flop %s to %s.\n", log_id(flop_name), log_signal(init_folded));
+	if (got_srst)
+		log("Folded sync reset value of flop %s to %s.\n", log_id(flop_name),
+				log_signal(srst_folded));
+	if (got_arst)
+		log("Folded async reset value of flop %s to %s.\n", log_id(flop_name),
+				log_signal(arst_folded));
+
 	log("Retimed %s forward across %d cell(s) ending at %s, merging %d flop(s).\n",
-			log_id(flop), GetSize(chain), log_id(cut), GetSize(merges));
+			log_id(flop_name), GetSize(chain), log_id(cut), GetSize(merges));
 }
 
 struct OptRetimePass : public Pass {
@@ -420,16 +603,23 @@ struct OptRetimePass : public Pass {
 		log("        move the register downstream, past -cut. Required. Where the\n");
 		log("        path runs through a cell with several data inputs, the\n");
 		log("        registers on the other inputs are merged into the moved\n");
-		log("        register, so they must share its clock and must not be read\n");
-		log("        anywhere else. The moved register keeps its cell but takes the\n");
-		log("        width of the cut output, so a move across a reduction narrows\n");
-		log("        it, and a move across an adder that keeps its carry, or one\n");
-		log("        entered on a $mux select, widens it.\n");
+		log("        register, so they must share its clock, its enable and the\n");
+		log("        net it resets on, and must not be read anywhere else. The\n");
+		log("        moved register keeps its name but takes the width of the cut\n");
+		log("        output, so a move across a reduction narrows it, and a move\n");
+		log("        across an adder that keeps its carry, or one entered on a\n");
+		log("        $mux select, widens it.\n");
 		log("\n");
-		log("        A $buf is the identity, so it passes the register's stored\n");
-		log("        value through untouched. Every other cut transforms it, and\n");
-		log("        the pass cannot yet recompute it, so moving across one needs a\n");
-		log("        plain clocked register with no enable, reset or init value.\n");
+		log("        A clock enable moves along with the register untouched,\n");
+		log("        since holding a value commutes with a pure function. Init\n");
+		log("        and reset values are folded instead: they are evaluated\n");
+		log("        through the chain so the register left behind starts at, and\n");
+		log("        resets to, what the cut would have made of the old value.\n");
+		log("        Merged registers need not reset to the same value, but they\n");
+		log("        do have to reset on the same net, and every value being\n");
+		log("        folded has to be defined. An async load or a set/reset\n");
+		log("        arrives on a net rather than as a constant, so there is\n");
+		log("        nothing to fold and the move is refused.\n");
 		log("\n");
 		log("A register read by more than one cell blocks the path walk. Run\n");
 		log("splitfanout on it first to get a fanout-1 copy to move.\n");

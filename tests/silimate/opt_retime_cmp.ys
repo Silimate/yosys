@@ -173,19 +173,26 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-log -header "Forward: \$not, where the initial state has to be mapped"
+log -header "Forward: \$not, where the pass folds the initial state"
 log -push
 design -reset
 read_verilog -icells <<EOF
 module notpath(input clk, input [7:0] a, output [7:0] q);
-  wire [7:0] ra, n;
+  (* init = 8'h00 *)
+  wire [7:0] ra;
+  wire [7:0] n;
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
   $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(n));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(n), .Q(q));
 endmodule
 EOF
 hierarchy -top notpath
+# both designs need a defined first cycle on the observing register too, since
+# miter -make_assert compares cycle 0 and two undefined registers are free
+# variables that need not agree
+setattr -set init 8'h00 w:q
 check -assert
+design -save orig
 opt_retime -flop fa -cut n0 -forward
 check -assert
 # $not is width-preserving and merges nothing, so the Q net is reused and no
@@ -195,28 +202,20 @@ select -assert-count 1 c:n0 %x:+[A] w:a %i
 select -assert-count 1 c:n0 %x:+[Y] w:ra %i
 select -assert-count 1 c:fa %x:+[D] w:ra %i
 select -assert-count 1 c:fa %x:+[Q] w:n %i
+# The move leaves fa holding ~value where it used to hold value, and the pass
+# now computes that: the init follows the register onto its new Q net as ~0.
+# Asserted here rather than left to the proof alone, because a proof can pass
+# on a wrong init if nothing downstream ever looks at the first cycle.
+select -assert-count 1 w:n a:init=8'hff %i
+# and it must not be left behind on the old net, which is combinational now
+select -assert-count 0 w:ra a:init %i
 rename notpath gate
-# The move leaves fa holding ~value where it used to hold value, so a fair
-# proof has to start the two designs from corresponding states. Computing that
-# correspondence is exactly what the pass cannot do yet, which is why the
-# refusal below exists. -set-init-zero would compare 0 against ~0 and fail,
-# with a counterexample that needs no input stimulus at all.
-setattr -set init 8'hff gate/w:n
-setattr -set init 8'h00 gate/w:q
-read_verilog -icells <<EOF
-module notpath(input clk, input [7:0] a, output [7:0] q);
-  wire [7:0] ra, n;
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
-  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(n));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(n), .Q(q));
-endmodule
-EOF
-rename notpath gold
-setattr -set init 8'h00 gold/w:ra
-setattr -set init 8'h00 gold/w:q
+design -import orig -as gold
 miter -equiv -flatten -make_assert gold gate miter
 hierarchy -top miter
 proc; opt
+# -set-init-zero would compare 0 against ~0 and fail with a counterexample that
+# needs no input stimulus at all, so the designs keep their own init values
 sat -seq 8 -prove-asserts -verify
 design -reset
 log -pop
@@ -224,26 +223,26 @@ log -pop
 # ---------------------------------------------------------------------------
 # logger -expect error exits yosys successfully, so this has to be last.
 #
-# A $buf is the identity, so it passes a stored value through untouched. Every
-# other cut transforms it, and the section above shows what that costs. $not is
-# the smallest case that needs the rule: it merges nothing and does not change
-# width, so neither the merge rule nor the resize path catches it. Without this
-# check the move is accepted and the result is not equivalent.
-# TODO: push the init and reset values through the chain instead of refusing.
-log -header "Refused: a stored value cannot cross a cell that transforms it"
+# Folding needs every init value it combines to be defined. Here fa has one and
+# fb does not, so the $add would fold 8'h0f against undefined bits and give
+# undefined bits back, throwing away what fa said about its first cycle. The
+# pass refuses rather than approximate it.
+log -header "Refused: an init value folded against an undefined one"
 log -push
 design -reset
 read_verilog -icells <<EOF
-module notinit(input clk, input [7:0] a, output [7:0] q);
-  (* init = 8'h00 *)
+module mixinit(input clk, input [7:0] a, b, output [7:0] q);
+  (* init = 8'h0f *)
   wire [7:0] ra;
-  wire [7:0] n;
+  wire [7:0] rb, s;
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
-  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(n));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(n), .Q(q));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
 endmodule
 EOF
-hierarchy -top notinit
+hierarchy -top mixinit
 check -assert
-logger -expect error "Flop fa cannot move across cell n0 because it has an init value" 1
-opt_retime -flop fa -cut n0 -forward
+logger -expect error "Flop fa cannot move because the move would fold init values together and only some of them are defined" 1
+opt_retime -flop fa -cut a0 -forward

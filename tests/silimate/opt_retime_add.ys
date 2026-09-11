@@ -95,9 +95,10 @@ log -pop
 # section in the file. The other merge rules get their own files, since only
 # one expected error fits per run.
 #
-# TODO: the pass still refuses to merge registers whose stored values the merge
-# would have to recompute: a different clock, an enable or reset, or an init
-# value. Those want a value-combining implementation and a test each.
+# TODO: the pass still refuses to merge registers on different clocks, and ones
+# with an async load or a set/reset, whose values arrive on a net rather than as
+# a constant and so cannot be folded. Enables, resets and init values are
+# handled: see opt_retime_enable.ys, opt_retime_reset.ys and opt_retime_init.ys.
 log -header "Refused: a forward move needs every operand registered"
 log -push
 design -reset

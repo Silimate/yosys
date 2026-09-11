@@ -10,11 +10,18 @@
 //   opt_retime_shift.v  shifts: fanout and width growth              supported
 //   opt_retime_acc.v    accumulator / incrementer: the path is a cycle
 //
-// opt_retime_ops.ys covers the comparators beyond $eq, $xnor, and the rest of
-// the $reduce_* family, with designs inline in the script, since they add no
-// new rule and only differ in whether the initial state survives the move.
-// opt_retime_const.ys covers constant operands, which need no register to
-// merge; it also proves this directory's one constant-amount move, s_const.
+// These scripts keep their designs inline, having nothing to do with the shape
+// of a path and so no need for a design of their own:
+//   opt_retime_ops.ys     the comparators beyond $eq, $xnor and the rest of
+//                         the $reduce_* family, which add no new rule and
+//                         differ only in whether the initial state survives
+//   opt_retime_const.ys   constant operands, which need no register to merge.
+//                         Also proves this directory's one constant-amount
+//                         move, s_const
+//   opt_retime_enable.ys  clock enables, which travel with the register
+//   opt_retime_init.ys    init values, which are folded through the chain
+//   opt_retime_reset.ys   reset values, folded the same way, and the
+//                         single-bit cells whose type changes when they are
 //
 // Forward moves only. Backward moves are out of scope: the pass rejects
 // -backward while parsing arguments, so do not add designs or tests for them.
