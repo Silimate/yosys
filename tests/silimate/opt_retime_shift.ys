@@ -1,21 +1,108 @@
-# Design test for opt_retime_shift.v. Forward moves only for now.
+# Design test for opt_retime_shift.v: $shl and $shr as cuts. Forward moves only.
 #
-# Shifts are not supported cuts yet, so all this pins is the refusal. Two of
-# the three things this design was built to exercise are now handled elsewhere:
-# width-changing moves are supported (s_const widens 8 bits to 11), and the
-# fanout on rd can be dealt with by running splitfanout on fd first. What is
-# left is the cut type itself, plus the rule that a shift amount is control and
-# not data, so -flop famt -cut s_var -forward must stay refused.
+# No new rule here. reg(A) >> reg(B) equals reg(A >> B) when both are
+# registered, so the amount is a data input that merges like a $mux select,
+# not a control port that stays put. Both shifts produce zero from the
+# all-zero state (checked with opt -full on constant inputs), so the ordinary
+# -set-init-zero proof is fair and no init mapping is needed.
 #
-# Note the amount still has to be registered and merged, the same way a $mux
-# select does: reg(A) >> reg(B) only equals reg(A >> B) if both are registered.
+# This design deliberately has rd read by both shifters, which blocks the path
+# walk, so splitfanout runs first. That is the workflow "help opt_retime"
+# points users at, and section 1 is the only place the suite exercises it.
+#
+# Still refused: the constant shift amount on s_const, pinned at the end.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$shr entered on the amount, after splitfanout"
+log -push
+design -reset
+read_verilog -icells opt_retime_shift.v
+hierarchy -top retime_shift
+check -assert
+# the fanout this design exists for: rd feeds both shifters
+select -assert-count 2 w:rd %co c:* %i
+select -assert-count 4 t:$dff
+# gold is saved before splitfanout, so the proof covers the split and the move
+# together rather than trusting splitfanout to be neutral
+design -save orig
+splitfanout
+# splitfanout names the copies fd/fd_splfo1; if that ever changes, this assert
+# fails here rather than further down with a confusing message
+select -assert-count 5 t:$dff
+select -assert-count 1 c:fd_splfo1
+select -assert-count 1 c:s_var %x:+[A] w:fd_splfon1 %i
+opt_retime -flop famt -cut s_var -forward
+check -assert
+# the amount register survives and absorbs the data register feeding s_var,
+# widening from 3 bits to 8 because it now holds the shifter output
+select -assert-count 4 t:$dff
+select -assert-count 0 c:fd_splfo1
+select -assert-count 1 c:s_var %x:+[A] w:d %i
+select -assert-count 1 c:s_var %x:+[B] w:amt %i
+select -assert-count 1 c:s_var %x:+[Y] w:famt_retimed %i
+select -assert-count 1 c:famt %x:+[D] w:famt_retimed %i
+select -assert-count 1 c:famt %x:+[Q] w:sr %i
+rename retime_shift gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$shl entered on the data, widening the register"
+log -push
+design -reset
+# Inline rather than reusing s_const, whose amount is a constant and so is
+# still refused. No fanout here, so this is the mirror of section 1: entered
+# on A, merging the amount, and the only place $shl's width growth is proved.
+read_verilog -icells <<EOF
+module shiftwide(input clk, input [7:0] a, input [2:0] amt, output [10:0] q);
+  wire [7:0] ra;
+  wire [2:0] ramt;
+  wire [10:0] sl;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1))  fa   (.CLK(clk), .D(a),   .Q(ra));
+  $dff #(.WIDTH(3), .CLK_POLARITY(1'b1))  famt (.CLK(clk), .D(amt), .Q(ramt));
+  $shl #(.A_WIDTH(8), .B_WIDTH(3), .Y_WIDTH(11), .A_SIGNED(0), .B_SIGNED(0))
+    s0 (.A(ra), .B(ramt), .Y(sl));
+  $dff #(.WIDTH(11), .CLK_POLARITY(1'b1)) fq   (.CLK(clk), .D(sl),  .Q(q));
+endmodule
+EOF
+hierarchy -top shiftwide
+check -assert
+select -assert-count 3 t:$dff
+design -save orig
+opt_retime -flop fa -cut s0 -forward
+check -assert
+# fa absorbs famt and widens 8 bits to 11: three registers become two, but the
+# register bit count is unchanged at 22, the widening paying for the merge
+select -assert-count 2 t:$dff
+select -assert-count 0 c:famt
+select -assert-count 1 c:s0 %x:+[A] w:a %i
+select -assert-count 1 c:s0 %x:+[B] w:amt %i
+select -assert-count 1 c:fa %x:+[Q] w:sl %i
+rename shiftwide gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A constant shift amount is not a flop, so the merge has nothing to take and
+# the move is refused. The fix is constant-operand support, not shift support:
+# reg(A) << 3 equals reg(A << 3) is just as true, the pass simply cannot build
+# the merge yet. Note this used to fail on the cut type instead.
 #
 # logger -expect error exits yosys successfully, so it has to come last.
 design -reset
 read_verilog -icells opt_retime_shift.v
 hierarchy -top retime_shift
-check -assert
-# the fanout this design is here for, which the refusal below hides for now
-select -assert-count 2 w:rd %co c:* %i
-logger -expect error "Cut cell s_var has type \$shr, which opt_retime cannot move across yet" 1
-opt_retime -flop fd -cut s_var -forward
+splitfanout
+select -assert-count 1 c:s_const
+logger -expect error "Input B of cell s_const is not driven by a flop" 1
+opt_retime -flop fd -cut s_const -forward

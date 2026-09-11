@@ -23,6 +23,11 @@
 #                                   a merge leaves dangling, but it also
 #                                   absorbs $buf cells, which makes it look
 #                                   like retiming deleted them)
+#   PRE    yosys commands to run  (default none. For designs whose move is only
+#          before the snapshot      legal after some preparation, e.g. PRE=
+#                                   splitfanout when the flop has two readers.
+#                                   Runs before the "before" snapshot so both
+#                                   pictures show the netlist the move saw)
 #   NETLISTSVG      path to a netlistsvg binary, if you already have one
 #   NETLISTSVG_DIR  where to install it otherwise
 #                   (default /tmp/retime_debug_netlistsvg, installed once)
@@ -65,6 +70,7 @@ retime="$retime opt_retime$args;"
 yosys=${YOSYS:-../../build/yosys}
 out=${OUT:-/tmp/retime_debug/$top}
 clean=${CLEAN:-0}
+pre=${PRE:-}
 nlsvg_dir=${NETLISTSVG_DIR:-/tmp/retime_debug_netlistsvg}
 
 if [ ! -x "$yosys" ]; then
@@ -95,6 +101,7 @@ fi
 	read_verilog -icells $design
 	hierarchy -top $top
 	check -assert
+	$pre
 	write_json $out/before.json
 	$show_before
 	$retime

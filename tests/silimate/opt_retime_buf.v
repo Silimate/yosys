@@ -7,7 +7,8 @@
 //   opt_retime_add.v    $add / $sub, the first non-$buf cuts        supported
 //   opt_retime_mux.v    $mux, a port that is not an operand         supported
 //   opt_retime_cmp.v    comparators and reductions: wide in, one bit out  supported
-//   opt_retime_shift.v  constant and variable shifts: fanout and width growth
+//   opt_retime_shift.v  variable shifts: fanout and width growth    supported
+//                       (a constant shift amount still refuses)
 //   opt_retime_acc.v    accumulator / incrementer: the path is a cycle
 //
 // opt_retime_ops.ys covers the comparators beyond $eq, $xnor, and the rest of

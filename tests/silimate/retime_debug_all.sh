@@ -20,11 +20,14 @@ cd "$(dirname "$0")"
 
 root=${OUT:-/tmp/retime_debug_all}
 
-# design | top | opt_retime args
+# design | top | opt_retime args | optional yosys commands to run first
 #
-# Only moves the pass accepts belong here. opt_retime_shift.v and _acc.v have
-# no legal move yet (the shifts and the accumulator loop are both still
-# refused), so they are absent on purpose. Add them as the pass learns them.
+# Only moves the pass accepts belong here. opt_retime_acc.v has no legal move
+# yet (the accumulator loop is still refused), so it is absent on purpose. Add
+# it as the pass learns it.
+#
+# The shift entry needs splitfanout first, since rd feeds both shifters; the
+# PRE field below runs before the move for exactly that.
 #
 # retime_debug_designs.v holds no committed designs, just copies of the modules
 # the .ys tests keep as inline heredocs, so those moves show up here too.
@@ -52,6 +55,7 @@ moves=(
 	"retime_debug_designs.v|bitwise|-flop fc -cut x0 -forward"
 	"retime_debug_designs.v|notpath|-flop fa -cut n0 -forward"
 	"retime_debug_designs.v|zeroinit|-flop fa -cut c_ne -forward + -flop fc -cut c_lt -forward + -flop fi -cut c_gt -forward + -flop fe -cut r_and -forward + -flop fg -cut r_xor -forward + -flop fh -cut r_bool -forward"
+	"opt_retime_shift.v|retime_shift|-flop famt -cut s_var -forward|splitfanout"
 	"retime_debug_designs.v|onesinit|-flop fa -cut c_xnor -forward + -flop fc -cut r_xnor -forward + -flop fd -cut c_le -forward + -flop fg -cut c_ge -forward"
 )
 
@@ -59,7 +63,7 @@ rm -rf "$root"
 mkdir -p "$root"
 
 for entry in "${moves[@]}"; do
-	IFS='|' read -r design top move <<<"$entry"
+	IFS='|' read -r design top move pre <<<"$entry"
 	# Spelling out every move stops being readable past a couple of them.
 	# grep -c exits 1 on a zero count, which set -e would treat as fatal
 	nmoves=$(( $(echo "$move" | tr ' ' '\n' | grep -c '^+$' || true) + 1 ))
@@ -69,7 +73,7 @@ for entry in "${moves[@]}"; do
 		label=$(echo "$top $move" | sed 's/-flop //g; s/-cut //g; s/ + /_then_/g; s/-//g; s/ /_/g')
 	fi
 	echo "=== $top: $move"
-	OUT="$root/$label" ./retime_debug.sh "$design" "$top" $move >"$root/$label.log" 2>&1
+	OUT="$root/$label" PRE="${pre:-}" ./retime_debug.sh "$design" "$top" $move >"$root/$label.log" 2>&1
 	grep -E '^(Retimed|Resizing) ' "$root/$label.log" | sed 's/^/  /' || true
 done
 

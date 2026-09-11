@@ -1,13 +1,15 @@
 // Shifters: fanout and width growth.
 //   fd -> rd, read by both shifters (unique_reader() rejects this today)
-//   famt -> ramt, a shift-amount bus that must not move with the data
+//   famt -> ramt, a shift-amount bus that merges like any other data input
 //   s_var  ($shr) keeps the width
 //   s_const ($shl) grows 8 bits to 11, so a moved flop changes width
-// Forward moves it should cover once the pass grows past buffers:
+// Forward moves, both proved in opt_retime_shift.ys:
 //   -flop fd -cut s_var -forward   : needs splitfanout first (rd has two
 //                                    readers), then famt merges with it
 //   -flop famt -cut s_var -forward : the same move entered on B, which widens
 //                                    the surviving flop from 3 bits to 8
+// s_const stays refused, but on its constant amount rather than its type: the
+// merge has no flop to take on B. That needs constant-operand support.
 
 module retime_shift (clk, d, amt, q0, q1);
   input clk;
