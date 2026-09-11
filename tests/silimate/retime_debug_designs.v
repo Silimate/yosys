@@ -4,7 +4,7 @@
 // no before/after for them. Every module here is a copy of one in a test; the
 // tests stay the source of truth.
 //
-// Delete this alongside retime_debug.sh and retime_debug_all.sh.
+// Delete this alongside the retime_debug*.sh scripts.
 
 // Widening: the $add keeps its carry, so a forward move across a0 resizes fa
 // from 8 to 9 bits. 3 registers and 25 bits become 2 and 18.
@@ -117,4 +117,137 @@ module onesinit(input clk, input [7:0] a, b, c, d, e, g, h,
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqr  (.CLK(clk), .D(yr),  .Q(qr));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqle (.CLK(clk), .D(yle), .Q(qle));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqge (.CLK(clk), .D(yge), .Q(qge));
+endmodule
+
+// Clock enables (from opt_retime_enable.ys). The enable travels with the
+// register rather than being folded, so the thing to look for in the picture
+// is the EN port surviving on fa and fc while the registers merged into them
+// take theirs away with them. 7 registers become 4.
+module enops(input clk, en, input [7:0] a, b, c, d, input s_in,
+             output [7:0] qadd, qmux);
+  wire [7:0] ra, rb, rc, rd, sum, mx;
+  wire rs;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(en), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(en), .D(b), .Q(rb));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fc (.CLK(clk), .EN(en), .D(c), .Q(rc));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fd (.CLK(clk), .EN(en), .D(d), .Q(rd));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fs (.CLK(clk), .EN(en), .D(s_in), .Q(rs));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(sum));
+  $mux #(.WIDTH(8)) m0 (.A(rc), .B(rd), .S(rs), .Y(mx));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqa (.CLK(clk), .D(sum), .Q(qadd));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqm (.CLK(clk), .D(mx),  .Q(qmux));
+endmodule
+
+// Init values folded and relocated (from opt_retime_init.ys). Nothing about
+// this is visible in either rendering, because an init value is a wire
+// attribute rather than a port: read the "Folded init value" lines above the
+// pictures instead. The $buf pair is the case that needs no arithmetic and
+// still needs the value moved onto the register's new Q net, which was
+// silently wrong before folding existed. 9 registers become 6.
+module initmerge(input clk, input [7:0] a, b, c, d, e, input s_in,
+                 output [7:0] qbuf, qadd, qmux);
+  (* init = 8'h5a *) wire [7:0] rbuf;
+  (* init = 8'h03 *) wire [7:0] ra;
+  (* init = 8'h04 *) wire [7:0] rb;
+  (* init = 8'haa *) wire [7:0] rc;
+  (* init = 8'h55 *) wire [7:0] rd;
+  (* init = 1'b1  *) wire rs;
+  wire [7:0] mid, tail, sum, mx;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fbuf (.CLK(clk), .D(e), .Q(rbuf));
+  $buf #(.WIDTH(8)) b0 (.A(rbuf), .Y(mid));
+  $buf #(.WIDTH(8)) b1 (.A(mid),  .Y(tail));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqb (.CLK(clk), .D(tail), .Q(qbuf));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(sum));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqa (.CLK(clk), .D(sum), .Q(qadd));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fs (.CLK(clk), .D(s_in), .Q(rs));
+  $mux #(.WIDTH(8)) mm (.A(rc), .B(rd), .S(rs), .Y(mx));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqm (.CLK(clk), .D(mx), .Q(qmux));
+endmodule
+
+// A folded init value that also changes width (from opt_retime_init.ys). The
+// reduction narrows its register from 8 bits to 1 and |8'h0f narrows with it;
+// the $add keeps its carry so the other widens to 9 and 8'hff + 8'h01 lands on
+// the bit a fold done at the old width would have dropped. The graphviz view
+// is where those width changes show up. 5 registers become 4.
+module initresize(input clk, input [7:0] a, b, c, output qred, output [8:0] qcar);
+  (* init = 8'h0f *) wire [7:0] rr;
+  (* init = 8'hff *) wire [7:0] rca;
+  (* init = 8'h01 *) wire [7:0] rcb;
+  wire red;
+  wire [8:0] car;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fr (.CLK(clk), .D(a), .Q(rr));
+  $reduce_or #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0)) r0 (.A(rr), .Y(red));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqr (.CLK(clk), .D(red), .Q(qred));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fca (.CLK(clk), .D(b), .Q(rca));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fcb (.CLK(clk), .D(c), .Q(rcb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(9), .A_SIGNED(0), .B_SIGNED(0))
+    c0 (.A(rca), .B(rcb), .Y(car));
+  $dff #(.WIDTH(9), .CLK_POLARITY(1'b1)) fqc (.CLK(clk), .D(car), .Q(qcar));
+endmodule
+
+// Sync reset values folded (from opt_retime_reset.ys). The SRST port stays put
+// while the value it loads is recomputed, so again the "Folded sync reset
+// value" lines carry the information the pictures cannot. fa and fb reset to
+// 8'h03 and 8'h04 on one net and merge into a single register resetting to
+// 8'h07, which is the case where merged registers are allowed to disagree.
+// 5 registers become 4.
+module rstfold(input clk, rst, input [7:0] a, b, c, output [7:0] qn, qs);
+  (* init = 8'h00 *) wire [7:0] rn;
+  (* init = 8'h03 *) wire [7:0] ra;
+  (* init = 8'h04 *) wire [7:0] rb;
+  wire [7:0] n, s;
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h00))
+    fn (.CLK(clk), .SRST(rst), .D(a), .Q(rn));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(rn), .Y(n));
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h00))
+    fqn (.CLK(clk), .SRST(rst), .D(n), .Q(qn));
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h03))
+    fa (.CLK(clk), .SRST(rst), .D(b), .Q(ra));
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h04))
+    fb (.CLK(clk), .SRST(rst), .D(c), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h00))
+    fqs (.CLK(clk), .SRST(rst), .D(s), .Q(qs));
+endmodule
+
+// The one folded value that is visible in the rendering (from
+// opt_retime_reset.ys). A single-bit cell spells the value it resets to into
+// its type name, so folding 0 to 1 across the $not turns $_SDFF_PP0_ into
+// $_SDFF_PP1_ and the box label changes. fq is untouched and stays PP0.
+// The register count does not move: nothing merges and the width is unchanged.
+module finerst(input clk, rst, d, output q);
+  (* init = 1'b0 *) wire r0;
+  wire n;
+  $_SDFF_PP0_ ff (.C(clk), .R(rst), .D(d), .Q(r0));
+  $not #(.A_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0)) n0 (.A(r0), .Y(n));
+  $_SDFF_PP0_ fq (.C(clk), .R(rst), .D(n), .Q(q));
+endmodule
+
+// An async reset value folded through a merge (from opt_retime_reset.ys).
+// Identical to the sync case except for when the register loads the value:
+// 8'h0a | 8'h05 is 8'h0f. 3 registers become 2.
+module arstfold(input clk, rst, input [7:0] a, b, output [7:0] q);
+  (* init = 8'h0a *) wire [7:0] ra;
+  (* init = 8'h05 *) wire [7:0] rb;
+  wire [7:0] s;
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h0a))
+    fa (.CLK(clk), .ARST(rst), .D(a), .Q(ra));
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h05))
+    fb (.CLK(clk), .ARST(rst), .D(b), .Q(rb));
+  $or #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    o0 (.A(ra), .B(rb), .Y(s));
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h0f))
+    fq (.CLK(clk), .ARST(rst), .D(s), .Q(q));
 endmodule
