@@ -40,15 +40,15 @@ static bool is_buf(Cell *cell)
 // conventionally called control: a $mux select is listed here because
 // reg(S) ? reg(B) : reg(A) equals reg(S ? B : A) only when S is registered too.
 //
-// Remaining siblings ($le, $gt, $ge, $logic_and and so on) are one entry each
-// and follow the same rule, but are left out until something tests them.
+// The same holds for $logic_and, $eqx, $neg and so on: one entry each, left out
+// until something tests them.
 // TODO: the shifts need their amount port merged the way $mux merges S.
 static std::vector<IdString> data_inputs(Cell *cell)
 {
 	if (is_buf(cell))
 		return {ID::A};
 	if (cell->type.in(ID($add), ID($sub), ID($and), ID($or), ID($xor), ID($xnor),
-			ID($eq), ID($ne), ID($lt)))
+			ID($eq), ID($ne), ID($lt), ID($le), ID($gt), ID($ge)))
 		return {ID::A, ID::B};
 	if (cell->type.in(ID($not), ID($reduce_and), ID($reduce_or), ID($reduce_xor),
 			ID($reduce_xnor), ID($reduce_bool)))
@@ -398,10 +398,11 @@ struct OptRetimePass : public Pass {
 		log("        cell on the after-path of the register. May be one or more\n");
 		log("        cells away; every cell between the flop and the cut moves with\n");
 		log("        it. The path must be a unique chain. Supported cut types are\n");
-		log("        $buf, $mux, $add, $sub, $and, $or, $xor, $xnor, $eq, $ne,\n");
-		log("        $lt, $not and the $reduce_* cells. Every input of the cut\n");
-		log("        counts as a data input, the $mux select included, so all of\n");
-		log("        them have to be registered.\n");
+		log("        $buf, $mux, $not, $add, $sub, $and, $or, $xor, $xnor, the\n");
+		log("        comparators ($eq, $ne, $lt, $le, $gt, $ge) and the\n");
+		log("        $reduce_* cells. Every input of the cut counts as a data\n");
+		log("        input, the $mux select included, so all of them have to be\n");
+		log("        registered.\n");
 		log("\n");
 		log("    -forward\n");
 		log("        move the register downstream, past -cut. Required. Where the\n");

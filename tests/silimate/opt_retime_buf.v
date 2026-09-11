@@ -10,8 +10,8 @@
 //   opt_retime_shift.v  constant and variable shifts: fanout and width growth
 //   opt_retime_acc.v    accumulator / incrementer: the path is a cycle
 //
-// opt_retime_ops.ys covers the sibling operators ($ne, $lt, $xnor and the rest
-// of the $reduce_* family) with designs inline in the script, since they add no
+// opt_retime_ops.ys covers the comparators beyond $eq, $xnor, and the rest of
+// the $reduce_* family, with designs inline in the script, since they add no
 // new rule and only differ in whether the initial state survives the move.
 //
 // Forward moves only. Backward moves are out of scope: the pass rejects

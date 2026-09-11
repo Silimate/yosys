@@ -51,8 +51,8 @@ moves=(
 	"retime_debug_designs.v|bitwise|-flop fa -cut o0 -forward"
 	"retime_debug_designs.v|bitwise|-flop fc -cut x0 -forward"
 	"retime_debug_designs.v|notpath|-flop fa -cut n0 -forward"
-	"retime_debug_designs.v|siblings|-flop fa -cut c_ne -forward + -flop fc -cut c_lt -forward + -flop fe -cut r_and -forward + -flop fg -cut r_xor -forward + -flop fh -cut r_bool -forward"
-	"retime_debug_designs.v|inverting|-flop fa -cut c_xnor -forward + -flop fc -cut r_xnor -forward"
+	"retime_debug_designs.v|zeroinit|-flop fa -cut c_ne -forward + -flop fc -cut c_lt -forward + -flop fi -cut c_gt -forward + -flop fe -cut r_and -forward + -flop fg -cut r_xor -forward + -flop fh -cut r_bool -forward"
+	"retime_debug_designs.v|onesinit|-flop fa -cut c_xnor -forward + -flop fc -cut r_xnor -forward + -flop fd -cut c_le -forward + -flop fg -cut c_ge -forward"
 )
 
 rm -rf "$root"

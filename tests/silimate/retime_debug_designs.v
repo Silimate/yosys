@@ -57,13 +57,14 @@ module notpath(input clk, input [7:0] a, output [7:0] q);
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(n), .Q(q));
 endmodule
 
-// $ne, $lt and the rest of the $reduce_* family (from opt_retime_ops.ys). The
-// two comparators merge their second operand away, the three reductions have
+// $ne, $lt, $gt and the rest of the $reduce_* family (from opt_retime_ops.ys).
+// All of these give zero on the all-zero state, hence the name. The three
+// comparators merge their second operand away, the three reductions have
 // nothing to merge, and every survivor narrows from 8 bits to 1.
-module siblings(input clk, input [7:0] a, b, c, d, e, g, h,
-                output qne, qlt, qand, qxor, qbool);
-  wire [7:0] ra, rb, rc, rd, re, rg, rh;
-  wire yne, ylt, yand, yxor, ybool;
+module zeroinit(input clk, input [7:0] a, b, c, d, e, g, h, i, j,
+                output qne, qlt, qgt, qand, qxor, qbool);
+  wire [7:0] ra, rb, rc, rd, re, rg, rh, ri, rj;
+  wire yne, ylt, ygt, yand, yxor, ybool;
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
@@ -71,32 +72,49 @@ module siblings(input clk, input [7:0] a, b, c, d, e, g, h,
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(clk), .D(g), .Q(rg));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fh (.CLK(clk), .D(h), .Q(rh));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fi (.CLK(clk), .D(i), .Q(ri));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fj (.CLK(clk), .D(j), .Q(rj));
   $ne #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
     c_ne (.A(ra), .B(rb), .Y(yne));
   $lt #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
     c_lt (.A(rc), .B(rd), .Y(ylt));
+  $gt #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    c_gt (.A(ri), .B(rj), .Y(ygt));
   $reduce_and #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0)) r_and (.A(re), .Y(yand));
   $reduce_xor #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0)) r_xor (.A(rg), .Y(yxor));
   $reduce_bool #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0)) r_bool (.A(rh), .Y(ybool));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqne   (.CLK(clk), .D(yne),   .Q(qne));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqlt   (.CLK(clk), .D(ylt),   .Q(qlt));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqgt   (.CLK(clk), .D(ygt),   .Q(qgt));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqand  (.CLK(clk), .D(yand),  .Q(qand));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqxor  (.CLK(clk), .D(yxor),  .Q(qxor));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqbool (.CLK(clk), .D(ybool), .Q(qbool));
 endmodule
 
-// $xnor and $reduce_xnor (from opt_retime_ops.ys). Both invert, so the retimed
-// design only matches the original if the initial state is inverted with it;
-// that test maps it, this fixture is only here for the picture.
-module inverting(input clk, input [7:0] a, b, c, output [7:0] qx, output qr);
-  wire [7:0] ra, rb, rc, yx;
-  wire yr;
+// $xnor, $reduce_xnor, $le and $ge (from opt_retime_ops.ys). None of these
+// produce zero from the all-zero state, so the retimed design only matches the
+// original if the initial state is mapped through the cell; that test maps it,
+// this fixture is only here for the picture.
+module onesinit(input clk, input [7:0] a, b, c, d, e, g, h,
+                output [7:0] qx, output qr, qle, qge);
+  wire [7:0] ra, rb, rc, rd, re, rg, rh, yx;
+  wire yr, yle, yge;
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(clk), .D(g), .Q(rg));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fh (.CLK(clk), .D(h), .Q(rh));
   $xnor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
     c_xnor (.A(ra), .B(rb), .Y(yx));
   $reduce_xnor #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0)) r_xnor (.A(rc), .Y(yr));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqx (.CLK(clk), .D(yx), .Q(qx));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqr (.CLK(clk), .D(yr), .Q(qr));
+  $le #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    c_le (.A(rd), .B(re), .Y(yle));
+  $ge #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    c_ge (.A(rg), .B(rh), .Y(yge));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqx  (.CLK(clk), .D(yx),  .Q(qx));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqr  (.CLK(clk), .D(yr),  .Q(qr));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqle (.CLK(clk), .D(yle), .Q(qle));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqge (.CLK(clk), .D(yge), .Q(qge));
 endmodule

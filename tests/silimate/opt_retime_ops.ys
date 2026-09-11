@@ -1,4 +1,4 @@
-# Sibling operator types: $ne, $lt, $xnor and the rest of the $reduce_* family.
+# The comparators beyond $eq, $xnor, and the rest of the $reduce_* family.
 #
 # These add no new rule. Every one is a pure function of registered inputs, so
 # the move is the same merge-and-resize the types in opt_retime_cmp.ys get, and
@@ -9,10 +9,14 @@
 # comparison when f maps the all-zero state to zero. Checked with opt -full on
 # constant-zero inputs:
 #
-#   $ne 0, $lt 0, $reduce_and 0, $reduce_xor 0, $reduce_bool 0   zero-init ok
-#   $xnor 8'hff, $reduce_xnor 1                                  needs mapping
+#   $ne, $lt, $gt, $reduce_and, $reduce_xor, $reduce_bool   all 0, zero-init ok
+#   $xnor 8'hff, $reduce_xnor 1, $le 1, $ge 1               need the init mapped
 #
-# so the inverting pair gets its own section, the same way $not does.
+# The second group gets its own section, the same way $not does. Note what puts
+# a cell in it: $xnor and $reduce_xnor because they invert, but $le and $ge
+# because they are reflexive and so are true on the equal-and-zero state. $eq
+# belongs with them for the same reason, and the $eq move in opt_retime_cmp.ys
+# only survives -set-init-zero because a following $and masks its first cycle.
 #
 # Unlike the other files here, the gold copy comes from design -save rather
 # than a second read of the same text. Two copies of a design that a proof
@@ -20,14 +24,14 @@
 # while comparing the wrong thing.
 
 # ---------------------------------------------------------------------------
-log -header "Forward: \$ne, \$lt, \$reduce_and, \$reduce_xor, \$reduce_bool"
+log -header "Forward: \$ne, \$lt, \$gt, \$reduce_and, \$reduce_xor, \$reduce_bool"
 log -push
 design -reset
 read_verilog -icells <<EOF
-module siblings(input clk, input [7:0] a, b, c, d, e, g, h,
-                output qne, qlt, qand, qxor, qbool);
-  wire [7:0] ra, rb, rc, rd, re, rg, rh;
-  wire yne, ylt, yand, yxor, ybool;
+module zeroinit(input clk, input [7:0] a, b, c, d, e, g, h, i, j,
+                output qne, qlt, qgt, qand, qxor, qbool);
+  wire [7:0] ra, rb, rc, rd, re, rg, rh, ri, rj;
+  wire yne, ylt, ygt, yand, yxor, ybool;
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
@@ -35,10 +39,14 @@ module siblings(input clk, input [7:0] a, b, c, d, e, g, h,
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(clk), .D(g), .Q(rg));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fh (.CLK(clk), .D(h), .Q(rh));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fi (.CLK(clk), .D(i), .Q(ri));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fj (.CLK(clk), .D(j), .Q(rj));
   $ne #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
     c_ne (.A(ra), .B(rb), .Y(yne));
   $lt #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
     c_lt (.A(rc), .B(rd), .Y(ylt));
+  $gt #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    c_gt (.A(ri), .B(rj), .Y(ygt));
   $reduce_and #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0))
     r_and (.A(re), .Y(yand));
   $reduce_xor #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0))
@@ -47,27 +55,30 @@ module siblings(input clk, input [7:0] a, b, c, d, e, g, h,
     r_bool (.A(rh), .Y(ybool));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqne   (.CLK(clk), .D(yne),   .Q(qne));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqlt   (.CLK(clk), .D(ylt),   .Q(qlt));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqgt   (.CLK(clk), .D(ygt),   .Q(qgt));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqand  (.CLK(clk), .D(yand),  .Q(qand));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqxor  (.CLK(clk), .D(yxor),  .Q(qxor));
   $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqbool (.CLK(clk), .D(ybool), .Q(qbool));
 endmodule
 EOF
-hierarchy -top siblings
+hierarchy -top zeroinit
 check -assert
-select -assert-count 12 t:$dff
+select -assert-count 15 t:$dff
 design -save orig
 opt_retime -flop fa -cut c_ne -forward
 opt_retime -flop fc -cut c_lt -forward
+opt_retime -flop fi -cut c_gt -forward
 opt_retime -flop fe -cut r_and -forward
 opt_retime -flop fg -cut r_xor -forward
 opt_retime -flop fh -cut r_bool -forward
 check -assert
-# the two comparators merged their second operand away, the three reductions
-# had nothing to merge: 12 registers to 10, and 61 register bits to 10, since
+# the three comparators merged their second operand away, the three reductions
+# had nothing to merge: 15 registers to 12, and 78 register bits to 12, since
 # every survivor narrowed from 8 bits to 1
-select -assert-count 10 t:$dff
+select -assert-count 12 t:$dff
 select -assert-count 0 c:fb
 select -assert-count 0 c:fd
+select -assert-count 0 c:fj
 # each cut now reads module inputs and hands its result to the register
 select -assert-count 1 c:c_ne %x:+[A] w:a %i
 select -assert-count 1 c:c_ne %x:+[B] w:b %i
@@ -77,6 +88,10 @@ select -assert-count 1 c:c_lt %x:+[A] w:c %i
 select -assert-count 1 c:c_lt %x:+[B] w:d %i
 select -assert-count 1 c:c_lt %x:+[Y] w:fc_retimed %i
 select -assert-count 1 c:fc %x:+[Q] w:ylt %i
+select -assert-count 1 c:c_gt %x:+[A] w:i %i
+select -assert-count 1 c:c_gt %x:+[B] w:j %i
+select -assert-count 1 c:c_gt %x:+[Y] w:fi_retimed %i
+select -assert-count 1 c:fi %x:+[Q] w:ygt %i
 select -assert-count 1 c:r_and %x:+[A] w:e %i
 select -assert-count 1 c:r_and %x:+[Y] w:fe_retimed %i
 select -assert-count 1 c:fe %x:+[Q] w:yand %i
@@ -84,7 +99,7 @@ select -assert-count 1 c:r_xor %x:+[A] w:g %i
 select -assert-count 1 c:fg %x:+[Q] w:yxor %i
 select -assert-count 1 c:r_bool %x:+[A] w:h %i
 select -assert-count 1 c:fh %x:+[Q] w:ybool %i
-rename siblings gate
+rename zeroinit gate
 design -import orig -as gold
 miter -equiv -flatten -make_assert gold gate miter
 hierarchy -top miter
@@ -94,35 +109,50 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-log -header "Forward: \$xnor and \$reduce_xnor, where the initial state inverts"
+log -header "Forward: \$xnor, \$reduce_xnor, \$le and \$ge, whose zero state is ones"
 log -push
 design -reset
 read_verilog -icells <<EOF
-module inverting(input clk, input [7:0] a, b, c, output [7:0] qx, output qr);
-  wire [7:0] ra, rb, rc, yx;
-  wire yr;
+module onesinit(input clk, input [7:0] a, b, c, d, e, g, h,
+                output [7:0] qx, output qr, qle, qge);
+  wire [7:0] ra, rb, rc, rd, re, rg, rh, yx;
+  wire yr, yle, yge;
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(clk), .D(g), .Q(rg));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fh (.CLK(clk), .D(h), .Q(rh));
   $xnor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
     c_xnor (.A(ra), .B(rb), .Y(yx));
   $reduce_xnor #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0))
     r_xnor (.A(rc), .Y(yr));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqx (.CLK(clk), .D(yx), .Q(qx));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqr (.CLK(clk), .D(yr), .Q(qr));
+  $le #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    c_le (.A(rd), .B(re), .Y(yle));
+  $ge #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    c_ge (.A(rg), .B(rh), .Y(yge));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqx  (.CLK(clk), .D(yx),  .Q(qx));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqr  (.CLK(clk), .D(yr),  .Q(qr));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqle (.CLK(clk), .D(yle), .Q(qle));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqge (.CLK(clk), .D(yge), .Q(qge));
 endmodule
 EOF
-hierarchy -top inverting
+hierarchy -top onesinit
 check -assert
-select -assert-count 5 t:$dff
+select -assert-count 11 t:$dff
 design -save orig
 opt_retime -flop fa -cut c_xnor -forward
 opt_retime -flop fc -cut r_xnor -forward
+opt_retime -flop fd -cut c_le -forward
+opt_retime -flop fg -cut c_ge -forward
 check -assert
-# fb merges into the $xnor move; the reduction has nothing to merge but
-# narrows its register from 8 bits to 1
-select -assert-count 4 t:$dff
+# the $xnor and the two comparators each merge their second operand away; the
+# reduction has nothing to merge but narrows its register from 8 bits to 1
+select -assert-count 8 t:$dff
 select -assert-count 0 c:fb
+select -assert-count 0 c:fe
+select -assert-count 0 c:fh
 select -assert-count 1 c:c_xnor %x:+[A] w:a %i
 select -assert-count 1 c:c_xnor %x:+[B] w:b %i
 # $xnor preserves width, so the Q net is reused rather than replaced
@@ -132,21 +162,39 @@ select -assert-count 1 c:fa %x:+[Q] w:yx %i
 select -assert-count 1 c:r_xnor %x:+[A] w:c %i
 select -assert-count 1 c:r_xnor %x:+[Y] w:fc_retimed %i
 select -assert-count 1 c:fc %x:+[Q] w:yr %i
-rename inverting gate
-# Both survivors hold the inverted value now, so the two designs only line up
-# if the initial state is pushed through the cell: 8'h00 becomes 8'hff on the
-# $xnor and 1'b0 becomes 1'b1 on the reduction. -set-init-zero would compare
-# 0 against those and fail on the first cycle with no input stimulus at all.
+select -assert-count 1 c:c_le %x:+[A] w:d %i
+select -assert-count 1 c:c_le %x:+[B] w:e %i
+select -assert-count 1 c:fd %x:+[Q] w:yle %i
+select -assert-count 1 c:c_ge %x:+[A] w:g %i
+select -assert-count 1 c:c_ge %x:+[B] w:h %i
+select -assert-count 1 c:fg %x:+[Q] w:yge %i
+rename onesinit gate
+# Every survivor holds a value the all-zero state does not produce, so the two
+# designs only line up if the initial state is pushed through the cell: 8'h00
+# becomes 8'hff on the $xnor, and 1'b0 becomes 1'b1 on the reduction and on
+# both comparators, which are true when their equal operands are both zero.
+# -set-init-zero would compare 0 against those and fail on the first cycle with
+# no input stimulus at all.
 setattr -set init 8'hff gate/w:yx
 setattr -set init 1'b1 gate/w:yr
+setattr -set init 1'b1 gate/w:yle
+setattr -set init 1'b1 gate/w:yge
 setattr -set init 8'h00 gate/w:qx
 setattr -set init 1'b0 gate/w:qr
+setattr -set init 1'b0 gate/w:qle
+setattr -set init 1'b0 gate/w:qge
 design -import orig -as gold
 setattr -set init 8'h00 gold/w:ra
 setattr -set init 8'h00 gold/w:rb
 setattr -set init 8'h00 gold/w:rc
+setattr -set init 8'h00 gold/w:rd
+setattr -set init 8'h00 gold/w:re
+setattr -set init 8'h00 gold/w:rg
+setattr -set init 8'h00 gold/w:rh
 setattr -set init 8'h00 gold/w:qx
 setattr -set init 1'b0 gold/w:qr
+setattr -set init 1'b0 gold/w:qle
+setattr -set init 1'b0 gold/w:qge
 miter -equiv -flatten -make_assert gold gate miter
 hierarchy -top miter
 proc; opt
