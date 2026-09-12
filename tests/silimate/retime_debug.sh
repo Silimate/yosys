@@ -24,10 +24,15 @@
 #                                   absorbs $buf cells, which makes it look
 #                                   like retiming deleted them)
 #   PRE    yosys commands to run  (default none. For designs whose move is only
-#          before the snapshot      legal after some preparation, e.g. PRE=
-#                                   splitfanout when the flop has two readers.
-#                                   Runs before the "before" snapshot so both
-#                                   pictures show the netlist the move saw)
+#          before the snapshot      legal after some preparation. Runs before
+#                                   the "before" snapshot so both pictures show
+#                                   the netlist the move saw)
+#   REFUSE expect the move to be   (default 0. With REFUSE=1 there is no after
+#          refused                  netlist to draw, so only the before pair is
+#                                   written and the reason the pass gave lands
+#                                   in <OUT>/refusal.txt. A move that succeeds
+#                                   under REFUSE=1 is an error, so these stay
+#                                   honest as the pass learns new moves)
 #   NETLISTSVG      path to a netlistsvg binary, if you already have one
 #   NETLISTSVG_DIR  where to install it otherwise
 #                   (default /tmp/retime_debug_netlistsvg, installed once)
@@ -71,6 +76,7 @@ yosys=${YOSYS:-../../build/yosys}
 out=${OUT:-/tmp/retime_debug/$top}
 clean=${CLEAN:-0}
 pre=${PRE:-}
+refuse=${REFUSE:-0}
 nlsvg_dir=${NETLISTSVG_DIR:-/tmp/retime_debug_netlistsvg}
 
 if [ ! -x "$yosys" ]; then
@@ -79,7 +85,8 @@ if [ ! -x "$yosys" ]; then
 fi
 
 mkdir -p "$out"
-rm -f "$out"/before.* "$out"/after.* "$out"/before_show.* "$out"/after_show.*
+rm -f "$out"/before.* "$out"/after.* "$out"/before_show.* "$out"/after_show.* \
+	"$out"/refusal.txt "$out"/yosys.log
 
 clean_cmd=""
 [ "$clean" = "1" ] && clean_cmd="opt_clean"
@@ -96,7 +103,11 @@ else
 	echo "no graphviz dot in PATH, skipping the width-annotated view" >&2
 fi
 
-# One yosys run, so before and after come from the same elaboration.
+# One yosys run, so before and after come from the same elaboration. The log
+# is kept on disk rather than piped, because a refused move puts its reason
+# there and nowhere else, and because pipefail would turn the failure that
+# REFUSE=1 is asking for into a failure of this script.
+set +e
 "$yosys" -p "
 	read_verilog -icells $design
 	hierarchy -top $top
@@ -109,7 +120,25 @@ fi
 	$clean_cmd
 	write_json $out/after.json
 	$show_after
-" | sed -n '/Executing OPT_RETIME/,/^$/p'
+" >"$out/yosys.log" 2>&1
+rc=$?
+set -e
+
+sed -n '/Executing OPT_RETIME/,/^$/p' "$out/yosys.log"
+
+if [ "$refuse" = "1" ]; then
+	if [ "$rc" -eq 0 ]; then
+		echo "REFUSE=1 but the move succeeded, so this entry is stale" >&2
+		exit 1
+	fi
+	# The reason is the whole content of a refusal entry, so it gets its own
+	# file for the gallery to read back.
+	grep -m1 '^ERROR: ' "$out/yosys.log" | sed 's/^ERROR: //' >"$out/refusal.txt" || true
+	echo "refused: $(cat "$out/refusal.txt")"
+elif [ "$rc" -ne 0 ]; then
+	cat "$out/yosys.log" >&2
+	exit "$rc"
+fi
 
 # netlistsvg is installed once into a scratch prefix rather than run through
 # npx, which re-resolves the package on every call and dominated the runtime of
@@ -123,14 +152,18 @@ if [ -z "$nlsvg" ]; then
 	fi
 fi
 
-for stage in before after; do
+# A refused move leaves no after netlist, so there is only one side to draw.
+stages="before after"
+[ "$refuse" = "1" ] && stages="before"
+
+for stage in $stages; do
 	"$nlsvg" "$out/$stage.json" -o "$out/$stage.svg" 2>/dev/null
 done
 
 # show already emitted its own svg, so both views just need rasterizing. The
 # graphviz one is denser, so it gets less magnification.
 if command -v rsvg-convert >/dev/null; then
-	for stage in before after; do
+	for stage in $stages; do
 		rsvg-convert -z 2 -b white -o "$out/$stage.png" "$out/$stage.svg"
 		[ -f "$out/${stage}_show.svg" ] &&
 			rsvg-convert -z 1.5 -b white -o "$out/${stage}_show.png" "$out/${stage}_show.svg"
@@ -139,6 +172,10 @@ fi
 
 echo
 echo "wrote:"
+# An if rather than a && so that a glob matching nothing, which is every after
+# glob once a move has been refused, does not become this script's exit status.
 for f in "$out"/before.* "$out"/after.* "$out"/before_show.* "$out"/after_show.*; do
-	[ -f "$f" ] && echo "  $f"
+	if [ -f "$f" ]; then
+		echo "  $f"
+	fi
 done

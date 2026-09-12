@@ -20,6 +20,13 @@
 #          retimed netlist first
 #   PRE    yosys commands to run  (default none; see retime_debug.sh)
 #          before the snapshot
+#   REFUSE expect the move to be   (default 0. A refused move leaves no after
+#          refused                  netlist, so there is no diff to seed the
+#                                   neighborhood from: the cells the move named
+#                                   are used instead, the flop that could not
+#                                   move and the cut it could not reach. Only
+#                                   the before picture is drawn and the reason
+#                                   lands in <OUT>/refusal.txt)
 #   HOPS   neighborhood radius     (default 3)
 #   CONE   1: expand only through  (default 1, so a changed flop does not
 #          combinational cells      pull in every register on the same clock)
@@ -51,6 +58,7 @@ shift 2
 retime=""
 args=""
 flops=""
+cuts=""
 prev=""
 for arg in "$@"; do
 	if [ "$arg" = "+" ]; then
@@ -62,10 +70,15 @@ for arg in "$@"; do
 	if [ "$prev" = "-flop" ]; then
 		flops="$flops $arg"
 	fi
+	# Only REFUSE=1 needs these, since a move that ran is seeded from its diff.
+	if [ "$prev" = "-cut" ]; then
+		cuts="$cuts,$arg"
+	fi
 	prev=$arg
 done
 retime="$retime opt_retime$args;"
 flops=${flops# }
+cuts=${cuts#,}
 
 yosys=${YOSYS:-../../build/yosys}
 out=${OUT:-/tmp/retime_debug_diff/$top}
@@ -73,6 +86,7 @@ clean=${CLEAN:-0}
 pre=${PRE:-}
 hops=${HOPS:-3}
 cone=${CONE:-1}
+refuse=${REFUSE:-0}
 nlsvg_dir=${NETLISTSVG_DIR:-/tmp/retime_debug_netlistsvg}
 
 if [ ! -x "$yosys" ]; then
@@ -84,7 +98,7 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 rm -f "$out"/before.* "$out"/after.* "$out"/before_show.* "$out"/after_show.* \
 	"$out"/before_full.json "$out"/after_full.json "$out"/seeds.txt "$out"/seeds.ys \
-	"$out"/diff_colors.json
+	"$out"/diff_colors.json "$out"/refusal.txt "$out"/yosys.log
 
 clean_cmd=""
 [ "$clean" = "1" ] && clean_cmd="opt_clean"
@@ -92,6 +106,11 @@ clean_cmd=""
 # One yosys run, so before and after come from the same elaboration. The IL is
 # sorted so a text compare is a structural compare, not a hash-order shuffle.
 # Full JSON is only for counting registers later; it is never drawn.
+#
+# Kept on disk rather than piped for the same reasons as in retime_debug.sh: a
+# refusal reports itself only in the log, and pipefail would treat the failure
+# REFUSE=1 is asking for as a failure of this script.
+set +e
 "$yosys" -p "
 	read_verilog -icells $design
 	hierarchy -top $top
@@ -104,16 +123,34 @@ clean_cmd=""
 	$clean_cmd
 	write_rtlil -sort $out/after.il
 	write_json $out/after_full.json
-" | sed -n '/Executing OPT_RETIME/,/^$/p'
+" >"$out/yosys.log" 2>&1
+rc=$?
+set -e
+
+sed -n '/Executing OPT_RETIME/,/^$/p' "$out/yosys.log"
+
+if [ "$refuse" = "1" ]; then
+	if [ "$rc" -eq 0 ]; then
+		echo "REFUSE=1 but the move succeeded, so this entry is stale" >&2
+		exit 1
+	fi
+	grep -m1 '^ERROR: ' "$out/yosys.log" | sed 's/^ERROR: //' >"$out/refusal.txt" || true
+	echo "refused: $(cat "$out/refusal.txt")"
+elif [ "$rc" -ne 0 ]; then
+	cat "$out/yosys.log" >&2
+	exit "$rc"
+fi
 
 python3 - "$out/before.il" "$out/after.il" "$out/seeds.txt" "$out/seeds.ys" \
-	"$out/diff_colors.json" "$hops" "$cone" $flops <<'PY'
+	"$out/diff_colors.json" "$hops" "$cone" "$refuse" "$cuts" $flops <<'PY'
 import json, sys
 
-before_il, after_il, seeds_txt, seeds_ys, colors_json, hops, cone = sys.argv[1:8]
-moved = list(dict.fromkeys(sys.argv[8:]))
+before_il, after_il, seeds_txt, seeds_ys, colors_json, hops, cone, refuse, cuts_csv = sys.argv[1:10]
+moved = list(dict.fromkeys(sys.argv[10:]))
 hops = int(hops)
 cone = cone == "1"
+refuse = refuse == "1"
+cuts = [c for c in cuts_csv.split(",") if c]
 
 EMPTY = "n:$__diff_empty__"
 FF_TYPES = ("$dff", "$dffe", "$adff", "$sdff", "$adffe", "$sdffe", "$aldff", "$dlatch")
@@ -178,13 +215,23 @@ def sel(kind_cells, kind_wires=()):
 
 
 ba, wa, aa = parse(before_il)
-bb, wb, ab = parse(after_il)
-add_c, del_c, ch_c = classify(ba, bb)
-add_w, del_w, ch_w = classify({**wa, **aa}, {**wb, **ab})
-seed_cells = sorted(set(add_c) | set(del_c) | set(ch_c))
-seed_wires = sorted(set(add_w) | set(del_w) | set(ch_w))
-moved = [n for n in moved if n in ba or n in bb]
-collateral = [n for n in del_c if n not in moved and is_ff(ba[n])]
+if refuse:
+    # A refused move changed nothing, so there is no diff to seed from. The
+    # cells the move named stand in for it: the flop that could not move and
+    # the cut it could not reach, which between them are what the picture is
+    # meant to explain.
+    moved = [n for n in moved if n in ba]
+    seed_cells = sorted(set(moved) | {c for c in cuts if c in ba})
+    seed_wires = []
+    add_c = del_c = ch_c = add_w = del_w = ch_w = collateral = []
+else:
+    bb, wb, ab = parse(after_il)
+    add_c, del_c, ch_c = classify(ba, bb)
+    add_w, del_w, ch_w = classify({**wa, **aa}, {**wb, **ab})
+    seed_cells = sorted(set(add_c) | set(del_c) | set(ch_c))
+    seed_wires = sorted(set(add_w) | set(del_w) | set(ch_w))
+    moved = [n for n in moved if n in ba or n in bb]
+    collateral = [n for n in del_c if n not in moved and is_ff(ba[n])]
 
 with open(seeds_txt, "w") as f:
     f.write("cells: " + " ".join(seed_cells) + "\n")
@@ -202,10 +249,18 @@ with open(colors_json, "w") as f:
 
 if not seed_cells and not seed_wires:
     open(seeds_ys, "w").close()
-    print("seeds: none (no structural RTLIL diff)")
+    print("seeds: none (no cells named)" if refuse else "seeds: none (no structural RTLIL diff)")
     sys.exit(0)
 
-if hops <= 0:
+if refuse:
+    # A refused move has no diff to sit at the middle of a neighborhood, and
+    # the interesting thing about it is usually the operand the move could not
+    # merge, which a register-bounded cone leaves out: %cie/%coe only consider
+    # combinatorial cells, so a sibling flop feeding the cut would appear as
+    # nothing but the wire it drives. Show the whole module instead and let the
+    # colour pick out the flop that could not move.
+    view = "select -set view *"
+elif hops <= 0:
     view = "select -set view @seed"
 elif cone:
     view = f"select -set view @seed %cie{hops} @seed %coe{hops} %u"
@@ -332,11 +387,16 @@ if [ "$have_dot" = 0 ]; then
 fi
 
 render before
-render after
+# A refused move wrote no after.il, so there is only one side to render.
+[ "$refuse" = "1" ] || render after
 
 echo
 echo "wrote:"
+# An if rather than a && so that a glob matching nothing, which is every after
+# glob once a move has been refused, does not become this script's exit status.
 for f in "$out"/before.* "$out"/after.* "$out"/before_show.* "$out"/after_show.* \
 	"$out"/before_full.json "$out"/after_full.json "$out"/seeds.txt; do
-	[ -f "$f" ] && echo "  $f"
+	if [ -f "$f" ]; then
+		echo "  $f"
+	fi
 done

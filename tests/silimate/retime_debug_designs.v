@@ -1,8 +1,12 @@
 // Throwaway fixture for retime_debug_all.sh, not a test and not a committed
-// design. It exists only because some supported moves live as inline heredocs
-// inside the .ys tests, which the debug script cannot read, so the gallery had
-// no before/after for them. Every module here is a copy of one in a test; the
-// tests stay the source of truth.
+// design. It exists only because most of the interesting designs live as
+// inline heredocs inside the .ys tests, which the debug script cannot read, so
+// the gallery had nothing to draw for them. Almost every module here is a copy
+// of one in a test; the tests stay the source of truth.
+//
+// Two groups: the supported moves first, then the designs the pass refuses.
+// The one module with no test behind it is sliced, at the end, which is a move
+// that ought to work rather than one that should not.
 //
 // Delete this alongside the retime_debug*.sh scripts.
 
@@ -250,4 +254,167 @@ module arstfold(input clk, rst, input [7:0] a, b, output [7:0] q);
     o0 (.A(ra), .B(rb), .Y(s));
   $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h0f))
     fq (.CLK(clk), .ARST(rst), .D(s), .Q(q));
+endmodule
+
+// ==========================================================================
+// Designs the pass refuses.
+//
+// These draw as one picture rather than a pair, a refused move having produced
+// no after netlist. The galleries run them under REFUSE=1, which is an error
+// if the move ever succeeds, so an entry cannot quietly rot into a stale claim
+// as the pass grows; it fails and asks to be moved up into the list above.
+// ==========================================================================
+
+// An operand that is not registered at all (from opt_retime_add.ys). b arrives
+// combinationally, so input B has no register to merge and the move would have
+// to invent one. The most basic thing a forward move needs.
+module unflopped(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(b), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+
+// An operand that is half register and half constant (from
+// opt_retime_const.ys). A wholly constant operand folds and a wholly
+// registered one merges, but B here is a concatenation of the two, so it is
+// neither: a register feeds only part of the port. The picture is worth
+// reading next to sliced at the bottom, which fails the same check.
+module halfconst(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B({4'h0, rb[3:0]}), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// A $mux whose select is live (from opt_retime_mux.ys). The select is an
+// operand like any other as far as the move is concerned, so an unregistered
+// one blocks it exactly as an unregistered A or B would.
+module liveselect(input clk, input [7:0] a, b, input sel, output [7:0] q);
+  wire [7:0] ra, rb, m;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $mux #(.WIDTH(8)) m0 (.A(ra), .B(rb), .S(sel), .Y(m));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(m), .Q(q));
+endmodule
+
+// A merge candidate that is read somewhere else (from
+// opt_retime_merge_fanout.ys). rb feeds the adder and the tap, so fb stays
+// and only a0 is rewired to fb's D. The named flop still moves.
+module tapped(input clk, input [7:0] a, b, output [7:0] q, tap);
+  wire [7:0] ra, rb, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $buf #(.WIDTH(8)) bt (.A(rb), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+
+// Enables that disagree (from opt_retime_enable.ys). Both registers are $dffe
+// on the same net, but the polarities are opposite, so one holds while the
+// other loads. That feeds the adder a mix of old and new operands, and the
+// single register left behind has no way to reproduce it. Note EN_POLARITY is
+// a parameter rather than part of the type, so the two cells draw identically
+// and the pictures cannot show the difference at all.
+module enmix(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(en), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b0))
+    fb (.CLK(clk), .EN(en), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+
+// Resets on different nets (from opt_retime_reset.ys). The values 8'h03 and
+// 8'h04 would fold together happily, which rstfold above does; what cannot be
+// folded is one register resetting while the other does not, for the same
+// reason enmix cannot. The two reset nets are visible in the pictures here,
+// unlike the polarity in enmix.
+module rstmix(input clk, rst, rst2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h03))
+    fa (.CLK(clk), .SRST(rst), .D(a), .Q(ra));
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h04))
+    fb (.CLK(clk), .SRST(rst2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h00))
+    fq (.CLK(clk), .SRST(rst), .D(s), .Q(q));
+endmodule
+
+// One init value defined and one not (from opt_retime_cmp.ys). Folding 8'h0f
+// against an undefined value gives undefined bits back, which would throw away
+// what the defined side said, so the move is refused rather than folded. Both
+// registers having an init, or neither, would be fine.
+module mixinit(input clk, input [7:0] a, b, output [7:0] q);
+  (* init = 8'h0f *) wire [7:0] ra;
+  wire [7:0] rb, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+
+// A cut the pass has no rule for (from opt_retime_shift.ys). $sshr is a pure
+// function of its operands like every supported cut, so the move is sound; it
+// is simply not on the list, since a signed shift needs the sign handled when
+// folding stored values. A refusal by omission rather than by principle.
+module signedshift(input clk, input [7:0] a, input [2:0] amt, output [7:0] q);
+  wire [7:0] ra, y;
+  wire [2:0] ramt;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa   (.CLK(clk), .D(a),   .Q(ra));
+  $dff #(.WIDTH(3), .CLK_POLARITY(1'b1)) famt (.CLK(clk), .D(amt), .Q(ramt));
+  $sshr #(.A_WIDTH(8), .B_WIDTH(3), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(0))
+    s0 (.A(ra), .B(ramt), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq   (.CLK(clk), .D(y),   .Q(q));
+endmodule
+
+// A single-bit register that would have to widen (from opt_retime_width.ys).
+// The $add keeps its carry, so the survivor needs 2 bits, and $_DFF_P_ has no
+// width parameter to grow. carryout at the top of this file is the same move
+// on a coarse register, where it simply resizes.
+module fine(input clk, input a, b, output [1:0] q);
+  wire ra, rb;
+  wire [1:0] s;
+  $_DFF_P_ fa (.C(clk), .D(a), .Q(ra));
+  $_DFF_P_ fb (.C(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(2), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+
+// The odd one out: a refusal that is a gap rather than a boundary, and the one
+// module here with no .ys test behind it.
+//
+// Input A is four 2-bit registers concatenated, bit-sliced datapath style, all
+// sharing one enable. It trips the same check as halfconst, no single driver
+// for the whole port, and it also cannot be entered from a slice, since the
+// chain walk only follows a port carrying the whole signal. But unlike every
+// other design in this section the move is sound: with one shared enable the
+// slices are all the same age, so the concatenation behaves as one register
+// and hand-building the retimed form proves equivalent. Give the slices
+// different enables and it stops being sound, which is what enmix shows.
+module sliced(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [1:0] r0, r1, r2, r3;
+  wire [7:0] rb, s;
+  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f0 (.CLK(clk), .EN(en), .D(a[1:0]), .Q(r0));
+  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(a[3:2]), .Q(r1));
+  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en), .D(a[5:4]), .Q(r2));
+  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f3 (.CLK(clk), .EN(en), .D(a[7:6]), .Q(r3));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(en), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A({r3, r2, r1, r0}), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
 endmodule

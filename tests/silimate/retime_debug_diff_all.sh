@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Throwaway debug helper: run retime_debug_diff.sh over every move opt_retime
-# supports today and collect the neighborhood renderings into one page.
+# supports today, plus a set of designs it refuses, and collect the
+# neighborhood renderings into one page.
 #
 # Same side-loading rules as retime_debug.sh: *.sh is not a test target here,
 # the designs are read without being touched, and output goes only to /tmp.
@@ -45,8 +46,9 @@ moves=(
 	"retime_debug_designs.v|bitwise|-flop fc -cut x0 -forward"
 	"retime_debug_designs.v|notpath|-flop fa -cut n0 -forward"
 	"retime_debug_designs.v|zeroinit|-flop fa -cut c_ne -forward + -flop fc -cut c_lt -forward + -flop fi -cut c_gt -forward + -flop fe -cut r_and -forward + -flop fg -cut r_xor -forward + -flop fh -cut r_bool -forward"
-	"opt_retime_shift.v|retime_shift|-flop famt -cut s_var -forward|splitfanout"
-	"opt_retime_shift.v|retime_shift|-flop fd -cut s_const -forward|splitfanout"
+	"opt_retime_shift.v|retime_shift|-flop famt -cut s_var -forward"
+	"opt_retime_shift.v|retime_shift|-flop fd -cut s_const -forward"
+	"opt_retime_shift.v|retime_shift|-flop fd -cut s_var -forward"
 	"retime_debug_designs.v|onesinit|-flop fa -cut c_xnor -forward + -flop fc -cut r_xnor -forward + -flop fd -cut c_le -forward + -flop fg -cut c_ge -forward"
 	"retime_debug_designs.v|enops|-flop fa -cut a0 -forward + -flop fc -cut m0 -forward"
 	"retime_debug_designs.v|initmerge|-flop fbuf -cut b1 -forward + -flop fa -cut a0 -forward + -flop fc -cut mm -forward"
@@ -54,22 +56,59 @@ moves=(
 	"retime_debug_designs.v|rstfold|-flop fn -cut n0 -forward + -flop fa -cut a0 -forward"
 	"retime_debug_designs.v|finerst|-flop ff -cut n0 -forward"
 	"retime_debug_designs.v|arstfold|-flop fa -cut o0 -forward"
+	"retime_debug_designs.v|tapped|-flop fa -cut a0 -forward"
+)
+
+# Designs the pass refuses. Keep this list identical to retime_debug_all.sh
+# too. A refused move has no diff to seed a neighborhood from, so these are
+# seeded from the cells the move named instead, the flop and the cut, and only
+# the before side is drawn. This is the gallery to read for retime_acc, whose
+# full netlist is too big to take in at once.
+refusals=(
+	"retime_debug_designs.v|unflopped|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|halfconst|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|liveselect|-flop fa -cut m0 -forward"
+	"retime_debug_designs.v|enmix|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|rstmix|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|mixinit|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|signedshift|-flop fa -cut s0 -forward"
+	"retime_debug_designs.v|fine|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|sliced|-flop fb -cut a0 -forward"
+	"retime_debug_designs.v|sliced|-flop f0 -cut a0 -forward"
+	"opt_retime_acc.v|retime_acc|-flop f_acc -cut a_acc -forward"
 )
 
 rm -rf "$root"
 mkdir -p "$root"
 
+label_for() {
+	local nmoves
+	nmoves=$(( $(echo "$2" | tr ' ' '\n' | grep -c '^+$' || true) + 1 ))
+	if [ "$nmoves" -gt 2 ]; then
+		echo "$1_${nmoves}_moves"
+	else
+		echo "$1 $2" | sed 's/-flop //g; s/-cut //g; s/ + /_then_/g; s/-//g; s/ /_/g'
+	fi
+}
+
 for entry in "${moves[@]}"; do
 	IFS='|' read -r design top move pre <<<"$entry"
-	nmoves=$(( $(echo "$move" | tr ' ' '\n' | grep -c '^+$' || true) + 1 ))
-	if [ "$nmoves" -gt 2 ]; then
-		label="${top}_${nmoves}_moves"
-	else
-		label=$(echo "$top $move" | sed 's/-flop //g; s/-cut //g; s/ + /_then_/g; s/-//g; s/ /_/g')
-	fi
+	label=$(label_for "$top" "$move")
 	echo "=== $top: $move"
 	OUT="$root/$label" PRE="${pre:-}" ./retime_debug_diff.sh "$design" "$top" $move >"$root/$label.log" 2>&1
 	grep -E '^(Retimed|Resizing|Folded|seeds:|  moved:|  collateral:|  added:) ' "$root/$label.log" | sed 's/^/  /' || true
+done
+
+for entry in "${refusals[@]}"; do
+	IFS='|' read -r design top move pre <<<"$entry"
+	label=refused_$(label_for "$top" "$move")
+	echo "=== $top (refused): $move"
+	if ! OUT="$root/$label" PRE="${pre:-}" REFUSE=1 \
+			./retime_debug_diff.sh "$design" "$top" $move >"$root/$label.log" 2>&1; then
+		echo "  entry failed, see $root/$label.log" >&2
+		exit 1
+	fi
+	grep -E '^(refused:|seeds:) ' "$root/$label.log" | sed 's/^/  /' || true
 done
 
 python3 - "$root" <<'PY'
@@ -104,10 +143,26 @@ def seeds(path):
     return info
 
 
+def esc(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 rows = []
+refused = []
 for label in sorted(os.listdir(root)):
     d = os.path.join(root, label)
     if not os.path.isdir(d):
+        continue
+    # REFUSE=1 leaves a refusal.txt and no after netlist, which is what tells
+    # the two kinds of entry apart here.
+    reason_path = os.path.join(d, "refusal.txt")
+    if os.path.exists(reason_path):
+        full_b = os.path.join(d, "before_full.json")
+        if not os.path.exists(full_b):
+            full_b = os.path.join(d, "before.json")
+        with open(reason_path) as f:
+            refused.append((label, f.read().strip(), regs(full_b),
+                            seeds(os.path.join(d, "seeds.txt"))))
         continue
     full_b = os.path.join(d, "before_full.json")
     full_a = os.path.join(d, "after_full.json")
@@ -160,6 +215,40 @@ for label, before, after, note, info in rows:
                     "<tr><td><img src='%s/before_show.svg'></td>"
                     "<td><img src='%s/after_show.svg'></td></tr>" % (label, label))
     html.append("</table>")
+
+if refused:
+    html.append("<h1 style='margin-top:3em;border-top:3px solid #999;padding-top:1em'>"
+                "refused moves</h1>")
+    html.append("<p>One picture each rather than a pair, since a refused move leaves no "
+                "after netlist to draw, and with it no diff to seed a neighborhood from: "
+                "these are seeded from the cells the move named instead, so "
+                "<span style='color:#c62828'>red</span> is the flop that could not move "
+                "and the cut it could not reach is in the same view. These run under "
+                "<code>REFUSE=1</code>, so a move the pass learns breaks this page "
+                "instead of leaving a stale claim in it. "
+                "<code>retime_debug_designs.v</code> says what each one is showing; the "
+                "reasons below are verbatim from the pass.</p>")
+    html.append("<table><tr><th align=left>move</th><th align=left>registers</th>"
+                "<th align=left>reason</th></tr>")
+    for label, reason, before, _ in refused:
+        html.append("<tr><td><code>%s</code></td><td>%d (%d bits)</td><td>%s</td></tr>"
+                    % (label, before[0], before[1], esc(reason)))
+    html.append("</table>")
+    for label, reason, before, info in refused:
+        html.append("<h2>%s</h2>" % label)
+        html.append("<p>%s<br>%d registers, %d register bits</p>"
+                    % (esc(reason), before[0], before[1]))
+        html.append("<p>could not move <code>%s</code></p>" % (info["moved"] or "(none)"))
+        # Whole module, unlike the accepted entries: a refused move has no diff
+        # to build a neighborhood around, so the register count above and the
+        # picture below agree.
+        html.append("<table><tr><th align=left>netlist as the pass saw it</th></tr>"
+                    "<tr><td><img src='%s/before.svg'></td></tr>" % label)
+        if os.path.exists(os.path.join(root, label, "before_show.svg")):
+            html.append("<tr><th align=left class=sub>with bus widths and port names</th></tr>"
+                        "<tr><td><img src='%s/before_show.svg'></td></tr>" % label)
+        html.append("</table>")
+
 html.append("</body></html>")
 
 with open(os.path.join(root, "index.html"), "w") as f:
@@ -171,6 +260,11 @@ for label, before, after, _, info in rows:
     print("%-40s %-12s %-16s %s" % (label, "%d -> %d" % (before[0], after[0]),
                                     "%d -> %d" % (before[1], after[1]),
                                     info["collateral"] or "-"))
+if refused:
+    print()
+    print("%-40s %s" % ("refused", "reason"))
+    for label, reason, _, _ in refused:
+        print("%-40s %s" % (label, reason))
 print()
 print("open %s/index.html" % root)
 PY
