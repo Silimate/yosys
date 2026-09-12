@@ -6,9 +6,9 @@
 # all-zero state (checked with opt -full on constant inputs), so the ordinary
 # -set-init-zero proof is fair and no init mapping is needed.
 #
-# This design deliberately has rd read by both shifters, which blocks the path
-# walk, so splitfanout runs first. That is the workflow "help opt_retime"
-# points users at, and section 1 is the only place the suite exercises it.
+# This design deliberately has rd read by both shifters. A leftover copy of
+# fd is left for the shifter the move does not follow, and a merge of fd into
+# another register keeps fd when s_const still reads it. No splitfanout.
 #
 # s_const, whose amount is a constant, is proved in opt_retime_const.ys: that
 # move needs constant-operand support rather than anything about shifts.
@@ -16,7 +16,7 @@
 # Still refused: the signed shifts, pinned at the end.
 
 # ---------------------------------------------------------------------------
-log -header "Forward: \$shr entered on the amount, after splitfanout"
+log -header "Forward: \$shr entered on the amount, keeping fd for the other shifter"
 log -push
 design -reset
 read_verilog -icells opt_retime_shift.v
@@ -25,26 +25,50 @@ check -assert
 # the fanout this design exists for: rd feeds both shifters
 select -assert-count 2 w:rd %co c:* %i
 select -assert-count 4 t:$dff
-# gold is saved before splitfanout, so the proof covers the split and the move
-# together rather than trusting splitfanout to be neutral
 design -save orig
-splitfanout
-# splitfanout names the copies fd/fd_splfo1; if that ever changes, this assert
-# fails here rather than further down with a confusing message
-select -assert-count 5 t:$dff
-select -assert-count 1 c:fd_splfo1
-select -assert-count 1 c:s_var %x:+[A] w:fd_splfon1 %i
 opt_retime -flop famt -cut s_var -forward
 check -assert
 # the amount register survives and absorbs the data register feeding s_var,
-# widening from 3 bits to 8 because it now holds the shifter output
+# widening from 3 bits to 8 because it now holds the shifter output. fd stays
+# for s_const, so the register count is unchanged.
 select -assert-count 4 t:$dff
-select -assert-count 0 c:fd_splfo1
+select -assert-count 1 c:fd
 select -assert-count 1 c:s_var %x:+[A] w:d %i
 select -assert-count 1 c:s_var %x:+[B] w:amt %i
 select -assert-count 1 c:s_var %x:+[Y] w:famt_retimed %i
 select -assert-count 1 c:famt %x:+[D] w:famt_retimed %i
 select -assert-count 1 c:famt %x:+[Q] w:sr %i
+select -assert-count 1 c:s_const %x:+[A] w:rd %i
+select -assert-count 1 c:fd %x:+[Q] w:rd %i
+rename retime_shift gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$shr entered on the data, leaving a copy of fd for s_const"
+log -push
+design -reset
+read_verilog -icells opt_retime_shift.v
+hierarchy -top retime_shift
+check -assert
+select -assert-count 4 t:$dff
+design -save orig
+opt_retime -flop fd -cut s_var -forward
+check -assert
+# named fd moves onto sr and absorbs famt; a leftover copy keeps rd for s_const
+select -assert-count 4 t:$dff
+select -assert-count 0 c:famt
+select -assert-count 1 c:fd_fanout
+select -assert-count 1 c:s_var %x:+[A] w:d %i
+select -assert-count 1 c:s_var %x:+[B] w:amt %i
+select -assert-count 1 c:fd %x:+[Q] w:sr %i
+select -assert-count 1 c:s_const %x:+[A] w:rd %i
+select -assert-count 1 c:fd_fanout %x:+[Q] w:rd %i
 rename retime_shift gate
 design -import orig -as gold
 miter -equiv -flatten -make_assert gold gate miter
@@ -58,9 +82,9 @@ log -pop
 log -header "Forward: \$shl entered on the data, widening the register"
 log -push
 design -reset
-# Inline rather than reusing s_const, whose amount is a constant and so is
-# still refused. No fanout here, so this is the mirror of section 1: entered
-# on A, merging the amount, and the only place $shl's width growth is proved.
+# Inline rather than reusing s_const, whose amount is a constant. No fanout
+# here, so this is entered on A, merging the amount, and the only place
+# $shl's width growth is proved without a leftover copy.
 read_verilog -icells <<EOF
 module shiftwide(input clk, input [7:0] a, input [2:0] amt, output [10:0] q);
   wire [7:0] ra;

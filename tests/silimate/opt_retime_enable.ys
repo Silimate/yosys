@@ -105,5 +105,5 @@ EOF
 hierarchy -top enmix
 check -assert
 select -assert-count 2 t:$dffe
-logger -expect error "Flop fb on input B of cell a0 has a different enable than flop fa" 1
+logger -expect error "Flop fb on input B of cell a0 has an enable of the opposite polarity to flop fa" 1
 opt_retime -flop fa -cut a0 -forward

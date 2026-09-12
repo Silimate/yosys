@@ -189,5 +189,5 @@ endmodule
 EOF
 hierarchy -top rstmix
 check -assert
-logger -expect error "Flop fb on input B of cell a0 has a different sync reset than flop fa" 1
+logger -expect error "Flop fb on input B of cell a0 has a different sync reset net than flop fa" 1
 opt_retime -flop fa -cut a0 -forward

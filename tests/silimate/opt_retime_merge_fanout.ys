@@ -1,9 +1,11 @@
-# A forward move across an $add deletes the registers on the operands it
-# merges. If one of them is read somewhere else, deleting it would change that
-# reader, so the move has to be refused rather than applied.
+# A forward move across an $add folds the registers on the operands into the
+# one it leaves on the output. If one of them is read somewhere else, deleting
+# it would change that reader, so the flop stays and only the cut is rewired
+# to its D. That is the same netlist as cloning a fanout-1 copy and merging
+# that copy away.
 #
-# Split out from opt_retime_add.ys because logger -expect error ends the run,
-# so only one expected error fits per file.
+# Split out from opt_retime_add.ys because it used to be a logger -expect error
+# case (only one expected error fits per file). It is a real move now.
 design -reset
 read_verilog -icells <<EOF
 module tapped(input clk, input [7:0] a, b, output [7:0] q, tap);
@@ -18,7 +20,23 @@ endmodule
 EOF
 hierarchy -top tapped
 check -assert
-# rb feeds the adder and the tap, so fb cannot be merged away
+# rb feeds the adder and the tap
 select -assert-count 2 w:rb %co c:* %i
-logger -expect error "Flop fb on input B of cell a0 has other readers" 1
+select -assert-count 3 t:$dff
+design -save orig
 opt_retime -flop fa -cut a0 -forward
+check -assert
+# fb is kept for the tap, fa moves onto the sum; register count unchanged
+select -assert-count 3 t:$dff
+select -assert-count 1 c:fb
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:fa %x:+[Q] w:s %i
+select -assert-count 1 c:bt %x:+[A] w:rb %i
+select -assert-count 1 c:fb %x:+[Q] w:rb %i
+rename tapped gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify

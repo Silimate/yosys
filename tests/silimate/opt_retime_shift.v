@@ -4,10 +4,11 @@
 //   s_var  ($shr) keeps the width
 //   s_const ($shl) grows 8 bits to 11, so a moved flop changes width
 // Forward moves, both proved in opt_retime_shift.ys:
-//   -flop fd -cut s_var -forward   : needs splitfanout first (rd has two
-//                                    readers), then famt merges with it
+//   -flop fd -cut s_var -forward   : the named fd moves and absorbs famt; a
+//                                    leftover copy keeps rd for s_const
 //   -flop famt -cut s_var -forward : the same move entered on B, which widens
-//                                    the surviving flop from 3 bits to 8
+//                                    the surviving flop from 3 bits to 8; fd
+//                                    stays because s_const still reads it
 //   -flop fd -cut s_const -forward  : proved in opt_retime_const.ys instead,
 //                                     since its amount is a constant and so
 //                                     has no register to merge

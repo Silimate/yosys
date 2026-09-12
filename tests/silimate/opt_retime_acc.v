@@ -5,11 +5,13 @@
 //        acc -/                                                  \-> b_out
 //   a_cnt ($add with constant 1) -> f_cnt -> cnt -> b_cnt
 // A register in a loop is always read at least twice (by the operator and by
-// whatever observes it), so both loops here need multi-fanout support.
+// whatever observes it). Feed-forward extra readers get a leftover copy, but
+// here the copy's D sits on the after-path of the cut, so the move is still
+// refused: rewriting the cut would change the tap's input.
 // f_acc has a synchronous reset on purpose: moving it across a_acc changes the
 // value the accumulator resets to, so SRST_VALUE has to be adjusted. The pass
 // folds reset values now (opt_retime_reset.ys), so what still blocks these
-// moves is the loop and the multi-fanout it forces, not the reset.
+// moves is the loop, not the reset.
 // Forward moves it should cover once the pass grows past buffers:
 //   -flop f_acc -cut a_acc -forward : legal only if it stays inside the loop
 //   -flop f_cnt -cut a_cnt -forward : same shape with a constant operand

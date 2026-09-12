@@ -84,16 +84,18 @@ read_verilog -icells opt_retime_shift.v
 hierarchy -top retime_shift
 check -assert
 design -save orig
-# rd feeds both shifters, so the path walk needs a fanout-1 copy first
-splitfanout
-select -assert-count 1 c:s_const %x:+[A] w:fd_splfon0 %i
+# rd feeds both shifters: named fd moves, a leftover copy keeps rd for s_var
 opt_retime -flop fd -cut s_const -forward
 check -assert
-# fd widens 8 bits to 11 and merges nothing, the amount being a constant
+# fd widens 8 bits to 11 and merges nothing, the amount being a constant, and
+# the leftover copy is a fifth register
 select -assert-count 5 t:$dff
+select -assert-count 1 c:fd_fanout
 select -assert-count 1 c:s_const %x:+[A] w:d %i
 select -assert-count 1 c:s_const %x:+[Y] w:fd_retimed %i
 select -assert-count 1 c:fd %x:+[Q] w:sl %i
+select -assert-count 1 c:s_var %x:+[A] w:rd %i
+select -assert-count 1 c:fd_fanout %x:+[Q] w:rd %i
 rename retime_shift gate
 design -import orig -as gold
 miter -equiv -flatten -make_assert gold gate miter

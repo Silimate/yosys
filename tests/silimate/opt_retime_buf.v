@@ -21,7 +21,11 @@
 //   opt_retime_enable.ys  clock enables, which travel with the register
 //   opt_retime_init.ys    init values, which are folded through the chain
 //   opt_retime_reset.ys   reset values, folded the same way, and the
-//                         single-bit cells whose type changes when they are
+//                         single-bit cells whose type changes when they are,
+//                         a $_SDFF_PP0_ folding into a $_SDFF_PP1_
+//   opt_retime_merge_fanout.ys  a register on a merged operand that something
+//                         else reads, so it stays behind and only the cut is
+//                         rewired to its D
 //
 // Forward moves only. Backward moves are out of scope: the pass rejects
 // -backward while parsing arguments, so do not add designs or tests for them.
