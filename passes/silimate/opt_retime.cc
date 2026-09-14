@@ -809,15 +809,26 @@ void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbidden)
 	}
 }
 
-// Types a backward move can invert: f(reg(x), c) equals reg(f(x, c)) when every
-// other operand is a constant, and f has a unique preimage in x. $and/$or/$mux
-// / $eq / $mul do not. An already-registered other operand is not a meet: that
-// would be f(reg(x), reg(y)) vs reg(f(x, reg(y))), which drops a cycle on y
-// unless a second register is cloned onto y.
+// Types a backward move can invert: some x with f(x, others) equal to the value
+// the flop stores. The preimage need not be unique, only exist, since the move
+// only has to reproduce that value on the first cycle, so $and and $or count
+// even though they lose information. $eq and $reduce_* stay out because they
+// also resize the flop, $mul because an even constant has no inverse.
+//
+// $mux is here because nothing about the identity reg(f(x)) = f(reg(x)) cares
+// how many operands f has: reg(S ? B : A) is (reg S) ? (reg B) : (reg A), with
+// a clone on each of the two operands the path does not enter on. What the
+// extra operand does cost is cycle 0, and the select is what pays for it: a
+// clone of the select that starts at the constant picking the path port makes
+// the mux reproduce the stored value whatever the other data clone holds.
+//
+// A constant other operand is a meet: f(reg(x), c) equals reg(f(x, c)) and
+// nothing is cloned. A live other operand is the same transform with a clone of
+// the flop on that input.
 bool is_invertible_backward(Cell *cell)
 {
 	return cell->type.in(ID($buf), ID($_BUF_), ID($not), ID($add), ID($sub),
-			ID($xor), ID($xnor));
+			ID($xor), ID($xnor), ID($and), ID($or), ID($mux));
 }
 
 bool sig_all_wires(const SigSpec &sig)
@@ -874,50 +885,91 @@ bool cell_signed(Cell *cell, IdString param)
 	return cell->hasParam(param) && cell->getParam(param).as_bool();
 }
 
-// The unique live data input a backward move slides onto. Constants stay;
-// a second live input would need a cloned register, and a flop on this input
-// would stack a second register on the same net.
+// The live data input a backward move slides the named flop onto. Constants
+// stay: f(reg(x), c) is reg(f(x, c)) and nothing is cloned. Every other live
+// input gets a clone of the flop, at any hop of the chain and not just at the
+// cut, which is what lets the move walk back through a whole mux tree instead
+// of stopping at the first level with a live select. A unique live input that
+// is already a flop is stacking, not cloning, and is refused.
 IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		Cell *cell, Cell *flop)
 {
-	IdString path;
+	IdString path, first_ff;
 	int live = 0;
-	bool live_is_ff = false;
-	bool live_partial = false;
 	for (auto port : data_inputs(cell)) {
 		SigSpec sig = sigmap(cell->getPort(port));
 		if (sig.is_fully_const())
 			continue;
 		live++;
-		path = port;
-		live_is_ff = driven_by_ff(drivers, sig);
-		live_partial = !sig_all_wires(sig);
+		if (!sig_all_wires(sig))
+			log_cmd_error("Input %s of cell %s is only partly a wire, so flop %s "
+					"cannot move backward onto it.\n",
+					log_id(port), log_id(cell), log_id(flop));
+		if (driven_by_ff(drivers, sig)) {
+			if (first_ff == IdString())
+				first_ff = port;
+			continue;
+		}
+		if (path == IdString())
+			path = port;
 	}
 	if (live == 0)
 		log_cmd_error("Every data input of cell %s is constant, so flop %s has "
 				"nothing to slide onto.\n", log_id(cell), log_id(flop));
-	if (live != 1)
-		log_cmd_error("Cell %s has %d non-constant data inputs; a backward move "
-				"would have to clone a register onto each of them, which "
-				"opt_retime does not do yet.\n",
-				log_id(cell), live);
-	if (live_is_ff)
+	if (path == IdString())
 		log_cmd_error("Input %s of cell %s is already registered, so flop %s "
 				"cannot move backward onto it: that would stack a second "
 				"register on the same net.\n",
-				log_id(path), log_id(cell), log_id(flop));
-	if (live_partial)
-		log_cmd_error("Input %s of cell %s is only partly a wire, so flop %s "
-				"cannot move backward onto it.\n",
-				log_id(path), log_id(cell), log_id(flop));
+				log_id(first_ff), log_id(cell), log_id(flop));
+	// Sliding onto a select is a different problem from sliding onto a data
+	// port. The clone that makes cycle 0 work is the select's, and there is no
+	// select clone left to place: the two data clones would both have to start
+	// at the stored value rather than at a fixed identity, which is a per-fold
+	// starting value and not what clone_start hands out.
+	if (cell->type == ID($mux) && path == ID::S)
+		log_cmd_error("Both data inputs of %s are constant or already "
+				"registered, so flop %s would have to slide onto the "
+				"select, which opt_retime does not do yet.\n",
+				log_id(cell), log_id(flop));
 	return path;
 }
 
-// Solve f(..., x, ...) = y for the path operand x. y is the stored value on
-// the output side of this cell; the other operands are the constants still
-// wired to it.
-Const invert_step(SigMap &sigmap, Cell *cell, IdString path_port, Const y)
+// What a cloned flop starts at: a value that makes the cell an identity on the
+// path port, so the path flop can hold the old stored value itself and f still
+// reproduces it. This is per port and not just per cell type, because a $mux
+// reaches identity on two ports at once and asks something different of each.
+Const clone_start(Cell *cell, IdString path_port, IdString clone_port, int width)
 {
+	if (cell->type == ID($mux)) {
+		// The select is the whole cycle-0 argument: pin it at the constant
+		// that picks the path port and the mux is that port, whatever the
+		// other data clone came up holding. So that one is a don't-care.
+		if (clone_port == ID::S)
+			return Const(path_port == ID::A ? State::S0 : State::S1, width);
+		return Const(State::Sx, width);
+	}
+	// x & 1s and ~(x ^ 1s) are both x; the rest of the types are identity at 0.
+	bool ones = cell->type.in(ID($and), ID($xnor));
+	return Const(ones ? State::S1 : State::S0, width);
+}
+
+// Solve f(..., x, ...) = y for the path operand x. y is the stored value on the
+// output side of this cell; others holds, per port, the constant still wired to
+// that operand or the clone_start of the flop being cloned onto it. It is keyed
+// by port rather than being the one other operand because a $mux has two.
+// Any preimage will do, since the move only has to reproduce y on the first
+// cycle, so $and and $or answer with y itself: the bits their other operand
+// pins are already y's own, and the rest pass straight through. $mux answers
+// the same way, for the same reason turned inside out: its select is pinned to
+// pick the path port, so the path port is the output and y is its own preimage.
+Const invert_step(Cell *cell, IdString path_port, Const y,
+		const dict<IdString, Const> &others)
+{
+	auto operand = [&](IdString port) {
+		auto it = others.find(port);
+		return it == others.end() ? Const() : it->second;
+	};
+
 	int len = GetSize(cell->getPort(path_port));
 	if (GetSize(cell->getPort(ID::Y)) != len)
 		log_cmd_error("Cell %s has Y width %d and path port %s width %d; a "
@@ -926,26 +978,47 @@ Const invert_step(SigMap &sigmap, Cell *cell, IdString path_port, Const y)
 				log_id(path_port), len);
 	if (is_buf(cell))
 		return y;
-	if (cell->type == ID($not))
-		return const_not(y, Const(), false, false, len);
 
-	IdString other_port = path_port == ID::A ? ID::B : ID::A;
-	Const other = sigmap(cell->getPort(other_port)).as_const();
+	Const other = operand(path_port == ID::A ? ID::B : ID::A);
 	bool sa = cell_signed(cell, ID::A_SIGNED);
 	bool sb = cell_signed(cell, ID::B_SIGNED);
-	if (cell->type == ID($xor))
-		return const_xor(y, other, false, false, len);
-	if (cell->type == ID($xnor))
-		return const_xnor(y, other, false, false, len);
-	if (cell->type == ID($add))
-		return const_sub(y, other, sa, sb, len);
-	if (cell->type == ID($sub) && path_port == ID::A)
-		return const_add(y, other, sa, sb, len);
-	if (cell->type == ID($sub) && path_port == ID::B)
-		return const_sub(other, y, sa, sb, len);
-	log_cmd_error("Cell %s has type %s, which opt_retime cannot invert yet.\n",
-			log_id(cell), log_id(cell->type));
-	return Const();
+	Const x;
+	if (cell->type == ID($not))
+		x = const_not(y, Const(), false, false, len);
+	else if (cell->type == ID($xor))
+		x = const_xor(y, other, false, false, len);
+	else if (cell->type == ID($xnor))
+		x = const_xnor(y, other, false, false, len);
+	else if (cell->type == ID($add))
+		x = const_sub(y, other, sa, sb, len);
+	else if (cell->type == ID($sub) && path_port == ID::A)
+		x = const_add(y, other, sa, sb, len);
+	else if (cell->type == ID($sub) && path_port == ID::B)
+		x = const_sub(other, y, sa, sb, len);
+	else if (cell->type.in(ID($and), ID($or), ID($mux)))
+		x = y;
+	else
+		log_cmd_error("Cell %s has type %s, which opt_retime cannot invert yet.\n",
+				log_id(cell), log_id(cell->type));
+
+	// Running the cell forward on the candidate is the whole argument that a
+	// lossy type is safe here, and it catches a mask or an x bit that leaves y
+	// out of reach entirely. For $mux it also catches a select wired to a
+	// constant that picks the port the path did not come in on.
+	bool err = false;
+	Const back;
+	if (cell->type == ID($mux))
+		back = CellTypes::eval(cell, path_port == ID::A ? x : operand(ID::A),
+				path_port == ID::B ? x : operand(ID::B),
+				operand(ID::S), &err);
+	else
+		back = path_port == ID::A ? CellTypes::eval(cell, x, other, &err)
+				: CellTypes::eval(cell, other, x, &err);
+	if (err || back != y)
+		log_cmd_error("Cell %s has no input on %s that produces %s, so a "
+				"backward move has no stored value to leave behind.\n",
+				log_id(cell), log_id(path_port), log_signal(y));
+	return x;
 }
 
 // From flop.D back to cut: each hop's Y is uniquely the next hop's path port
@@ -1030,8 +1103,26 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 		log_cmd_error("Cut %s is not on the before-path of flop %s.\n",
 				log_id(cut), log_id(flop));
 
+	// Which ports of which hop get a clone, one set per chain step. A clone at
+	// an intermediate hop is what makes a mux tree worth walking: the whole
+	// chain slides back one cycle in a single rewiring, and each clone delays
+	// its own operand by that same cycle, so every level is a level of depth
+	// removed rather than only the one at the cut.
+	std::vector<pool<IdString>> clone_ports(GetSize(chain));
+	for (int i = 0; i < GetSize(chain); i++) {
+		for (auto port : data_inputs(chain[i].cell)) {
+			if (port == chain[i].port)
+				continue;
+			SigSpec sig = sigmap(chain[i].cell->getPort(port));
+			if (sig.is_fully_const())
+				continue;
+			clone_ports[i].insert(port);
+		}
+	}
+
+	IdString path_port = chain.back().port;
 	Cell *front = chain.front().cell;
-	SigSpec path_in = cut->getPort(chain.back().port);
+	SigSpec path_in = cut->getPort(path_port);
 	SigSpec d = flop->getPort(ID::D);
 	SigSpec q = flop->getPort(ID::Q);
 
@@ -1040,10 +1131,55 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 				"bits, which is not supported yet.\n",
 				log_id(cut), log_id(flop), GetSize(q), GetSize(path_in));
 
+	// A $mux select is one bit while the flop is WIDTH, so that one clone is
+	// allowed to come out narrower than the flop. FfData carries the width per
+	// clone, and the per-bit control signals that would not survive being
+	// resized - set/reset, and an async load arriving on a net - are refused
+	// upstream by unmovable_reason, so there is nothing left for a narrow clone
+	// to get wrong. Every other port is still held to the flop's width, as is
+	// the path input above, so a wide mux cannot slide onto its select.
+	for (int i = 0; i < GetSize(chain); i++)
+		for (auto port : clone_ports[i]) {
+			Cell *cell = chain[i].cell;
+			int n = GetSize(cell->getPort(port));
+			if (n == GetSize(q))
+				continue;
+			if (cell->type == ID($mux) && port == ID::S && n == 1)
+				continue;
+			log_cmd_error("Backward move across %s would clone flop %s onto "
+					"input %s of %s of width %d, from %d bits, which is "
+					"not supported yet.\n",
+					log_id(cut), log_id(flop), log_id(port),
+					log_id(cell), n, GetSize(q));
+		}
+
 	pool<SigBit> qbits = wire_bits(sigmap(q));
 	if (bits_overlap(qbits, sigmap(path_in)))
 		log_cmd_error("Flop %s cannot move backward across %s: the path input "
 				"depends on the flop's Q.\n", log_id(flop), log_id(cut));
+	for (int i = 0; i < GetSize(chain); i++)
+		for (auto port : clone_ports[i])
+			if (bits_overlap(qbits, sigmap(chain[i].cell->getPort(port))))
+				log_cmd_error("Flop %s cannot move backward across %s: input "
+						"%s of %s depends on the flop's Q.\n",
+						log_id(flop), log_id(cut), log_id(port),
+						log_id(chain[i].cell));
+
+	// Every operand this hop is not entered on, as the constant the inverse
+	// sees on cycle 0: the one still wired there, or the clone's start value.
+	auto invert_others = [&](int i) {
+		dict<IdString, Const> others;
+		ChainStep &step = chain[i];
+		for (auto port : data_inputs(step.cell)) {
+			if (port == step.port)
+				continue;
+			int len = GetSize(step.cell->getPort(port));
+			others[port] = clone_ports[i].count(port)
+					? clone_start(step.cell, step.port, port, len)
+					: sigmap(step.cell->getPort(port)).as_const();
+		}
+		return others;
+	};
 
 	Const init_folded, srst_folded, arst_folded, aload_folded;
 	auto fold_back = [&](FoldKind kind, Const start, Const &result) {
@@ -1054,8 +1190,8 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 					"defined, so the inverse fold would be ambiguous.\n",
 					log_id(flop), fold_kind_name(kind));
 		Const cur = start;
-		for (auto &step : chain)
-			cur = invert_step(sigmap, step.cell, step.port, cur);
+		for (int i = 0; i < GetSize(chain); i++)
+			cur = invert_step(chain[i].cell, chain[i].port, cur, invert_others(i));
 		result = cur;
 		return true;
 	};
@@ -1071,13 +1207,59 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 	for (auto bit : wire_bits(sigmap(path_in)))
 		if (bit.is_wire())
 			forbidden.insert(bit);
+	for (int i = 0; i < GetSize(chain); i++)
+		for (auto port : clone_ports[i])
+			for (auto bit : wire_bits(sigmap(chain[i].cell->getPort(port))))
+				if (bit.is_wire())
+					forbidden.insert(bit);
 	check_controls(ff, sigmap, forbidden);
+
+	int nclone = 0;
+	for (int i = 0; i < GetSize(chain); i++) {
+		Cell *cell = chain[i].cell;
+		for (auto port : clone_ports[i]) {
+			SigSpec din = cell->getPort(port);
+			int n = GetSize(din);
+			// The cut is the cell the command named, so its clones are named
+			// for the flop and the port alone. A clone on a hop further down
+			// the chain names the cell as well, since several hops of a mux
+			// tree all clone a port called S.
+			std::string base = flop->name.str() + "_";
+			if (cell != cut)
+				base += RTLIL::unescape_id(cell->name) + "_";
+			base += RTLIL::unescape_id(port);
+			SigSpec qwire = module->addWire(module->uniquify(base + "_q"), n);
+			FfData cloned = ff;
+			cloned.cell = nullptr;
+			cloned.name = module->uniquify(base);
+			cloned.sig_d = din;
+			cloned.sig_q = qwire;
+			cloned.width = n;
+			Const start = clone_start(cell, chain[i].port, port, n);
+			cloned.val_init = got_init ? start : Const(State::Sx, n);
+			if (cloned.has_srst)
+				cloned.val_srst = got_srst ? start : Const(State::Sx, n);
+			if (cloned.has_arst)
+				cloned.val_arst = got_arst ? start : Const(State::Sx, n);
+			if (cloned.has_aload && cloned.sig_ad.is_fully_const())
+				cloned.sig_ad = got_aload ? start : Const(State::Sx, n);
+			if (!cloned.emit())
+				log_cmd_error("Clone of flop %s onto input %s of %s did not "
+						"survive being built.\n",
+						log_id(flop), log_id(port), log_id(cell));
+			cell->setPort(port, qwire);
+			log("Cloning flop %s as %s onto input %s of %s.\n",
+					log_id(flop), log_id(cloned.name), log_id(port), log_id(cell));
+			nclone++;
+		}
+	}
 
 	// The chain keeps its internal wiring. The flop samples the cut's old
 	// path input; the cut reads Q; the cell that used to drive D now drives
 	// the old Q sinks. The old D net is reused as the Q / cut-input link.
+	// Extra live inputs already hold a clone of that flop.
 	front->setPort(ID::Y, q);
-	cut->setPort(chain.back().port, d);
+	cut->setPort(path_port, d);
 
 	ff.remove_init();
 	IdString flop_name = ff.name;
@@ -1112,8 +1294,12 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 		log("Folded async load value of flop %s to %s.\n", log_id(flop_name),
 				log_signal(aload_folded));
 
-	log("Retimed %s backward across %d cell(s) ending at %s.\n",
-			log_id(flop_name), GetSize(chain), log_id(cut));
+	if (nclone)
+		log("Retimed %s backward across %d cell(s) ending at %s, cloning %d flop(s).\n",
+				log_id(flop_name), GetSize(chain), log_id(cut), nclone);
+	else
+		log("Retimed %s backward across %d cell(s) ending at %s.\n",
+				log_id(flop_name), GetSize(chain), log_id(cut));
 }
 
 void apply_move(Module *module, Cell *flop, Cell *cut)
@@ -1400,12 +1586,33 @@ struct OptRetimePass : public Pass {
 		log("    -backward\n");
 		log("        move the register upstream, onto the path input of -cut. The\n");
 		log("        cut's Y must uniquely drive the flop (or a unique invertible\n");
-		log("        chain into it). Other data inputs must be constant: a live\n");
-		log("        input would need a cloned register, and an already-registered\n");
-		log("        one would stack a second flop on the same net. Invertible\n");
-		log("        cuts are $buf, $not, $xor, $xnor, $add and $sub. Init and\n");
-		log("        reset values are inverted through the chain so the flop\n");
-		log("        starts at the preimage of its old value.\n");
+		log("        chain into it). Every other live data input, at the cut and\n");
+		log("        at each hop in between, gets a clone of the flop; constants\n");
+		log("        stay, since f(reg(x), c) is already reg(f(x, c)). A unique\n");
+		log("        live input that is already registered is refused, because\n");
+		log("        that would only stack a second flop on the same net.\n");
+		log("        Invertible cuts are $buf, $not, $xor, $xnor, $add, $sub,\n");
+		log("        $and, $or and $mux.\n");
+		log("\n");
+		log("        Init and reset values are inverted through the chain, so the\n");
+		log("        flop is left holding a value the cut turns back into the old\n");
+		log("        one. That preimage only has to exist, not to be unique, which\n");
+		log("        is why $and and $or are allowed; a stored bit their other\n");
+		log("        operand masks away has no preimage at all and is refused. A\n");
+		log("        clone starts at whatever makes the cell an identity on the\n");
+		log("        path port, all ones for $and and $xnor and zero for the\n");
+		log("        rest, so the flop itself can keep the old value.\n");
+		log("\n");
+		log("        A $mux is that same identity with a third operand: reg(S ?\n");
+		log("        B : A) is (reg S) ? (reg B) : (reg A). The cloned select\n");
+		log("        starts at the constant picking the port the path came in\n");
+		log("        on, which makes the mux reproduce the stored value whatever\n");
+		log("        the other data clone holds, so that one starts at x. It is\n");
+		log("        also the one clone allowed to be narrower than the flop.\n");
+		log("        Sliding onto the select itself is refused. Because clones\n");
+		log("        are placed at every hop and not only at the cut, a chain is\n");
+		log("        not stopped by a live select at each level, and a whole mux\n");
+		log("        tree walks back in one move.\n");
 		log("\n");
 	}
 

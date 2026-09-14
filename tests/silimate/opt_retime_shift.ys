@@ -202,3 +202,25 @@ proc; opt
 sat -seq 8 -set-init-zero -prove-asserts -verify
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to come last.
+# $sshl/$sshr are forward cuts; they have no unique inverse, so a backward
+# move stops on the type.
+log -header "Refused: backward does not invert \$sshr"
+design -reset
+read_verilog -icells <<EOF
+module signedshift(input clk, input [7:0] a, input [2:0] amt, output [7:0] q);
+  wire [7:0] ra, y;
+  wire [2:0] ramt;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa   (.CLK(clk), .D(a),   .Q(ra));
+  $dff #(.WIDTH(3), .CLK_POLARITY(1'b1)) famt (.CLK(clk), .D(amt), .Q(ramt));
+  $sshr #(.A_WIDTH(8), .B_WIDTH(3), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(0))
+    s0 (.A(ra), .B(ramt), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq   (.CLK(clk), .D(y),   .Q(q));
+endmodule
+EOF
+hierarchy -top signedshift
+check -assert
+logger -expect error "which opt_retime cannot move backward across yet" 1
+opt_retime -flop fq -cut s0 -backward

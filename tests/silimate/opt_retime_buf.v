@@ -29,6 +29,10 @@
 //   opt_retime_mul.ys     $mul, the same merge as $add, plus signed folding
 //   opt_retime_backward.ys  capture flop onto a unique invertible chain whose
 //                         other operands are constant ($buf/$not/$xor/$add/$sub)
+//   opt_retime_and.ys     $and and $or backward, the cuts whose inverse is
+//                         neither unique nor total: the move picks any
+//                         preimage of the stored value and refuses when the
+//                         other operand leaves none
 //
 // Memories and FSMs are out of scope: do not add designs for them. Memories
 // are not combinational cells to move a register across; FSM control cones

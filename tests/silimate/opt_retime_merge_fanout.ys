@@ -40,3 +40,22 @@ miter -equiv -flatten -make_assert gold gate miter
 hierarchy -top miter
 proc; opt
 sat -seq 8 -set-init-zero -prove-asserts -verify
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to come last.
+# Forward can leave a copy for extra readers of Q; backward needs the cut Y
+# to drive only the flop being moved.
+log -header "Refused: backward needs a unique reader of the cut"
+design -reset
+read_verilog -icells <<EOF
+module backfanout(input clk, input [7:0] a, output [7:0] q, tap);
+  wire [7:0] y;
+  $buf #(.WIDTH(8)) b0 (.A(a), .Y(y));
+  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top backfanout
+check -assert
+logger -expect error "Y of cell b0 is not uniquely read by fq port D" 1
+opt_retime -flop fq -cut b0 -backward

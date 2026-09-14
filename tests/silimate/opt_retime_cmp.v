@@ -11,6 +11,9 @@
 //   -flop fa -cut g0 -forward   : legal only after fc has moved across r_or to
 //                                 put a register on g0.B. Then it merges an
 //                                 8-bit fb and a 1-bit fc in the same move.
+// Backward moves it covers (opt_retime_and.ys):
+//   -flop fq -cut g0 -backward  : needs nothing to go first, but costs a flop,
+//                                 since both operands of g0 are live
 
 module retime_cmp (clk, a, b, c, q);
   input clk;
