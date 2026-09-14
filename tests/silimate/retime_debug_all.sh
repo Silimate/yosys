@@ -56,6 +56,8 @@ moves=(
 	"opt_retime_cmp.v|retime_cmp|-flop fc -cut r_or -forward + -flop fa -cut g0 -forward"
 	"retime_debug_designs.v|carryout|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|narrow|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|fullmul|-flop fa -cut m0 -forward"
+	"retime_debug_designs.v|signedmul|-flop fa -cut m0 -forward"
 	"retime_debug_designs.v|bitwise|-flop fa -cut o0 -forward"
 	"retime_debug_designs.v|bitwise|-flop fc -cut x0 -forward"
 	"retime_debug_designs.v|notpath|-flop fa -cut n0 -forward"

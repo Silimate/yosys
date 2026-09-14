@@ -1,0 +1,126 @@
+# Forward moves across $mul.
+#
+# $mul is the same merge as $add: two data inputs, a pure function, and Y
+# can be wider than either operand. What is worth its own test is signedness.
+# Unsigned 4'hf * 4'he is 8'hd2; signed they are -1 and -2 and the product
+# is 8'h02. A fold that ignored A_SIGNED/B_SIGNED would still look like a
+# successful move, so the signed section asserts the init value directly.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: unsigned \$mul, truncated product"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module muldes(input clk, input [3:0] a, b, output [3:0] q);
+  wire [3:0] ra, rb, y;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $mul #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top muldes
+check -assert
+select -assert-count 3 t:$dff
+design -save orig
+opt_retime -flop fa -cut m0 -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 1 c:m0 %x:+[A] w:a %i
+select -assert-count 1 c:m0 %x:+[B] w:b %i
+select -assert-count 1 c:m0 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+rename muldes gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: unsigned \$mul, full product, 4 bits to 8"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module fullmul(input clk, input [3:0] a, b, output [7:0] q);
+  wire [3:0] ra, rb;
+  wire [7:0] y;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $mul #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top fullmul
+check -assert
+select -assert-count 3 t:$dff
+design -save orig
+opt_retime -flop fa -cut m0 -forward
+check -assert
+# two 4-bit operand registers became one 8-bit register: 16 register bits to 16
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 1 c:m0 %x:+[A] w:a %i
+select -assert-count 1 c:m0 %x:+[B] w:b %i
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+select -assert-count 1 c:fq %x:+[D] w:y %i
+select -assert-count 1 c:m0 %x:+[Y] w:fa_retimed %i
+select -assert-count 1 c:fa %x:+[D] w:fa_retimed %i
+rename fullmul gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: signed \$mul, folding -1 * -2 to 2"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module signedmul(input clk, input [3:0] a, b, output [7:0] q);
+  (* init = 4'hf *) wire [3:0] ra;
+  (* init = 4'he *) wire [3:0] rb;
+  wire [7:0] y;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $mul #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(1))
+    m0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top signedmul
+# miter -make_assert compares cycle 0, and two undefined registers are
+# independent free variables that need not agree there, so the observing
+# register needs a defined start as well. Set before the save, so gold and
+# gate get the same one.
+setattr -set init 8'h00 w:q
+check -assert
+select -assert-count 3 t:$dff
+design -save orig
+opt_retime -flop fa -cut m0 -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+# 4'hf and 4'he as signed 4-bit are -1 and -2; the 8-bit product is 2.
+# The unsigned product of those bit patterns is 8'hd2, so this is the
+# assertion that would fail if the fold ignored A_SIGNED/B_SIGNED.
+select -assert-count 1 w:y a:init=8'h02 %i
+select -assert-count 0 w:ra a:init %i
+select -assert-count 0 w:rb a:init %i
+rename signedmul gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop

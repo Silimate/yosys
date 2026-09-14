@@ -34,6 +34,31 @@ module narrow(input clk, input [7:0] a, b, output [3:0] q);
   $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
 endmodule
 
+// $mul, unsigned full product (from opt_retime_mul.ys). Same merge as $add,
+// but Y is the sum of the operand widths, so fa grows from 4 bits to 8.
+module fullmul(input clk, input [3:0] a, b, output [7:0] q);
+  wire [3:0] ra, rb;
+  wire [7:0] y;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $mul #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Signed $mul with defined inits (from opt_retime_mul.ys). 4'hf * 4'he is
+// 8'h02 signed and 8'hd2 unsigned; the "Folded init" line is 8'h02.
+module signedmul(input clk, input [3:0] a, b, output [7:0] q);
+  (* init = 4'hf *) wire [3:0] ra;
+  (* init = 4'he *) wire [3:0] rb;
+  wire [7:0] y;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $mul #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(1))
+    m0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
 // $or and $xor, two independent cones (from opt_retime_cmp.ys). Each move
 // merges its other operand away: 6 registers become 4.
 module bitwise(input clk, input [7:0] a, b, c, d, output [7:0] qo, qx);

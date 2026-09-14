@@ -26,15 +26,14 @@
 //   opt_retime_merge_fanout.ys  a register on a merged operand that something
 //                         else reads, so it stays behind and only the cut is
 //                         rewired to its D
+//   opt_retime_mul.ys     $mul, the same merge as $add, plus signed folding
 //
 // Forward moves only. Backward moves are out of scope: the pass rejects
 // -backward while parsing arguments, so do not add designs or tests for them.
 //
-// Memories, FSMs and multipliers are out of scope: do not add designs for them.
-// TODO: revisit after the five categories above pass. $mul is mostly an adder
-// tree, so it should follow opt_retime_add.v; memories are not combinational
-// cells to move a register across; FSM control cones are a poor early
-// correctness target.
+// Memories and FSMs are out of scope: do not add designs for them. Memories
+// are not combinational cells to move a register across; FSM control cones
+// are a poor early correctness target.
 
 module retime_probe (clk, d, q);
   input clk, d;

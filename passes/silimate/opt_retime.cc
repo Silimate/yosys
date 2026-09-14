@@ -47,9 +47,9 @@ std::vector<IdString> data_inputs(Cell *cell)
 {
 	if (cell->type.in(ID($buf), ID($_BUF_)))
 		return {ID::A};
-	if (cell->type.in(ID($add), ID($sub), ID($and), ID($or), ID($xor), ID($xnor),
-			ID($eq), ID($ne), ID($lt), ID($le), ID($gt), ID($ge),
-			ID($shl), ID($shr)))
+	if (cell->type.in(ID($add), ID($sub), ID($mul), ID($and), ID($or), ID($xor),
+			ID($xnor), ID($eq), ID($ne), ID($lt), ID($le), ID($gt),
+			ID($ge), ID($shl), ID($shr)))
 		return {ID::A, ID::B};
 	if (cell->type.in(ID($not), ID($reduce_and), ID($reduce_or), ID($reduce_xor),
 			ID($reduce_xnor), ID($reduce_bool)))
@@ -771,11 +771,12 @@ struct OptRetimePass : public Pass {
 		log("        cell on the after-path of the register. May be one or more\n");
 		log("        cells away; every cell between the flop and the cut moves with\n");
 		log("        it. After the flop, the path must be a unique chain. Supported\n");
-		log("        cut types are $buf, $mux, $not, $add, $sub, $and, $or, $xor,\n");
-		log("        $xnor, $shl, $shr, the comparators ($eq, $ne, $lt, $le, $gt,\n");
-		log("        $ge) and the $reduce_* cells. Every input of the cut counts\n");
-		log("        as a data input, the $mux select and a shift amount included,\n");
-		log("        so all of them have to be registered or constant.\n");
+		log("        cut types are $buf, $mux, $not, $add, $sub, $mul, $and, $or,\n");
+		log("        $xor, $xnor, $shl, $shr, the comparators ($eq, $ne, $lt,\n");
+		log("        $le, $gt, $ge) and the $reduce_* cells. Every input of\n");
+		log("        the cut counts as a data input, the $mux select and a\n");
+		log("        shift amount included, so all of them have to be\n");
+		log("        registered or constant.\n");
 		log("\n");
 		log("    -forward\n");
 		log("        move the register downstream, past -cut. Required. Where the\n");
