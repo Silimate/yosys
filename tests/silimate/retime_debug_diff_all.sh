@@ -44,10 +44,6 @@ moves=(
 	"retime_debug_designs.v|narrow|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|fullmul|-flop fa -cut m0 -forward"
 	"retime_debug_designs.v|signedmul|-flop fa -cut m0 -forward"
-	"retime_debug_designs.v|nanddes|-flop fa -cut gnand -forward"
-	"retime_debug_designs.v|nmuxdes|-flop fa -cut gnmux -forward"
-	"retime_debug_designs.v|oai3des|-flop fa -cut goai3 -forward"
-	"retime_debug_designs.v|aoi4nor|-flop fa -cut gnor -forward"
 	"retime_debug_designs.v|bitwise|-flop fa -cut o0 -forward"
 	"retime_debug_designs.v|bitwise|-flop fc -cut x0 -forward"
 	"retime_debug_designs.v|notpath|-flop fa -cut n0 -forward"
@@ -63,24 +59,25 @@ moves=(
 	"retime_debug_designs.v|finerst|-flop ff -cut n0 -forward"
 	"retime_debug_designs.v|arstfold|-flop fa -cut o0 -forward"
 	"retime_debug_designs.v|tapped|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|halfconst|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|sliced|-flop fb -cut a0 -forward"
+	"retime_debug_designs.v|sliced|-flop f0 -cut a0 -forward"
 )
 
 # Designs the pass refuses. Keep this list identical to retime_debug_all.sh
 # too. A refused move has no diff to seed a neighborhood from, so these are
 # seeded from the cells the move named instead, the flop and the cut, and only
 # the before side is drawn. This is the gallery to read for retime_acc, whose
-# full netlist is too big to take in at once.
+# full netlist is too big to take in at once. REFUSE=1 aborts the run (and
+# skips index.html) if a listed move starts succeeding, so move it up.
 refusals=(
 	"retime_debug_designs.v|unflopped|-flop fa -cut a0 -forward"
-	"retime_debug_designs.v|halfconst|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|liveselect|-flop fa -cut m0 -forward"
 	"retime_debug_designs.v|enmix|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|rstmix|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|mixinit|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|signedshift|-flop fa -cut s0 -forward"
 	"retime_debug_designs.v|fine|-flop fa -cut a0 -forward"
-	"retime_debug_designs.v|sliced|-flop fb -cut a0 -forward"
-	"retime_debug_designs.v|sliced|-flop f0 -cut a0 -forward"
 	"opt_retime_acc.v|retime_acc|-flop f_acc -cut a_acc -forward"
 )
 
@@ -111,7 +108,7 @@ for entry in "${refusals[@]}"; do
 	echo "=== $top (refused): $move"
 	if ! OUT="$root/$label" PRE="${pre:-}" REFUSE=1 \
 			./retime_debug_diff.sh "$design" "$top" $move >"$root/$label.log" 2>&1; then
-		echo "  entry failed, see $root/$label.log" >&2
+		echo "  entry failed, see $root/$label.log (index.html not written)" >&2
 		exit 1
 	fi
 	grep -E '^(refused:|seeds:) ' "$root/$label.log" | sed 's/^/  /' || true
@@ -191,7 +188,8 @@ html = ["<html><head><style>",
         "code{background:#f4f4f4;padding:1px 4px}",
         "</style></head><body>",
         "<h1>opt_retime before / after (diff neighborhood)</h1>",
-        "<p>Each pair is the RTLIL-diff seed plus a combinational hop around it. "
+        "<p>Each pair is the RTLIL-diff seed plus a combinational hop around it, "
+        "then the union of those two cones so both pictures share the same window. "
         "<span style='color:#c62828'>Red</span> is the flop being moved (before), "
         "<span style='color:#2e7d32'>green</span> is that same flop after it hops, "
         "<span style='color:#ef6c00'>orange</span> is a sibling flop the merge deleted.</p>",

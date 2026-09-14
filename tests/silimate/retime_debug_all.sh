@@ -58,10 +58,6 @@ moves=(
 	"retime_debug_designs.v|narrow|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|fullmul|-flop fa -cut m0 -forward"
 	"retime_debug_designs.v|signedmul|-flop fa -cut m0 -forward"
-	"retime_debug_designs.v|nanddes|-flop fa -cut gnand -forward"
-	"retime_debug_designs.v|nmuxdes|-flop fa -cut gnmux -forward"
-	"retime_debug_designs.v|oai3des|-flop fa -cut goai3 -forward"
-	"retime_debug_designs.v|aoi4nor|-flop fa -cut gnor -forward"
 	"retime_debug_designs.v|bitwise|-flop fa -cut o0 -forward"
 	"retime_debug_designs.v|bitwise|-flop fc -cut x0 -forward"
 	"retime_debug_designs.v|notpath|-flop fa -cut n0 -forward"
@@ -77,6 +73,9 @@ moves=(
 	"retime_debug_designs.v|finerst|-flop ff -cut n0 -forward"
 	"retime_debug_designs.v|arstfold|-flop fa -cut o0 -forward"
 	"retime_debug_designs.v|tapped|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|halfconst|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|sliced|-flop fb -cut a0 -forward"
+	"retime_debug_designs.v|sliced|-flop f0 -cut a0 -forward"
 )
 
 # Designs the pass refuses, in the same format. These get one picture rather
@@ -85,22 +84,16 @@ moves=(
 # of sitting in the page as a stale claim.
 #
 # Each is a different reason, and retime_debug_designs.v explains what each one
-# shows. Every entry is pinned by a .ys test except the two sliced ones, which
-# are a move that ought to work rather than one that should not. sliced appears
-# twice because its two entry points fail two independent checks: from the wide
-# operand there is no single driver for input A, and from a slice the chain walk
-# never reaches the cut.
+# shows. Every entry is pinned by a .ys test. REFUSE=1 aborts the run (and
+# skips index.html) if a listed move starts succeeding, so move it up.
 refusals=(
 	"retime_debug_designs.v|unflopped|-flop fa -cut a0 -forward"
-	"retime_debug_designs.v|halfconst|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|liveselect|-flop fa -cut m0 -forward"
 	"retime_debug_designs.v|enmix|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|rstmix|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|mixinit|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|signedshift|-flop fa -cut s0 -forward"
 	"retime_debug_designs.v|fine|-flop fa -cut a0 -forward"
-	"retime_debug_designs.v|sliced|-flop fb -cut a0 -forward"
-	"retime_debug_designs.v|sliced|-flop f0 -cut a0 -forward"
 	"opt_retime_acc.v|retime_acc|-flop f_acc -cut a_acc -forward"
 )
 
@@ -135,7 +128,7 @@ for entry in "${refusals[@]}"; do
 	echo "=== $top (refused): $move"
 	if ! OUT="$root/$label" PRE="${pre:-}" REFUSE=1 \
 			./retime_debug.sh "$design" "$top" $move >"$root/$label.log" 2>&1; then
-		echo "  entry failed, see $root/$label.log" >&2
+		echo "  entry failed, see $root/$label.log (index.html not written)" >&2
 		exit 1
 	fi
 	grep -E '^refused: ' "$root/$label.log" | sed 's/^/  /' || true

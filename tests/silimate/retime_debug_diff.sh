@@ -42,7 +42,9 @@
 # Writes <OUT>/{before,after}.{il,json,svg,png}, {before,after}_full.json of
 # the whole design (for register counts, not pictures), {before,after}_show
 # graphviz renderings of the neighborhood, and seeds.txt listing the cells
-# and wires the RTLIL diff considered changed.
+# and wires the RTLIL diff considered changed. The neighborhood is the
+# superset of the before and after cones, so both pictures share the same
+# window (same start/end ports as far as the two netlists allow).
 
 set -euo pipefail
 
@@ -98,7 +100,13 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 rm -f "$out"/before.* "$out"/after.* "$out"/before_show.* "$out"/after_show.* \
 	"$out"/before_full.json "$out"/after_full.json "$out"/seeds.txt "$out"/seeds.ys \
-	"$out"/diff_colors.json "$out"/refusal.txt "$out"/yosys.log
+	"$out"/diff_colors.json "$out"/refusal.txt "$out"/yosys.log \
+	"$out"/before_view.sel "$out"/after_view.sel "$out"/view_union.sel \
+	"$out"/xor_ports.sel "$out"/before_viewx.sel "$out"/after_viewx.sel \
+	"$out"/seeds_union.ys "$out"/seeds_expand.ys \
+	"$out"/before_view.json "$out"/after_view.json \
+	"$out"/dump_before.ys "$out"/dump_after.ys \
+	"$out"/dump_before_ports.ys "$out"/dump_after_ports.ys
 
 clean_cmd=""
 [ "$clean" = "1" ] && clean_cmd="opt_clean"
@@ -345,11 +353,117 @@ open(svg_path, "w").write(text[: gt + 1] + "\n<style>\n" + "\n".join(css) + "\n<
 PY
 }
 
-# Same selection on both sides: objects that exist on only one side simply
-# fail to match there. submod copies the neighborhood into its own module so
-# write_json is a complete netlist rather than a ragged -selected fragment.
-# show runs first, because submod would add a second module and show -format
-# svg refuses that.
+# Expand the cone independently on each side, then replace @view with the
+# union. The same seed expression follows the new topology, so the before
+# window often ends at the cut's Y while the after window starts at the
+# flop's new D; the superset is the shared frame. If the two submods still
+# disagree on ports, that is usually a leftover flop's Q vs its D: one hop
+# from those unmatched ports pulls the flop into both pictures. Objects
+# that exist on only one side simply fail to match there. submod copies
+# the neighborhood into its own module so write_json is a complete netlist
+# rather than a ragged -selected fragment. show runs first, because submod
+# would add a second module and show -format svg refuses that.
+dump_view() {
+	local stage=$1
+	local ys_in=$2
+	local sel_out=$3
+	local ys=$out/dump_${stage}.ys
+	{
+		echo "read_rtlil $out/$stage.il"
+		echo "cd $top"
+		cat "$ys_in"
+		echo "select -write $sel_out @view"
+	} >"$ys"
+	"$yosys" -q -s "$ys"
+}
+
+dump_ports() {
+	local stage=$1
+	local ys_in=$2
+	local json_out=$3
+	local ys=$out/dump_${stage}_ports.ys
+	{
+		echo "read_rtlil $out/$stage.il"
+		echo "cd $top"
+		cat "$ys_in"
+		echo "submod -copy -noclean -name diffview @view"
+		echo "select -clear"
+		echo "select diffview"
+		echo "write_json -selected $json_out"
+	} >"$ys"
+	"$yosys" -q -s "$ys"
+}
+
+if [ "$refuse" != "1" ]; then
+	dump_view before "$out/seeds.ys" "$out/before_view.sel"
+	dump_view after "$out/seeds.ys" "$out/after_view.sel"
+	python3 - "$out/before_view.sel" "$out/after_view.sel" "$out/view_union.sel" <<'PY'
+import sys
+
+def load(path):
+    with open(path) as f:
+        return [line.strip() for line in f if line.strip()]
+
+before, after = load(sys.argv[1]), load(sys.argv[2])
+union = sorted(set(before) | set(after))
+with open(sys.argv[3], "w") as f:
+    f.write("\n".join(union) + ("\n" if union else ""))
+print("view: %d object(s) (union of %d before, %d after)" % (
+    len(union), len(before), len(after)))
+PY
+	{
+		cat "$out/seeds.ys"
+		echo "select -set view -read $out/view_union.sel"
+	} >"$out/seeds_union.ys"
+	dump_ports before "$out/seeds_union.ys" "$out/before_view.json"
+	dump_ports after "$out/seeds_union.ys" "$out/after_view.json"
+	python3 - "$top" "$out/before_view.json" "$out/after_view.json" "$out/xor_ports.sel" <<'PY'
+import json, sys
+
+top, before_json, after_json, xor_sel = sys.argv[1:5]
+
+
+def ports(path):
+    design = json.load(open(path))
+    m = next(iter(design["modules"].values()))
+    return set(m.get("ports", {}))
+
+
+bp, ap = ports(before_json), ports(after_json)
+xor = sorted((bp ^ ap))
+with open(xor_sel, "w") as f:
+    f.write("".join("%s/%s\n" % (top, n) for n in xor))
+if xor:
+    print("view: unmatched ports %s vs %s" % (
+        " ".join(sorted(bp - ap)) or "(none)",
+        " ".join(sorted(ap - bp)) or "(none)"))
+else:
+    print("view: ports already match (%s)" % (" ".join(sorted(bp)) or "none"))
+PY
+	if [ -s "$out/xor_ports.sel" ]; then
+		{
+			cat "$out/seeds_union.ys"
+			echo "select -set xorw -read $out/xor_ports.sel"
+			echo "select -set view @view @xorw %x1:-[CLK,C,EN] %u"
+		} >"$out/seeds_expand.ys"
+		dump_view before "$out/seeds_expand.ys" "$out/before_viewx.sel"
+		dump_view after "$out/seeds_expand.ys" "$out/after_viewx.sel"
+		python3 - "$out/before_viewx.sel" "$out/after_viewx.sel" "$out/view_union.sel" <<'PY'
+import sys
+
+def load(path):
+    with open(path) as f:
+        return [line.strip() for line in f if line.strip()]
+
+union = sorted(set(load(sys.argv[1])) | set(load(sys.argv[2])))
+with open(sys.argv[3], "w") as f:
+    f.write("\n".join(union) + ("\n" if union else ""))
+print("view: %d object(s) after matching unmatched ports" % len(union))
+PY
+	fi
+	echo "select -set view -read $out/view_union.sel" >>"$out/seeds.ys"
+fi
+
 render() {
 	local stage=$1
 	local ys=$out/render_$stage.ys

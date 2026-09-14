@@ -5,8 +5,6 @@
 // of one in a test; the tests stay the source of truth.
 //
 // Two groups: the supported moves first, then the designs the pass refuses.
-// The one module with no test behind it is sliced, at the end, which is a move
-// that ought to work rather than one that should not.
 //
 // Delete this alongside the retime_debug*.sh scripts.
 
@@ -57,58 +55,6 @@ module signedmul(input clk, input [3:0] a, b, output [7:0] q);
   $mul #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(1))
     m0 (.A(ra), .B(rb), .Y(y));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
-endmodule
-
-// Gate-level $_NAND_ (from opt_retime_gates.ys). Same merge as $and, 1-bit,
-// and NAND of zeros is 1 so the folded init is the interesting part.
-module nanddes(input clk, input a, b, output q);
-  (* init = 1'b0 *) wire ra, rb;
-  wire y;
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
-  $_NAND_ gnand (.A(ra), .B(rb), .Y(y));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
-endmodule
-
-// $_NMUX_ (from opt_retime_gates.ys). S is a data input, same as $mux, and
-// the output is inverted.
-module nmuxdes(input clk, input a, b, s, output q);
-  (* init = 1'b0 *) wire ra, rb, rs;
-  wire y;
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fs (.CLK(clk), .D(s), .Q(rs));
-  $_NMUX_ gnmux (.A(ra), .B(rb), .S(rs), .Y(y));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
-endmodule
-
-// $_OAI3_ as the cut (from opt_retime_gates.ys). Three data inputs merge
-// into one register.
-module oai3des(input clk, input a, b, c, output q);
-  (* init = 1'b0 *) wire ra, rb, rc;
-  wire y;
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
-  $_OAI3_ goai3 (.A(ra), .B(rb), .C(rc), .Y(y));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
-endmodule
-
-// $_AOI4_ is on the path, $_NOR_ is the cut (from opt_retime_gates.ys).
-// Without $_AOI4_ on the data_inputs list this move reports the NOR as
-// not on the after-path.
-module aoi4nor(input clk, input a, b, c, d, e, output q);
-  (* init = 1'b1 *) wire ra, rb;
-  (* init = 1'b0 *) wire rc, rd, re;
-  wire yaoi, y;
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
-  $_AOI4_ gaoi (.A(ra), .B(rb), .C(rc), .D(rd), .Y(yaoi));
-  $_NOR_  gnor (.A(yaoi), .B(re), .Y(y));
-  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
 endmodule
 
 // $or and $xor, two independent cones (from opt_retime_cmp.ys). Each move
@@ -333,6 +279,43 @@ module arstfold(input clk, rst, input [7:0] a, b, output [7:0] q);
     fq (.CLK(clk), .ARST(rst), .D(s), .Q(q));
 endmodule
 
+// An operand that is half register and half constant (from
+// opt_retime_const.ys). A wholly constant operand folds and a wholly
+// registered one merges; B here is a concatenation of the two, so each bit
+// is classified on its own: the constant nibble stays, fb's low nibble
+// merges, and fa resizes onto Y.
+module halfconst(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B({4'h0, rb[3:0]}), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Bit-sliced concat on A (from opt_retime_bitslice.ys). Four 2-bit registers
+// sharing one enable, plus a wide B. Entering from a slice (f0) or from the
+// wide sibling (fb) is the same merge: the named flop resizes to Y and the
+// other bit-flops disappear. Give the slices different enables and it stops
+// being sound, which is what enmix shows.
+module sliced(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [1:0] r0, r1, r2, r3;
+  wire [7:0] rb, s;
+  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f0 (.CLK(clk), .EN(en), .D(a[1:0]), .Q(r0));
+  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(a[3:2]), .Q(r1));
+  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en), .D(a[5:4]), .Q(r2));
+  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f3 (.CLK(clk), .EN(en), .D(a[7:6]), .Q(r3));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(en), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A({r3, r2, r1, r0}), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+
 // ==========================================================================
 // Designs the pass refuses.
 //
@@ -351,20 +334,6 @@ module unflopped(input clk, input [7:0] a, b, output [7:0] q);
   $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
     a0 (.A(ra), .B(b), .Y(s));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
-endmodule
-
-// An operand that is half register and half constant (from
-// opt_retime_const.ys). A wholly constant operand folds and a wholly
-// registered one merges, but B here is a concatenation of the two, so it is
-// neither: a register feeds only part of the port. The picture is worth
-// reading next to sliced at the bottom, which fails the same check.
-module halfconst(input clk, input [7:0] a, b, output [7:0] q);
-  wire [7:0] ra, rb, y;
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
-  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
-    a0 (.A(ra), .B({4'h0, rb[3:0]}), .Y(y));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
 endmodule
 
 // A $mux whose select is live (from opt_retime_mux.ys). The select is an
@@ -465,33 +434,4 @@ module fine(input clk, input a, b, output [1:0] q);
   $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(2), .A_SIGNED(0), .B_SIGNED(0))
     a0 (.A(ra), .B(rb), .Y(s));
   $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
-endmodule
-
-// The odd one out: a refusal that is a gap rather than a boundary, and the one
-// module here with no .ys test behind it.
-//
-// Input A is four 2-bit registers concatenated, bit-sliced datapath style, all
-// sharing one enable. It trips the same check as halfconst, no single driver
-// for the whole port, and it also cannot be entered from a slice, since the
-// chain walk only follows a port carrying the whole signal. But unlike every
-// other design in this section the move is sound: with one shared enable the
-// slices are all the same age, so the concatenation behaves as one register
-// and hand-building the retimed form proves equivalent. Give the slices
-// different enables and it stops being sound, which is what enmix shows.
-module sliced(input clk, en, input [7:0] a, b, output [7:0] q);
-  wire [1:0] r0, r1, r2, r3;
-  wire [7:0] rb, s;
-  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
-    f0 (.CLK(clk), .EN(en), .D(a[1:0]), .Q(r0));
-  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
-    f1 (.CLK(clk), .EN(en), .D(a[3:2]), .Q(r1));
-  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
-    f2 (.CLK(clk), .EN(en), .D(a[5:4]), .Q(r2));
-  $dffe #(.WIDTH(2), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
-    f3 (.CLK(clk), .EN(en), .D(a[7:6]), .Q(r3));
-  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
-    fb (.CLK(clk), .EN(en), .D(b), .Q(rb));
-  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
-    a0 (.A({r3, r2, r1, r0}), .B(rb), .Y(s));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
 endmodule
