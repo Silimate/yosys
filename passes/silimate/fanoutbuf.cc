@@ -25,6 +25,21 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+// Unique name for a buffer whose output wire is "<name>_out". The wire name has
+// to be free too: a netlist restored from an earlier run can keep a public
+// "<cell>_fbuf_out" wire after the $buf that drove it was renamed or removed.
+// Shares uniquify()'s per-module index so a large tree stays linear.
+static IdString uniquify_buffer_name(Module *module, const std::string &base)
+{
+	int &index = module->uniquify_cache_[base];
+	while (true) {
+		IdString name = module->uniquify(base, index);
+		if (module->count_id(name.str() + "_out") == 0)
+			return name;
+		index++;
+	}
+}
+
 struct FanoutbufPass : public Pass {
 	FanoutbufPass() : Pass("fanoutbuf", "insert $buf cells to limit fanout") { }
 	void help() override
@@ -121,11 +136,8 @@ struct FanoutbufPass : public Pass {
 						vector<Wire *> bufouts(nbufs, nullptr);
 						for (int i = 0; i < nbufs; i++) {
 							// New buffer name should be unique and short
-							IdString buf_name;
-							if (cell->type == ID::$buf)
-								buf_name = NEW_ID2;
-							else
-								buf_name = NEW_ID2_SUFFIX("fbuf");
+							IdString buf_name = uniquify_buffer_name(module, cell->type == ID::$buf ?
+									removeNumericSuffix(cell->name.str()) : cell->name.str() + "_fbuf");
 							// Create buffer, connect input to bit and output to new wire
 							Wire *bufout = module->addWire(buf_name.str() + "_out");
 							bufout->set_src_attribute(cell->get_src_attribute());
