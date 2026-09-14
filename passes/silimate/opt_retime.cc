@@ -42,29 +42,21 @@ bool is_buf(Cell *cell)
 // reg(S) ? reg(B) : reg(A) equals reg(S ? B : A) only when S is registered too.
 //
 // The same holds for $logic_and, $eqx, $neg and so on: one entry each, left out
-// until something tests them. The $_* cells are the techmap form of the word-
-// level types already listed, and have to be here even when they are not the
-// cut: collect_chain only follows data_inputs, so an $_AOI4_ in the middle of
-// a chain would otherwise make a later $_NOR_ look unreachable.
+// until something tests them. Gate-level $_AND_/$_NOR_/$_AOI* cells are not
+// listed: this pass retimes word-level IR, before splitcells.
 std::vector<IdString> data_inputs(Cell *cell)
 {
 	if (cell->type.in(ID($buf), ID($_BUF_)))
 		return {ID::A};
-	if (cell->type.in(ID($not), ID($_NOT_), ID($reduce_and), ID($reduce_or),
+	if (cell->type.in(ID($not), ID($reduce_and), ID($reduce_or),
 			ID($reduce_xor), ID($reduce_xnor), ID($reduce_bool)))
 		return {ID::A};
 	if (cell->type.in(ID($add), ID($sub), ID($mul), ID($and), ID($or), ID($xor),
 			ID($xnor), ID($eq), ID($ne), ID($lt), ID($le), ID($gt),
-			ID($ge), ID($shl), ID($shr), ID($_AND_), ID($_NAND_),
-			ID($_OR_), ID($_NOR_), ID($_XOR_), ID($_XNOR_),
-			ID($_ANDNOT_), ID($_ORNOT_)))
+			ID($ge), ID($shl), ID($shr)))
 		return {ID::A, ID::B};
-	if (cell->type.in(ID($mux), ID($_MUX_), ID($_NMUX_)))
+	if (cell->type == ID($mux))
 		return {ID::A, ID::B, ID::S};
-	if (cell->type.in(ID($_AOI3_), ID($_OAI3_)))
-		return {ID::A, ID::B, ID::C};
-	if (cell->type.in(ID($_AOI4_), ID($_OAI4_)))
-		return {ID::A, ID::B, ID::C, ID::D};
 	return {};
 }
 
@@ -640,9 +632,7 @@ Const fold_value(Module *, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 
 		bool err = false;
 		Const out;
-		if (GetSize(args) == 4)
-			out = CellTypes::eval(step.cell, args[0], args[1], args[2], args[3], &err);
-		else if (GetSize(args) == 3)
+		if (GetSize(args) == 3)
 			out = CellTypes::eval(step.cell, args[0], args[1], args[2], &err);
 		else if (GetSize(args) == 2)
 			out = CellTypes::eval(step.cell, args[0], args[1], &err);
@@ -1066,13 +1056,9 @@ struct OptRetimePass : public Pass {
 		log("        bit-flops are merged. Supported cut types are $buf, $mux,\n");
 		log("        $not, $add, $sub, $mul, $and, $or, $xor, $xnor, $shl, $shr,\n");
 		log("        the comparators ($eq, $ne, $lt, $le, $gt, $ge) and the\n");
-		log("        $reduce_* cells, plus the matching gate-level cells:\n");
-		log("        $_NOT_, $_AND_/$_NAND_/$_OR_/$_NOR_,\n");
-		log("        $_XOR_/$_XNOR_, $_ANDNOT_/$_ORNOT_, $_MUX_/$_NMUX_,\n");
-		log("        $_AOI3_/$_OAI3_ and $_AOI4_/$_OAI4_. Every input of the\n");
-		log("        cut counts as a data input, the $mux select and a shift\n");
-		log("        amount included, so all of them have to be registered or\n");
-		log("        constant.\n");
+		log("        $reduce_* cells. Every input of the cut counts as a data\n");
+		log("        input, the $mux select and a shift amount included, so all\n");
+		log("        of them have to be registered or constant.\n");
 		log("\n");
 		log("    -forward\n");
 		log("        move the register downstream, past -cut. Required. Where the\n");

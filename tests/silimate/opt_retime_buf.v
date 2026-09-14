@@ -27,9 +27,6 @@
 //                         else reads, so it stays behind and only the cut is
 //                         rewired to its D
 //   opt_retime_mul.ys     $mul, the same merge as $add, plus signed folding
-//   opt_retime_gates.ys   gate-level $_NOT_/$_NAND_/$_MUX_/$_AOI*/$_OAI*
-//                         cells, including an $_AOI4_ that is only on the
-//                         path to a later $_NOR_ cut
 //
 // Forward moves only. Backward moves are out of scope: the pass rejects
 // -backward while parsing arguments, so do not add designs or tests for them.
