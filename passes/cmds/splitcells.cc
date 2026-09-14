@@ -18,6 +18,7 @@
  */
 
 #include "kernel/yosys.h"
+#include "kernel/ff.h"
 #include "kernel/sigtools.h"
 
 USING_YOSYS_NAMESPACE
@@ -252,6 +253,9 @@ struct SplitcellsWorker
 				}
 
 				slice->setParam(ID::WIDTH, GetSize(slice->getPort(ID::Q)));
+
+				// Add RTL bind attribute to the slice from a wide cell
+				slice_rtl_bind_attr(slice->attributes, GetSize(cell->getPort(ID::Q)), slice_lsb, slice_msb); // SILIMATE
 
 				log_debug("  slice %d: %s => %s\n", i, slice_name.unescape(), log_signal(slice->getPort(ID::Q)));
 			}

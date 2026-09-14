@@ -333,6 +333,93 @@ FfData::FfData(FfInitVals *initvals, Cell *cell_) : FfData(cell_->module, initva
 	manufacture_info(cell, *this, initvals);
 }
 
+// SILIMATE: `rtl_bind` attribute helpers, see kernel/ff.h
+std::vector<RtlBindBit> YOSYS_NAMESPACE_PREFIX rtl_bind_expand(const std::string &value)
+{
+	auto number = [](const std::string &s) {
+		return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos ? atoi(s.c_str()) : -1;
+	};
+	std::vector<RtlBindBit> bits;
+	std::istringstream tokens(value);
+	for (std::string token; tokens >> token;) {
+		if (token == "-") { // this Q bit has no bind
+			bits.emplace_back();
+			continue;
+		}
+		// token is obj/width[first] or obj/width[first:last]
+		size_t open = token.rfind('['), slash = token.rfind('/', open);
+		if (open == std::string::npos || slash == std::string::npos || slash == 0 || token.back() != ']')
+			return {}; // malformed: drop the whole attribute
+		std::string range = token.substr(open + 1, token.size() - open - 2); // inside the []
+		size_t colon = range.find(':');
+		RtlBindBit bind;
+		bind.valid = true;
+		bind.obj = token.substr(0, slash);
+		bind.width = number(token.substr(slash + 1, open - slash - 1)); // between / and [
+		int first = number(range.substr(0, colon));
+		int last = colon == std::string::npos ? first : number(range.substr(colon + 1));
+		if (bind.width < 0 || first < 0 || last < first || last >= bind.width)
+			return {};
+		for (bind.bit = first; bind.bit <= last; bind.bit++)
+			bits.push_back(bind); // one entry per bit in the range
+	}
+	return bits;
+}
+
+// Inverse of expand: merge consecutive bits of the same object into obj/width[first:last]
+std::string YOSYS_NAMESPACE_PREFIX rtl_bind_compress(const std::vector<RtlBindBit> &bits)
+{
+	std::string out;
+	for (size_t i = 0; i < bits.size();) {
+		if (!out.empty())
+			out += ' ';
+		if (!bits[i].valid) {
+			out += '-';
+			i++;
+			continue;
+		}
+		size_t j = i + 1;
+		// grow j while the next bit is the same object, one index higher
+		while (j < bits.size() && bits[j].valid && bits[j].obj == bits[i].obj &&
+				bits[j].width == bits[i].width && bits[j].bit == bits[j - 1].bit + 1)
+			j++;
+		out += bits[i].obj + "/" + std::to_string(bits[i].width) + "[" + std::to_string(bits[i].bit);
+		if (j - i > 1)
+			out += ":" + std::to_string(bits[j - 1].bit); // more than one bit: write [first:last]
+		out += "]";
+		i = j;
+	}
+	return out;
+}
+
+// Keep only some of a width-bit cell's rtl_bind entries (the Q bits in `bits`)
+void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, const std::vector<int> &bits)
+{
+	auto it = attributes.find(ID(rtl_bind));
+	if (it == attributes.end())
+		return;
+	std::vector<RtlBindBit> all = rtl_bind_expand(it->second.decode_string());
+	if (GetSize(all) != width) {
+		attributes.erase(it); // string does not match this cell; drop it rather than lie
+		return;
+	}
+	std::vector<RtlBindBit> kept;
+	for (int b : bits) {
+		log_assert(b >= 0 && b < width);
+		kept.push_back(all[b]); // parent Q bit b becomes the next bit of the slice
+	}
+	it->second = Const(rtl_bind_compress(kept));
+}
+
+// Same as above for a contiguous [lsb, msb] slice
+void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, int lsb, int msb)
+{
+	std::vector<int> bits;
+	for (int b = lsb; b <= msb; b++)
+		bits.push_back(b);
+	slice_rtl_bind_attr(attributes, width, bits);
+}
+
 FfData FfData::slice(const std::vector<int> &bits) {
 	FfData res(module, initvals, NEW_ID4); // SILIMATE: Improve the naming
 	res.sig_clk = sig_clk;
@@ -358,6 +445,7 @@ FfData FfData::slice(const std::vector<int> &bits) {
 	res.pol_clr = pol_clr;
 	res.pol_set = pol_set;
 	res.attributes = attributes;
+	slice_rtl_bind_attr(res.attributes, width, bits); // SILIMATE: keep the RTL bind of the kept bits
 	std::optional<Const::Builder> arst_bits;
 	if (has_arst)
 		arst_bits.emplace(bits.size());

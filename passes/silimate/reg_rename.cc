@@ -19,6 +19,7 @@
 
 #include <algorithm>
 
+#include "kernel/ff.h"
 #include "kernel/fstdata.h"
 #include "kernel/newcelltypes.h"
 #include "kernel/yosys.h"
@@ -26,11 +27,6 @@
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
-
-// Attributes used for register renaming, should be stamped beforehand based on elaborator convention.
-#define RTL_OBJ_ATTR ID(rtl_obj)
-#define RTL_OBJ_BIT_ATTR ID(rtl_obj_bit)
-#define RTL_OBJ_WIDTH_ATTR ID(rtl_obj_width)
 
 // One dumped signal belonging to an RTL object.
 struct DumpLeaf {
@@ -58,6 +54,16 @@ static bool stamped_int(Cell *cell, IdString attr, int &out)
 		return false;
 	out = std::stoi(text);
 	return true;
+}
+
+// The `rtl_obj` stamp of RTLIL cached before the importer stamped `rtl_bind`
+static RtlBindBit legacy_bind(Cell *cell)
+{
+	RtlBindBit bind;
+	bind.obj = cell->get_string_attribute(ID(rtl_obj));
+	bind.valid = !bind.obj.empty() && stamped_int(cell, ID(rtl_obj_bit), bind.bit) &&
+			stamped_int(cell, ID(rtl_obj_width), bind.width);
+	return bind;
 }
 
 static std::string first_component(const std::string &rel)
@@ -317,16 +323,16 @@ struct RegRenameInstance {
 			if (!StaticCellTypes::categories.is_ff(cell->type))
 				continue;
 
-			// Which RTL object bit this flop holds, stamped before optimization
-			int obj_bit = 0, obj_width = 0;
-			if (!cell->has_attribute(RTL_OBJ_ATTR) || !stamped_int(cell, RTL_OBJ_BIT_ATTR, obj_bit) ||
-					!stamped_int(cell, RTL_OBJ_WIDTH_ATTR, obj_width)) {
+			// Which RTL object bits this flop holds, stamped by the importer (kernel/ff.h)
+			std::vector<RtlBindBit> bind = rtl_bind_expand(cell->get_string_attribute(ID(rtl_bind)));
+			if (bind.empty() || !bind[0].valid)
+				bind = {legacy_bind(cell)};
+			if (!bind[0].valid) {
 				log_warning("Cell %s in scope %s has no usable RTL bind stamp\n",
 						log_id(cell->name), vcd_scope.c_str());
 				stats.no_stamp++;
 				continue;
 			}
-			std::string obj = cell->get_string_attribute(RTL_OBJ_ATTR);
 
 			for (auto &conn : cell->connections()) {
 				if (conn.first != ID::Q || !conn.second.is_chunk())
@@ -339,79 +345,110 @@ struct RegRenameInstance {
 				if (!old_wire || old_wire->port_input)
 					continue;
 
-				// Locate obj[obj_bit] among the signals the waveform dumped for it
-				auto obj_it = objects.find(vcd_scope + "." + obj);
-				DumpLeaf leaf;
-				int leaf_bit = 0;
-				std::string dump_path;
-				bool placed = obj_it != objects.end() &&
-						resolve(obj_it->second, obj_width, obj_bit, leaf, leaf_bit);
-
-				// A flattened interface pin is dumped under the parent's actual, so it is not
-				// in this scope's object map. bind_interface_ports already put that path on the
-				// pin, so rename onto the pin itself and let sim_src do the lookup.
-				Wire *pin = placed ? nullptr : module->wire(RTLIL::escape_id(obj));
-				if (pin && pin->has_attribute(ID(sim_src)) && GetSize(pin) == obj_width &&
-						obj_bit >= 0 && obj_bit < obj_width) {
-					dump_path = pin->get_string_attribute(ID(sim_src));
-					leaf = {obj, "", GetSize(pin), pin->start_offset};
-					leaf_bit = obj_bit;
-					placed = true;
+				// A legacy stamp names the first bit only; the rest of the cell follows it
+				for (int i = 1; GetSize(bind) == 1 && i < qbits.width; i++) {
+					bind.push_back(bind[0]);
+					bind.back().bit += i;
+				}
+				if (GetSize(bind) != qbits.width) {
+					log_warning("Cell %s in scope %s has a %d-bit RTL bind stamp for %d Q bit(s)\n",
+							log_id(cell->name), vcd_scope.c_str(), GetSize(bind), qbits.width);
+					stats.no_stamp++;
+					continue;
 				}
 
-				if (!placed) {
-					if (obj_it == objects.end()) {
-						log_warning("Object %s of cell %s is not in the waveform, scope %s\n",
-								obj.c_str(), log_id(cell->name), vcd_scope.c_str());
-						stats.no_object++;
-					} else {
-						log_warning("Cannot place bit %d of %d-bit object %s, dumped as %d "
-								"signal(s), for cell %s in scope %s\n", obj_bit, obj_width,
-								obj.c_str(), GetSize(obj_it->second), log_id(cell->name),
-								vcd_scope.c_str());
-						stats.no_bit++;
+				// Rename each run of Q bits bound to consecutive bits of one object
+				int bound_bits = 0;
+				for (int start = 0, end; start < qbits.width; start = end) {
+					for (end = start + 1; end < qbits.width && bind[end].valid && bind[end].obj == bind[start].obj &&
+							bind[end].width == bind[start].width && bind[end].bit == bind[end - 1].bit + 1; end++);
+					if (!bind[start].valid) {
+						log_warning("Q bit %d of cell %s in scope %s has no RTL bind\n",
+								start, log_id(cell->name), vcd_scope.c_str());
+						stats.no_stamp++;
+						continue;
 					}
+					SigChunk run(old_wire, qbits.offset + start, end - start);
+					std::string obj = bind[start].obj;
+					int obj_bit = bind[start].bit, obj_width = bind[start].width;
+
+					// Locate obj[obj_bit] among the signals the waveform dumped for it
+					auto obj_it = objects.find(vcd_scope + "." + obj);
+					DumpLeaf leaf;
+					int leaf_bit = 0;
+					std::string dump_path;
+					bool placed = obj_it != objects.end() &&
+							resolve(obj_it->second, obj_width, obj_bit, leaf, leaf_bit);
+
+					// A flattened interface pin is dumped under the parent's actual, so it is not
+					// in this scope's object map. bind_interface_ports already put that path on the
+					// pin, so rename onto the pin itself and let sim_src do the lookup.
+					Wire *pin = placed ? nullptr : module->wire(RTLIL::escape_id(obj));
+					if (pin && pin->has_attribute(ID(sim_src)) && GetSize(pin) == obj_width &&
+							obj_bit >= 0 && obj_bit < obj_width) {
+						dump_path = pin->get_string_attribute(ID(sim_src));
+						leaf = {obj, "", GetSize(pin), pin->start_offset};
+						leaf_bit = obj_bit;
+						placed = true;
+					}
+
+					if (!placed) {
+						if (obj_it == objects.end()) {
+							log_warning("Object %s of cell %s is not in the waveform, scope %s\n",
+									obj.c_str(), log_id(cell->name), vcd_scope.c_str());
+							stats.no_object++;
+						} else {
+							log_warning("Cannot place bit %d of %d-bit object %s, dumped as %d "
+									"signal(s), for cell %s in scope %s\n", obj_bit, obj_width,
+									obj.c_str(), GetSize(obj_it->second), log_id(cell->name),
+									vcd_scope.c_str());
+							stats.no_bit++;
+						}
+						continue;
+					}
+
+					// The flop must fit inside the single dumped element it landed in
+					if (leaf_bit < 0 || leaf_bit + run.width > leaf.width) {
+						log_warning("Bit index %d is invalid for wire indices [%d:%d] for '%s'\n",
+								leaf.offset + leaf_bit, leaf.offset + leaf.width - 1, leaf.offset,
+								leaf.name.c_str());
+						stats.no_bit++;
+						continue;
+					}
+
+					Wire *target = dump_wire(target_wires, leaf, dump_path);
+					if (target == old_wire)
+						continue; // already the wire the dump expects
+
+					// Multiple-driver guard: another flop may have claimed these bits
+					bool taken = false;
+					for (int i = 0; i < run.width && !taken; i++)
+						taken = claimed_bits.count(SigBit(target, leaf_bit + i));
+					if (taken) {
+						log_warning("Skipping cell %s: target %s[%d] already driven by another cell\n",
+								log_id(cell->name), leaf.name.c_str(), leaf.offset + leaf_bit);
+						continue;
+					}
+
+					if (debug)
+						log("Connecting %s (%s[%d]) to %s[%d]\n", log_id(old_wire), obj.c_str(),
+								obj_bit, leaf.name.c_str(), leaf.offset + leaf_bit);
+
+					bound_bits += run.width;
+					for (int i = 0; i < run.width; i++) {
+						SigBit old(old_wire, run.offset + i);
+						SigBit renamed(target, leaf_bit + i);
+						bit_map[old] = renamed;
+						claimed_bits.insert(renamed);
+						// Moving the flop off an output port leaves it undriven; alias it back.
+						if (old_wire->port_output)
+							port_aliases.emplace_back(old, renamed);
+					}
+				}
+				if (!bound_bits)
 					continue;
-				}
-
-				// The flop must fit inside the single dumped element it landed in
-				if (leaf_bit < 0 || leaf_bit + qbits.width > leaf.width) {
-					log_warning("Bit index %d is invalid for wire indices [%d:%d] for '%s'\n",
-							leaf.offset + leaf_bit, leaf.offset + leaf.width - 1, leaf.offset,
-							leaf.name.c_str());
-					stats.no_bit++;
-					continue;
-				}
-
-				Wire *target = dump_wire(target_wires, leaf, dump_path);
-				if (target == old_wire)
-					continue; // already the wire the dump expects
-
-				// Multiple-driver guard: another flop may have claimed these bits
-				bool taken = false;
-				for (int i = 0; i < qbits.width && !taken; i++)
-					taken = claimed_bits.count(SigBit(target, leaf_bit + i));
-				if (taken) {
-					log_warning("Skipping cell %s: target %s[%d] already driven by another cell\n",
-							log_id(cell->name), leaf.name.c_str(), leaf.offset + leaf_bit);
-					continue;
-				}
-
-				if (debug)
-					log("Connecting %s (%s[%d]) to %s[%d]\n", log_id(old_wire), obj.c_str(),
-							obj_bit, leaf.name.c_str(), leaf.offset + leaf_bit);
-
-				for (int i = 0; i < qbits.width; i++) {
-					SigBit old(old_wire, qbits.offset + i);
-					SigBit renamed(target, leaf_bit + i);
-					bit_map[old] = renamed;
-					claimed_bits.insert(renamed);
-					// Moving the flop off an output port leaves it undriven; alias it back.
-					if (old_wire->port_output)
-						port_aliases.emplace_back(old, renamed);
-				}
 				// Drop the old wire only when the flop drove all of it and nothing else can.
-				if (qbits.width == GetSize(old_wire) && !old_wire->port_id)
+				if (bound_bits == GetSize(old_wire) && !old_wire->port_id)
 					drop_wires.insert(old_wire);
 				stats.bound++;
 			}
@@ -540,22 +577,24 @@ static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 			continue; // outside the hierarchy being processed
 
 		std::string rel = full.substr(scope.empty() ? 0 : scope.size() + 1);
-		size_t split = rel.find_first_of(".[");
-		std::string root = split == std::string::npos ? rel : rel.substr(0, split);
 
 		// A repeat of a name already seen is the same signal again, not another member
 		if (!seen.insert(full).second)
 			continue;
 
+		// The signal belongs to every object on its path (`gen`, `gen[3]`, `gen[3].x`)
 		DumpLeaf leaf;
 		leaf.name = rel;
-		leaf.rel = split == std::string::npos ? "" : rel.substr(split);
 		leaf.width = var.width;
 		leaf.offset = offset;
-		objects[scope + "." + root].push_back(leaf);
 		if (debug)
-			log("Dumped %s.%s as %s (width %d, lsb %d)\n", scope.c_str(), root.c_str(),
-				leaf.rel.empty() ? "one flat signal" : leaf.rel.c_str(), leaf.width, offset);
+			log("Dumped %s.%s (width %d, lsb %d)\n", scope.c_str(), rel.c_str(), leaf.width, offset);
+		for (size_t split = rel.find_first_of(".[");; split = rel.find_first_of(".[", split + 1)) {
+			leaf.rel = split == std::string::npos ? "" : rel.substr(split);
+			objects[scope + "." + rel.substr(0, split)].push_back(leaf);
+			if (split == std::string::npos)
+				break;
+		}
 	}
 	return objects;
 }
