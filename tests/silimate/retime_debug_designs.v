@@ -59,6 +59,58 @@ module signedmul(input clk, input [3:0] a, b, output [7:0] q);
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
 endmodule
 
+// Gate-level $_NAND_ (from opt_retime_gates.ys). Same merge as $and, 1-bit,
+// and NAND of zeros is 1 so the folded init is the interesting part.
+module nanddes(input clk, input a, b, output q);
+  (* init = 1'b0 *) wire ra, rb;
+  wire y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $_NAND_ gnand (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// $_NMUX_ (from opt_retime_gates.ys). S is a data input, same as $mux, and
+// the output is inverted.
+module nmuxdes(input clk, input a, b, s, output q);
+  (* init = 1'b0 *) wire ra, rb, rs;
+  wire y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fs (.CLK(clk), .D(s), .Q(rs));
+  $_NMUX_ gnmux (.A(ra), .B(rb), .S(rs), .Y(y));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// $_OAI3_ as the cut (from opt_retime_gates.ys). Three data inputs merge
+// into one register.
+module oai3des(input clk, input a, b, c, output q);
+  (* init = 1'b0 *) wire ra, rb, rc;
+  wire y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $_OAI3_ goai3 (.A(ra), .B(rb), .C(rc), .Y(y));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// $_AOI4_ is on the path, $_NOR_ is the cut (from opt_retime_gates.ys).
+// Without $_AOI4_ on the data_inputs list this move reports the NOR as
+// not on the after-path.
+module aoi4nor(input clk, input a, b, c, d, e, output q);
+  (* init = 1'b1 *) wire ra, rb;
+  (* init = 1'b0 *) wire rc, rd, re;
+  wire yaoi, y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
+  $_AOI4_ gaoi (.A(ra), .B(rb), .C(rc), .D(rd), .Y(yaoi));
+  $_NOR_  gnor (.A(yaoi), .B(re), .Y(y));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
 // $or and $xor, two independent cones (from opt_retime_cmp.ys). Each move
 // merges its other operand away: 6 registers become 4.
 module bitwise(input clk, input [7:0] a, b, c, d, output [7:0] qo, qx);

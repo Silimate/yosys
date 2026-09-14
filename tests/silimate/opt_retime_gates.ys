@@ -1,0 +1,273 @@
+# Forward moves across gate-level cells.
+#
+# These are the techmap form of $not / $and / $mux, so they add no new merge
+# rule. They still need their own tests: they are 1-bit, several invert so
+# the zero state does not survive, $_ANDNOT_/$_ORNOT_ do not commute, and
+# $_AOI4_/$_OAI4_ have four data inputs, which is a new arity for folding.
+# The last section is the reason they cannot be left off the list even when
+# they are not the cut: collect_chain only walks data_inputs, so an $_AOI4_
+# on the way to a later $_NOR_ would otherwise look unreachable.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$_AND_, \$_XOR_, \$_ANDNOT_, whose zero state is zero"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module zerogates(input clk, input a, b, c, d, e, g, output qand, qxor, qandn);
+  wire ra, rb, rc, rd, re, rg, yand, yxor, yandn;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fg (.CLK(clk), .D(g), .Q(rg));
+  $_AND_    gand  (.A(ra), .B(rb), .Y(yand));
+  $_XOR_    gxor  (.A(rc), .B(rd), .Y(yxor));
+  $_ANDNOT_ gandn (.A(re), .B(rg), .Y(yandn));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqand  (.CLK(clk), .D(yand),  .Q(qand));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqxor  (.CLK(clk), .D(yxor),  .Q(qxor));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqandn (.CLK(clk), .D(yandn), .Q(qandn));
+endmodule
+EOF
+hierarchy -top zerogates
+check -assert
+select -assert-count 9 t:$dff
+design -save orig
+opt_retime -flop fa -cut gand -forward
+opt_retime -flop fc -cut gxor -forward
+opt_retime -flop fe -cut gandn -forward
+check -assert
+select -assert-count 6 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fd
+select -assert-count 0 c:fg
+select -assert-count 1 c:gand  %x:+[A] w:a %i
+select -assert-count 1 c:gand  %x:+[B] w:b %i
+select -assert-count 1 c:gxor  %x:+[A] w:c %i
+select -assert-count 1 c:gandn %x:+[A] w:e %i
+select -assert-count 1 c:gandn %x:+[B] w:g %i
+rename zerogates gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$_NOT_, \$_NAND_, \$_NOR_, \$_XNOR_, \$_ORNOT_, which invert zero"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module onesgates(input clk, input a, b, c, d, e, g, h, i, j,
+                 output qnot, qnand, qnor, qxnor, qorn);
+  (* init = 1'b0 *) wire ra, rb, rc, rd, re, rg, rh, ri, rj;
+  wire ynot, ynand, ynor, yxnor, yorn;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fg (.CLK(clk), .D(g), .Q(rg));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fh (.CLK(clk), .D(h), .Q(rh));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fi (.CLK(clk), .D(i), .Q(ri));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fj (.CLK(clk), .D(j), .Q(rj));
+  $_NOT_   gnot  (.A(ra), .Y(ynot));
+  $_NAND_  gnand (.A(rb), .B(rc), .Y(ynand));
+  $_NOR_   gnor  (.A(rd), .B(re), .Y(ynor));
+  $_XNOR_  gxnor (.A(rg), .B(rh), .Y(yxnor));
+  $_ORNOT_ gorn  (.A(ri), .B(rj), .Y(yorn));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqnot  (.CLK(clk), .D(ynot),  .Q(qnot));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqnand (.CLK(clk), .D(ynand), .Q(qnand));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqnor  (.CLK(clk), .D(ynor),  .Q(qnor));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqxnor (.CLK(clk), .D(yxnor), .Q(qxnor));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqorn  (.CLK(clk), .D(yorn),  .Q(qorn));
+endmodule
+EOF
+hierarchy -top onesgates
+setattr -set init 1'b0 w:qnot w:qnand w:qnor w:qxnor w:qorn
+check -assert
+select -assert-count 14 t:$dff
+design -save orig
+opt_retime -flop fa -cut gnot -forward
+opt_retime -flop fb -cut gnand -forward
+opt_retime -flop fd -cut gnor -forward
+opt_retime -flop fg -cut gxnor -forward
+opt_retime -flop fi -cut gorn -forward
+check -assert
+select -assert-count 10 t:$dff
+select -assert-count 0 c:fc
+select -assert-count 0 c:fe
+select -assert-count 0 c:fh
+select -assert-count 0 c:fj
+# NAND/NOR/XNOR/ORNOT of zeros is 1; NOT of 0 is 1. Asserted on the new Q nets.
+select -assert-count 1 w:ynot  a:init=1'b1 %i
+select -assert-count 1 w:ynand a:init=1'b1 %i
+select -assert-count 1 w:ynor  a:init=1'b1 %i
+select -assert-count 1 w:yxnor a:init=1'b1 %i
+select -assert-count 1 w:yorn  a:init=1'b1 %i
+rename onesgates gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$_MUX_ and \$_NMUX_"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module muxgates(input clk, input a, b, s, c, d, t, output qmux, qnmux);
+  (* init = 1'b0 *) wire ra, rb, rs, rc, rd, rt;
+  wire ymux, ynmux;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fs (.CLK(clk), .D(s), .Q(rs));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) ft (.CLK(clk), .D(t), .Q(rt));
+  $_MUX_  gmux  (.A(ra), .B(rb), .S(rs), .Y(ymux));
+  $_NMUX_ gnmux (.A(rc), .B(rd), .S(rt), .Y(ynmux));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqmux  (.CLK(clk), .D(ymux),  .Q(qmux));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqnmux (.CLK(clk), .D(ynmux), .Q(qnmux));
+endmodule
+EOF
+hierarchy -top muxgates
+setattr -set init 1'b0 w:qmux w:qnmux
+check -assert
+select -assert-count 8 t:$dff
+design -save orig
+opt_retime -flop fa -cut gmux -forward
+opt_retime -flop fc -cut gnmux -forward
+check -assert
+select -assert-count 4 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fs
+select -assert-count 0 c:fd
+select -assert-count 0 c:ft
+# S=0 picks A: mux of zeros is 0, nmux is ~0
+select -assert-count 1 w:ymux  a:init=1'b0 %i
+select -assert-count 1 w:ynmux a:init=1'b1 %i
+rename muxgates gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$_OAI3_, \$_AOI3_ and \$_OAI4_ as cuts"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module aoi3des(input clk, input a, b, c, d, e, g, h, i, j, k,
+               output qoai3, qaoi3, qoai4);
+  (* init = 1'b0 *) wire ra, rb, rc, rd, re, rg, rh, ri, rj, rk;
+  wire yoai3, yaoi3, yoai4;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fg (.CLK(clk), .D(g), .Q(rg));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fh (.CLK(clk), .D(h), .Q(rh));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fi (.CLK(clk), .D(i), .Q(ri));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fj (.CLK(clk), .D(j), .Q(rj));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fk (.CLK(clk), .D(k), .Q(rk));
+  $_OAI3_ goai3 (.A(ra), .B(rb), .C(rc), .Y(yoai3));
+  $_AOI3_ gaoi3 (.A(rd), .B(re), .C(rg), .Y(yaoi3));
+  $_OAI4_ goai4 (.A(rh), .B(ri), .C(rj), .D(rk), .Y(yoai4));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqoai3 (.CLK(clk), .D(yoai3), .Q(qoai3));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqaoi3 (.CLK(clk), .D(yaoi3), .Q(qaoi3));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqoai4 (.CLK(clk), .D(yoai4), .Q(qoai4));
+endmodule
+EOF
+hierarchy -top aoi3des
+setattr -set init 1'b0 w:qoai3 w:qaoi3 w:qoai4
+check -assert
+select -assert-count 13 t:$dff
+design -save orig
+opt_retime -flop fa -cut goai3 -forward
+opt_retime -flop fd -cut gaoi3 -forward
+opt_retime -flop fh -cut goai4 -forward
+check -assert
+# 3+3+4 operand registers became 3 survivors: 13 to 6
+select -assert-count 6 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fc
+select -assert-count 0 c:fe
+select -assert-count 0 c:fg
+select -assert-count 0 c:fi
+select -assert-count 0 c:fj
+select -assert-count 0 c:fk
+# all-zero OAI3/AOI3/OAI4 is 1
+select -assert-count 1 w:yoai3 a:init=1'b1 %i
+select -assert-count 1 w:yaoi3 a:init=1'b1 %i
+select -assert-count 1 w:yoai4 a:init=1'b1 %i
+rename aoi3des gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The $_AOI4_ is not the cut. Skipping it on the data_inputs list would make
+# collect_chain stop there, so -cut gnor would fail with "not on the after-path"
+# even though the NOR is a supported cut. Inits 1,1,0,0 on the AOI4 and 0 on
+# the NOR's other input fold to 1: AOI4(1,1,0,0) is 0, NOR(0, 0) is 1. That
+# is also the 4-operand eval path; without it the fold would refuse to
+# evaluate $_AOI4_ on constants.
+log -header "Forward: \$_AOI4_ on the path to a later \$_NOR_ cut"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module aoi4nor(input clk, input a, b, c, d, e, output q);
+  (* init = 1'b1 *) wire ra, rb;
+  (* init = 1'b0 *) wire rc, rd, re;
+  wire yaoi, y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
+  $_AOI4_ gaoi (.A(ra), .B(rb), .C(rc), .D(rd), .Y(yaoi));
+  $_NOR_  gnor (.A(yaoi), .B(re), .Y(y));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top aoi4nor
+setattr -set init 1'b0 w:q
+check -assert
+select -assert-count 6 t:$dff
+design -save orig
+opt_retime -flop fa -cut gnor -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fc
+select -assert-count 0 c:fd
+select -assert-count 0 c:fe
+select -assert-count 1 c:gaoi %x:+[A] w:a %i
+select -assert-count 1 c:gaoi %x:+[B] w:b %i
+select -assert-count 1 c:gaoi %x:+[C] w:c %i
+select -assert-count 1 c:gaoi %x:+[D] w:d %i
+select -assert-count 1 c:gnor %x:+[B] w:e %i
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+select -assert-count 1 w:y a:init=1'b1 %i
+rename aoi4nor gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
