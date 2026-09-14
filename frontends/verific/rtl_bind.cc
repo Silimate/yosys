@@ -26,11 +26,13 @@
 USING_YOSYS_NAMESPACE
 using namespace Verific;
 
-static bool parse_int(const std::string &digits, int &value)
+// Decimal index, optionally negative: unpacked ranges such as `mem [-2:-1]` are legal
+static bool parse_int(const std::string &text, int &value)
 {
-	if (digits.empty() || digits.find_first_not_of("0123456789") != std::string::npos)
+	size_t start = text.size() > 1 && text[0] == '-' ? 1 : 0;
+	if (text.size() == start || text.find_first_not_of("0123456789", start) != std::string::npos)
 		return false;
-	value = std::stoi(digits);
+	value = std::stoi(text);
 	return true;
 }
 

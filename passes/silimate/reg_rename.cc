@@ -66,6 +66,11 @@ static RtlBindBit legacy_bind(Cell *cell)
 	return bind;
 }
 
+static bool binds_any_bit(const std::vector<RtlBindBit> &bind)
+{
+	return std::any_of(bind.begin(), bind.end(), [](const RtlBindBit &b) { return b.valid; });
+}
+
 static std::string first_component(const std::string &rel)
 {
 	if (rel.empty())
@@ -325,9 +330,9 @@ struct RegRenameInstance {
 
 			// Which RTL object bits this flop holds, stamped by the importer (kernel/ff.h)
 			std::vector<RtlBindBit> bind = rtl_bind_expand(cell->get_string_attribute(ID(rtl_bind)));
-			if (bind.empty() || !bind[0].valid)
+			if (!binds_any_bit(bind))
 				bind = {legacy_bind(cell)};
-			if (!bind[0].valid) {
+			if (!binds_any_bit(bind)) {
 				log_warning("Cell %s in scope %s has no usable RTL bind stamp\n",
 						log_id(cell->name), vcd_scope.c_str());
 				stats.no_stamp++;
@@ -346,10 +351,11 @@ struct RegRenameInstance {
 					continue;
 
 				// A legacy stamp names the first bit only; the rest of the cell follows it
-				for (int i = 1; GetSize(bind) == 1 && i < qbits.width; i++) {
-					bind.push_back(bind[0]);
-					bind.back().bit += i;
-				}
+				if (GetSize(bind) == 1)
+					for (int i = 1; i < qbits.width; i++) {
+						bind.push_back(bind[0]);
+						bind.back().bit += i;
+					}
 				if (GetSize(bind) != qbits.width) {
 					log_warning("Cell %s in scope %s has a %d-bit RTL bind stamp for %d Q bit(s)\n",
 							log_id(cell->name), vcd_scope.c_str(), GetSize(bind), qbits.width);
