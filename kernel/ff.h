@@ -139,6 +139,22 @@ struct FfTypeData {
 	Const val_srst;
 };
 
+// SILIMATE: the RTL object bit one Q bit of a sequential cell holds. The cell's `rtl_bind`
+// attribute lists these as `obj/width[first]`, `obj/width[first:last]` or `-` (unbound) tokens.
+struct RtlBindBit {
+	bool valid = false;
+	std::string obj;
+	int width = 0;
+	int bit = 0;
+};
+
+std::vector<RtlBindBit> rtl_bind_expand(const std::string &value); // empty on a malformed value
+std::string rtl_bind_compress(const std::vector<RtlBindBit> &bits);
+
+// Narrow the `rtl_bind` of a `width`-bit cell to the given bits, dropping it if it does not match
+void slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, const std::vector<int> &bits);
+void slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, int lsb, int msb);
+
 struct FfData : FfTypeData {
 	Module *module;
 	FfInitVals *initvals;

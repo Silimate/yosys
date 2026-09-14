@@ -1014,6 +1014,7 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 			cell = clocking.addDffsr(inst_name, net_map_at(inst->GetSet()), net_map_at(inst->GetReset()),
 					net_map_at(inst->GetInput()), net_map_at(inst->GetOutput()));
 		import_attributes(cell->attributes, inst);
+		rtl_binder.stamp(inst, cell); // SILIMATE
 		return true;
 	}
 
@@ -1025,6 +1026,7 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 			cell = module->addDlatchsr(inst_name, net_map_at(inst->GetControl()), net_map_at(inst->GetSet()), net_map_at(inst->GetReset()),
 					net_map_at(inst->GetInput()), net_map_at(inst->GetOutput()));
 		import_attributes(cell->attributes, inst);
+		rtl_binder.stamp(inst, cell); // SILIMATE
 		return true;
 	}
 
@@ -1040,6 +1042,7 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 			cell = clocking.addAldff(inst_name, net_map_at(inst->GetAsyncCond()), net_map_at(inst->GetAsyncVal()),
 					net_map_at(inst->GetInput()), net_map_at(inst->GetOutput()));
 		import_attributes(cell->attributes, inst);
+		rtl_binder.stamp(inst, cell); // SILIMATE
 		return true;
 	}
 
@@ -1054,6 +1057,7 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 			cell = module->addDlatchsr(inst_name, net_map_at(inst->GetControl()), sig_set, sig_clr, net_map_at(inst->GetInput()), net_map_at(inst->GetOutput()));
 		}
 		import_attributes(cell->attributes, inst);
+		rtl_binder.stamp(inst, cell); // SILIMATE
 		return true;
 	}
 
@@ -1338,6 +1342,7 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 		else
 			cell = clocking.addDffsr(inst_name, sig_set, sig_reset, IN, OUT);
 		import_attributes(cell->attributes, inst);
+		rtl_binder.stamp(inst, cell); // SILIMATE
 
 		return true;
 	}
@@ -1352,6 +1357,7 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 		else
 			cell = module->addDlatchsr(inst_name, net_map_at(inst->GetControl()), sig_set, sig_reset, IN, OUT);
 		import_attributes(cell->attributes, inst);
+		rtl_binder.stamp(inst, cell); // SILIMATE
 
 		return true;
 	}
@@ -1370,15 +1376,19 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 		if (sig_acond.is_fully_const() && !sig_acond.as_bool()) {
 			cell = clocking.addDff(inst_name, sig_d, sig_q);
 			import_attributes(cell->attributes, inst);
+			rtl_binder.stamp(inst, sig_q, {cell}); // SILIMATE
 		} else {
 			int offset = 0, width = 0;
+			std::vector<RTLIL::Cell *> chunks; // SILIMATE
 			for (offset = 0; offset < GetSize(sig_acond); offset += width) {
 				for (width = 1; offset+width < GetSize(sig_acond); width++)
 					if (sig_acond[offset] != sig_acond[offset+width]) break;
 				cell = clocking.addAldff(module->uniquify(inst_name), sig_acond[offset], sig_adata.extract(offset, width),
 						sig_d.extract(offset, width), sig_q.extract(offset, width));
 				import_attributes(cell->attributes, inst);
+				chunks.push_back(cell); // SILIMATE
 			}
+			rtl_binder.stamp(inst, sig_q, chunks); // SILIMATE
 		}
 
 		return true;
@@ -1394,8 +1404,10 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 		if (sig_acond.is_fully_const() && !sig_acond.as_bool()) {
 			cell = module->addDlatch(inst_name, net_map_at(inst->GetControl()), sig_d, sig_q);
 			import_attributes(cell->attributes, inst);
+			rtl_binder.stamp(inst, sig_q, {cell}); // SILIMATE
 		} else {
 			int offset = 0, width = 0;
+			std::vector<RTLIL::Cell *> chunks; // SILIMATE
 			for (offset = 0; offset < GetSize(sig_acond); offset += width) {
 				for (width = 1; offset+width < GetSize(sig_acond); width++)
 					if (sig_acond[offset] != sig_acond[offset+width]) break;
@@ -1405,7 +1417,9 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 				cell = module->addDlatchsr(module->uniquify(inst_name), net_map_at(inst->GetControl()), sig_set, sig_clr,
 						sig_d.extract(offset, width), sig_q.extract(offset, width));
 				import_attributes(cell->attributes, inst);
+				chunks.push_back(cell); // SILIMATE
 			}
+			rtl_binder.stamp(inst, sig_q, chunks); // SILIMATE
 		}
 
 		return true;
@@ -1748,6 +1762,7 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 	}
 
 	netlist = nl;
+	rtl_binder.begin(nl); // SILIMATE
 
 	if (design->has(module_name)) {
 		if (!nl->IsOperator() && !is_blackbox(nl))
@@ -2639,6 +2654,7 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 		log_warning("Unsupported SVA imported as 'x and marked using the `unsupported_sva' attribute due to -sva-continue-on-err.\n");
 	}
 	num_sva_continue = 0;
+	rtl_binder.finish(module); // SILIMATE
 }
 
 // ==================================================================

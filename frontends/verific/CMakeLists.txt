@@ -50,7 +50,9 @@ endif()
 yosys_frontend(verific
 	verific.cc
 	verific.h
+	rtl_bind.h
 	$<${YOSYS_ENABLE_VERIFIC}:verificsva.cc>
+	$<${YOSYS_ENABLE_VERIFIC}:rtl_bind.cc>
 	DEFINITIONS
 		$<$<IN_LIST:hier_tree,${YOSYS_VERIFIC_FEATURES}>:VERIFIC_HIER_TREE_SUPPORT>
 		$<$<IN_LIST:systemverilog,${YOSYS_VERIFIC_FEATURES}>:VERIFIC_SYSTEMVERILOG_SUPPORT>
