@@ -316,6 +316,32 @@ module sliced(input clk, en, input [7:0] a, b, output [7:0] q);
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
 endmodule
 
+// Signed $sshr with defined inits (from opt_retime_shift.ys). 8'h80 >>> 1 is
+// 8'hc0 signed and 8'h40 unsigned; the "Folded init" line is 8'hc0.
+module signedshift(input clk, input [7:0] a, input [2:0] amt, output [7:0] q);
+  (* init = 8'h80 *) wire [7:0] ra;
+  (* init = 3'd1 *) wire [2:0] ramt;
+  wire [7:0] y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa   (.CLK(clk), .D(a),   .Q(ra));
+  $dff #(.WIDTH(3), .CLK_POLARITY(1'b1)) famt (.CLK(clk), .D(amt), .Q(ramt));
+  $sshr #(.A_WIDTH(8), .B_WIDTH(3), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(0))
+    s0 (.A(ra), .B(ramt), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq   (.CLK(clk), .D(y),   .Q(q));
+endmodule
+
+// Signed $sshl, widening (from opt_retime_shift.ys). Same merge as shiftwide
+// in that test: fa absorbs famt and grows from 8 bits to 11.
+module signedleft(input clk, input [7:0] a, input [2:0] amt, output [10:0] q);
+  wire [7:0] ra;
+  wire [2:0] ramt;
+  wire [10:0] sl;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1))  fa   (.CLK(clk), .D(a),   .Q(ra));
+  $dff #(.WIDTH(3), .CLK_POLARITY(1'b1))  famt (.CLK(clk), .D(amt), .Q(ramt));
+  $sshl #(.A_WIDTH(8), .B_WIDTH(3), .Y_WIDTH(11), .A_SIGNED(1), .B_SIGNED(0))
+    s0 (.A(ra), .B(ramt), .Y(sl));
+  $dff #(.WIDTH(11), .CLK_POLARITY(1'b1)) fq   (.CLK(clk), .D(sl),  .Q(q));
+endmodule
+
 // ==========================================================================
 // Designs the pass refuses.
 //
@@ -326,8 +352,8 @@ endmodule
 // ==========================================================================
 
 // An operand that is not registered at all (from opt_retime_add.ys). b arrives
-// combinationally, so input B has no register to merge and the move would have
-// to invent one. The most basic thing a forward move needs.
+// combinationally, so a forward move of fa across a0 has nothing to merge on B
+// and a backward move of fq across a0 would have to clone a register onto B.
 module unflopped(input clk, input [7:0] a, b, output [7:0] q);
   wire [7:0] ra, s;
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
@@ -406,20 +432,6 @@ module mixinit(input clk, input [7:0] a, b, output [7:0] q);
   $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
     a0 (.A(ra), .B(rb), .Y(s));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
-endmodule
-
-// A cut the pass has no rule for (from opt_retime_shift.ys). $sshr is a pure
-// function of its operands like every supported cut, so the move is sound; it
-// is simply not on the list, since a signed shift needs the sign handled when
-// folding stored values. A refusal by omission rather than by principle.
-module signedshift(input clk, input [7:0] a, input [2:0] amt, output [7:0] q);
-  wire [7:0] ra, y;
-  wire [2:0] ramt;
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa   (.CLK(clk), .D(a),   .Q(ra));
-  $dff #(.WIDTH(3), .CLK_POLARITY(1'b1)) famt (.CLK(clk), .D(amt), .Q(ramt));
-  $sshr #(.A_WIDTH(8), .B_WIDTH(3), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(0))
-    s0 (.A(ra), .B(ramt), .Y(y));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq   (.CLK(clk), .D(y),   .Q(q));
 endmodule
 
 // A single-bit register that would have to widen (from opt_retime_width.ys).

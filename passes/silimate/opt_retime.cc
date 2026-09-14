@@ -53,7 +53,7 @@ std::vector<IdString> data_inputs(Cell *cell)
 		return {ID::A};
 	if (cell->type.in(ID($add), ID($sub), ID($mul), ID($and), ID($or), ID($xor),
 			ID($xnor), ID($eq), ID($ne), ID($lt), ID($le), ID($gt),
-			ID($ge), ID($shl), ID($shr)))
+			ID($ge), ID($shl), ID($sshl), ID($shr), ID($sshr)))
 		return {ID::A, ID::B};
 	if (cell->type == ID($mux))
 		return {ID::A, ID::B, ID::S};
@@ -809,6 +809,313 @@ void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbidden)
 	}
 }
 
+// Types a backward move can invert: f(reg(x), c) equals reg(f(x, c)) when every
+// other operand is a constant, and f has a unique preimage in x. $and/$or/$mux
+// / $eq / $mul do not. An already-registered other operand is not a meet: that
+// would be f(reg(x), reg(y)) vs reg(f(x, reg(y))), which drops a cycle on y
+// unless a second register is cloned onto y.
+bool is_invertible_backward(Cell *cell)
+{
+	return cell->type.in(ID($buf), ID($_BUF_), ID($not), ID($add), ID($sub),
+			ID($xor), ID($xnor));
+}
+
+bool sig_all_wires(const SigSpec &sig)
+{
+	if (GetSize(sig) == 0)
+		return false;
+	for (auto bit : sig)
+		if (!bit.is_wire())
+			return false;
+	return true;
+}
+
+bool driven_by_ff(const dict<SigBit, BitSrc> &drivers, const SigSpec &sig)
+{
+	if (!sig_all_wires(sig))
+		return false;
+	for (auto bit : sig) {
+		auto it = drivers.find(bit);
+		if (it == drivers.end() || it->second.port != ID::Q ||
+				!it->second.cell->is_builtin_ff())
+			return false;
+	}
+	return true;
+}
+
+// Driver of every bit of sig, requiring sig to be that port in full. A slice
+// of a wide Y into a narrower D is a different transform.
+Cell *unique_full_driver(const dict<SigBit, BitSrc> &drivers, SigMap &sigmap,
+		const SigSpec &sig, IdString &port)
+{
+	port = IdString();
+	if (GetSize(sig) == 0)
+		return nullptr;
+	Cell *cell = nullptr;
+	for (int i = 0; i < GetSize(sig); i++) {
+		if (!sig[i].is_wire())
+			return nullptr;
+		auto it = drivers.find(sig[i]);
+		if (it == drivers.end())
+			return nullptr;
+		if (i == 0) {
+			cell = it->second.cell;
+			port = it->second.port;
+		} else if (it->second.cell != cell || it->second.port != port)
+			return nullptr;
+	}
+	if (sigmap(cell->getPort(port)) != sig)
+		return nullptr;
+	return cell;
+}
+
+bool cell_signed(Cell *cell, IdString param)
+{
+	return cell->hasParam(param) && cell->getParam(param).as_bool();
+}
+
+// The unique live data input a backward move slides onto. Constants stay;
+// a second live input would need a cloned register, and a flop on this input
+// would stack a second register on the same net.
+IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		Cell *cell, Cell *flop)
+{
+	IdString path;
+	int live = 0;
+	bool live_is_ff = false;
+	bool live_partial = false;
+	for (auto port : data_inputs(cell)) {
+		SigSpec sig = sigmap(cell->getPort(port));
+		if (sig.is_fully_const())
+			continue;
+		live++;
+		path = port;
+		live_is_ff = driven_by_ff(drivers, sig);
+		live_partial = !sig_all_wires(sig);
+	}
+	if (live == 0)
+		log_cmd_error("Every data input of cell %s is constant, so flop %s has "
+				"nothing to slide onto.\n", log_id(cell), log_id(flop));
+	if (live != 1)
+		log_cmd_error("Cell %s has %d non-constant data inputs; a backward move "
+				"would have to clone a register onto each of them, which "
+				"opt_retime does not do yet.\n",
+				log_id(cell), live);
+	if (live_is_ff)
+		log_cmd_error("Input %s of cell %s is already registered, so flop %s "
+				"cannot move backward onto it: that would stack a second "
+				"register on the same net.\n",
+				log_id(path), log_id(cell), log_id(flop));
+	if (live_partial)
+		log_cmd_error("Input %s of cell %s is only partly a wire, so flop %s "
+				"cannot move backward onto it.\n",
+				log_id(path), log_id(cell), log_id(flop));
+	return path;
+}
+
+// Solve f(..., x, ...) = y for the path operand x. y is the stored value on
+// the output side of this cell; the other operands are the constants still
+// wired to it.
+Const invert_step(SigMap &sigmap, Cell *cell, IdString path_port, Const y)
+{
+	int len = GetSize(cell->getPort(path_port));
+	if (GetSize(cell->getPort(ID::Y)) != len)
+		log_cmd_error("Cell %s has Y width %d and path port %s width %d; a "
+				"backward move cannot invert a width change yet.\n",
+				log_id(cell), GetSize(cell->getPort(ID::Y)),
+				log_id(path_port), len);
+	if (is_buf(cell))
+		return y;
+	if (cell->type == ID($not))
+		return const_not(y, Const(), false, false, len);
+
+	IdString other_port = path_port == ID::A ? ID::B : ID::A;
+	Const other = sigmap(cell->getPort(other_port)).as_const();
+	bool sa = cell_signed(cell, ID::A_SIGNED);
+	bool sb = cell_signed(cell, ID::B_SIGNED);
+	if (cell->type == ID($xor))
+		return const_xor(y, other, false, false, len);
+	if (cell->type == ID($xnor))
+		return const_xnor(y, other, false, false, len);
+	if (cell->type == ID($add))
+		return const_sub(y, other, sa, sb, len);
+	if (cell->type == ID($sub) && path_port == ID::A)
+		return const_add(y, other, sa, sb, len);
+	if (cell->type == ID($sub) && path_port == ID::B)
+		return const_sub(other, y, sa, sb, len);
+	log_cmd_error("Cell %s has type %s, which opt_retime cannot invert yet.\n",
+			log_id(cell), log_id(cell->type));
+	return Const();
+}
+
+// From flop.D back to cut: each hop's Y is uniquely the next hop's path port
+// (or D, for the first). chain.front() is the cell driving D, chain.back()
+// is the cut.
+std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
+		const dict<SigBit, BitSrc> &drivers, Cell *flop, Cell *cut)
+{
+	std::vector<ChainStep> chain;
+	pool<Cell *> seen;
+	Cell *reader = flop;
+	IdString reader_port = ID::D;
+	SigSpec cur = sigmap(flop->getPort(ID::D));
+
+	while (true) {
+		IdString y_port;
+		Cell *cell = unique_full_driver(drivers, sigmap, cur, y_port);
+		if (cell == nullptr || y_port != ID::Y)
+			log_cmd_error("The before-path of flop %s is not a unique cell Y at %s.\n",
+					log_id(flop), log_signal(cur));
+		if (!is_invertible_backward(cell))
+			log_cmd_error("Cut cell %s has type %s, which opt_retime cannot move "
+					"backward across yet.\n",
+					log_id(cell), log_id(cell->type));
+
+		IdString uniq_port;
+		Cell *uniq = unique_reader(module, sigmap,
+				sigmap(cell->getPort(ID::Y)), uniq_port);
+		if (uniq != reader || uniq_port != reader_port)
+			log_cmd_error("Y of cell %s is not uniquely read by %s port %s, so flop "
+					"%s cannot move backward across it.\n",
+					log_id(cell), log_id(reader), log_id(reader_port),
+					log_id(flop));
+
+		if (seen.count(cell))
+			log_cmd_error("Cycle on the before-path of flop %s.\n", log_id(flop));
+		seen.insert(cell);
+
+		IdString path_port = backward_path_port(sigmap, drivers, cell, flop);
+		chain.push_back({cell, path_port});
+		if (cell == cut)
+			return chain;
+		reader = cell;
+		reader_port = path_port;
+		cur = sigmap(cell->getPort(path_port));
+	}
+}
+
+void apply_backward_move(Module *module, Cell *flop, Cell *cut)
+{
+	if (!flop->is_builtin_ff())
+		log_cmd_error("Cell %s is not a built-in flip-flop.\n", log_id(flop));
+	if (data_inputs(cut).empty())
+		log_cmd_error("Cut cell %s has type %s, which opt_retime cannot move across yet.\n",
+				log_id(cut), log_id(cut->type));
+	if (flop == cut)
+		log_cmd_error("Flop and cut must be different cells.\n");
+
+	SigMap sigmap(module);
+	FfInitVals initvals(&sigmap, module);
+
+	FfData ff(&initvals, flop);
+	if (!ff.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
+		log_cmd_error("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
+
+	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
+	std::vector<ChainStep> chain = collect_backward_chain(module, sigmap, drivers,
+			flop, cut);
+
+	for (auto &step : chain)
+		if (!step.cell->hasPort(ID::Y))
+			log_cmd_error("Cell %s is missing port Y.\n", log_id(step.cell));
+
+	for (auto &step : chain)
+		if (!is_buf(step.cell))
+			if (const char *why = unmovable_reason(ff))
+				log_cmd_error("Flop %s cannot move across cell %s because %s, which "
+						"the move would have to push through the cell.\n",
+						log_id(flop), log_id(step.cell), why);
+
+	if (chain.back().cell != cut)
+		log_cmd_error("Cut %s is not on the before-path of flop %s.\n",
+				log_id(cut), log_id(flop));
+
+	Cell *front = chain.front().cell;
+	SigSpec path_in = cut->getPort(chain.back().port);
+	SigSpec d = flop->getPort(ID::D);
+	SigSpec q = flop->getPort(ID::Q);
+
+	if (GetSize(path_in) != GetSize(q))
+		log_cmd_error("Backward move across %s would resize flop %s from %d to %d "
+				"bits, which is not supported yet.\n",
+				log_id(cut), log_id(flop), GetSize(q), GetSize(path_in));
+
+	pool<SigBit> qbits = wire_bits(sigmap(q));
+	if (bits_overlap(qbits, sigmap(path_in)))
+		log_cmd_error("Flop %s cannot move backward across %s: the path input "
+				"depends on the flop's Q.\n", log_id(flop), log_id(cut));
+
+	Const init_folded, srst_folded, arst_folded, aload_folded;
+	auto fold_back = [&](FoldKind kind, Const start, Const &result) {
+		if (start.is_fully_undef())
+			return false;
+		if (!start.is_fully_def())
+			log_cmd_error("Flop %s cannot move because its %s value is only partly "
+					"defined, so the inverse fold would be ambiguous.\n",
+					log_id(flop), fold_kind_name(kind));
+		Const cur = start;
+		for (auto &step : chain)
+			cur = invert_step(sigmap, step.cell, step.port, cur);
+		result = cur;
+		return true;
+	};
+	bool got_init = fold_back(FoldKind::Init, ff.val_init, init_folded);
+	bool got_srst = ff.has_srst && fold_back(FoldKind::Srst, ff.val_srst, srst_folded);
+	bool got_arst = ff.has_arst && fold_back(FoldKind::Arst, ff.val_arst, arst_folded);
+	bool got_aload = ff.has_aload && ff.sig_ad.is_fully_const() &&
+			fold_back(FoldKind::Aload, ff.sig_ad.as_const(), aload_folded);
+
+	pool<SigBit> forbidden = wire_bits(sigmap(d));
+	for (auto bit : wire_bits(sigmap(q)))
+		forbidden.insert(bit);
+	for (auto bit : wire_bits(sigmap(path_in)))
+		if (bit.is_wire())
+			forbidden.insert(bit);
+	check_controls(ff, sigmap, forbidden);
+
+	// The chain keeps its internal wiring. The flop samples the cut's old
+	// path input; the cut reads Q; the cell that used to drive D now drives
+	// the old Q sinks. The old D net is reused as the Q / cut-input link.
+	front->setPort(ID::Y, q);
+	cut->setPort(chain.back().port, d);
+
+	ff.remove_init();
+	IdString flop_name = ff.name;
+	ff.sig_d = path_in;
+	ff.sig_q = d;
+	ff.width = GetSize(path_in);
+	ff.val_init = got_init ? init_folded : Const(State::Sx, GetSize(path_in));
+	if (ff.has_srst)
+		ff.val_srst = got_srst ? srst_folded : Const(State::Sx, GetSize(path_in));
+	if (ff.has_arst)
+		ff.val_arst = got_arst ? arst_folded : Const(State::Sx, GetSize(path_in));
+	if (ff.has_aload) {
+		if (got_aload)
+			ff.sig_ad = SigSpec(aload_folded);
+		else if (ff.sig_ad.is_fully_const())
+			ff.sig_ad = Const(State::Sx, GetSize(path_in));
+	}
+	if (!ff.emit())
+		log_cmd_error("Flop %s did not survive being rebuilt after the move.\n",
+				log_id(flop_name));
+
+	if (got_init)
+		log("Folded init value of flop %s to %s.\n", log_id(flop_name),
+				log_signal(init_folded));
+	if (got_srst)
+		log("Folded sync reset value of flop %s to %s.\n", log_id(flop_name),
+				log_signal(srst_folded));
+	if (got_arst)
+		log("Folded async reset value of flop %s to %s.\n", log_id(flop_name),
+				log_signal(arst_folded));
+	if (got_aload)
+		log("Folded async load value of flop %s to %s.\n", log_id(flop_name),
+				log_signal(aload_folded));
+
+	log("Retimed %s backward across %d cell(s) ending at %s.\n",
+			log_id(flop_name), GetSize(chain), log_id(cut));
+}
+
 void apply_move(Module *module, Cell *flop, Cell *cut)
 {
 	if (!flop->is_builtin_ff())
@@ -1037,31 +1344,32 @@ struct OptRetimePass : public Pass {
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    opt_retime -flop <cell> -cut <cell> -forward [selection]\n");
+		log("    opt_retime -flop <cell> -cut <cell> -forward|-backward [selection]\n");
 		log("\n");
-		log("This pass retimes one register forward across a chain of combinational\n");
-		log("cells. Only forward moves are supported: -backward is rejected.\n");
+		log("This pass retimes one register across a chain of combinational cells.\n");
 		log("\n");
 		log("    -flop <cell>\n");
 		log("        register to move.\n");
 		log("\n");
 		log("    -cut <cell>\n");
-		log("        cell on the after-path of the register. May be one or more\n");
-		log("        cells away; every cell between the flop and the cut moves with\n");
-		log("        it. After the flop, the path must be a unique chain. A data\n");
-		log("        input may be wider than the flop: the flop's Q can be one\n");
-		log("        slice of a $mul/$add operand if every other bit of that port\n");
-		log("        is a sibling flop on the same clock (or a constant). The\n");
-		log("        named flop is then resized to the cut output and the sibling\n");
-		log("        bit-flops are merged. Supported cut types are $buf, $mux,\n");
-		log("        $not, $add, $sub, $mul, $and, $or, $xor, $xnor, $shl, $shr,\n");
-		log("        the comparators ($eq, $ne, $lt, $le, $gt, $ge) and the\n");
-		log("        $reduce_* cells. Every input of the cut counts as a data\n");
-		log("        input, the $mux select and a shift amount included, so all\n");
-		log("        of them have to be registered or constant.\n");
+		log("        cell the named flop moves across. May be one or more cells\n");
+		log("        away; every cell between the flop and the cut moves with it.\n");
+		log("        For -forward the cut is on the after-path; for -backward it\n");
+		log("        is on the before-path. Either way the path must be a unique\n");
+		log("        chain. A data input may be wider than the flop: the flop's\n");
+		log("        Q can be one slice of a $mul/$add operand if every other bit\n");
+		log("        of that port is a sibling flop on the same clock (or a\n");
+		log("        constant). The named flop is then resized to the cut output\n");
+		log("        and the sibling bit-flops are merged. Supported cut types\n");
+		log("        are $buf, $mux, $not, $add, $sub, $mul, $and, $or, $xor,\n");
+		log("        $xnor, $shl, $sshl, $shr, $sshr, the comparators ($eq, $ne,\n");
+		log("        $lt, $le, $gt, $ge) and the $reduce_* cells. Every input of\n");
+		log("        the cut counts as a data input, the $mux select and a shift\n");
+		log("        amount included, so all of them have to be registered or\n");
+		log("        constant.\n");
 		log("\n");
 		log("    -forward\n");
-		log("        move the register downstream, past -cut. Required. Where the\n");
+		log("        move the register downstream, past -cut. Where the\n");
 		log("        path runs through a cell with several data inputs, the\n");
 		log("        registers on the other inputs are merged into the moved\n");
 		log("        register, so they must share its clock, its enable and the\n");
@@ -1089,6 +1397,16 @@ struct OptRetimePass : public Pass {
 		log("        still refused, as is a leftover copy whose D depends on\n");
 		log("        the cut (a register on a loop with an observe tap).\n");
 		log("\n");
+		log("    -backward\n");
+		log("        move the register upstream, onto the path input of -cut. The\n");
+		log("        cut's Y must uniquely drive the flop (or a unique invertible\n");
+		log("        chain into it). Other data inputs must be constant: a live\n");
+		log("        input would need a cloned register, and an already-registered\n");
+		log("        one would stack a second flop on the same net. Invertible\n");
+		log("        cuts are $buf, $not, $xor, $xnor, $add and $sub. Init and\n");
+		log("        reset values are inverted through the chain so the flop\n");
+		log("        starts at the preimage of its old value.\n");
+		log("\n");
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -1096,7 +1414,7 @@ struct OptRetimePass : public Pass {
 		log_header(design, "Executing OPT_RETIME pass.\n");
 
 		std::string flop, cut_cell;
-		bool forward = false;
+		bool forward = false, backward = false;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -1112,13 +1430,10 @@ struct OptRetimePass : public Pass {
 				forward = true;
 				continue;
 			}
-			// Backward retiming was dropped: a backward move has to split the
-			// register onto every data input of the cut, which is a different
-			// transform than the merge a forward move does. Reject it here
-			// rather than silently doing something else.
-			if (args[argidx] == "-backward")
-				log_cmd_error("Backward moves are not supported, opt_retime only moves "
-						"registers forward.\n");
+			if (args[argidx] == "-backward") {
+				backward = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -1127,8 +1442,10 @@ struct OptRetimePass : public Pass {
 			log_cmd_error("Missing required -flop <cell> option.\n");
 		if (cut_cell.empty())
 			log_cmd_error("Missing required -cut <cell> option.\n");
-		if (!forward)
-			log_cmd_error("Missing required -forward option.\n");
+		if (forward && backward)
+			log_cmd_error("Cannot use -forward and -backward together.\n");
+		if (!forward && !backward)
+			log_cmd_error("Missing required -forward or -backward option.\n");
 
 		Module *module = nullptr;
 		Cell *flop_cell = nullptr;
@@ -1148,10 +1465,14 @@ struct OptRetimePass : public Pass {
 		if (!cut)
 			log_cmd_error("Cut cell '%s' not found in module %s.\n", cut_cell.c_str(), log_id(module));
 
-		log("Move: module=%s flop=%s direction=forward cut=%s\n",
-				log_id(module), log_id(flop_cell), log_id(cut));
+		log("Move: module=%s flop=%s direction=%s cut=%s\n",
+				log_id(module), log_id(flop_cell),
+				backward ? "backward" : "forward", log_id(cut));
 
-		apply_move(module, flop_cell, cut);
+		if (backward)
+			apply_backward_move(module, flop_cell, cut);
+		else
+			apply_move(module, flop_cell, cut);
 	}
 } OptRetimePass;
 

@@ -27,9 +27,8 @@
 //                         else reads, so it stays behind and only the cut is
 //                         rewired to its D
 //   opt_retime_mul.ys     $mul, the same merge as $add, plus signed folding
-//
-// Forward moves only. Backward moves are out of scope: the pass rejects
-// -backward while parsing arguments, so do not add designs or tests for them.
+//   opt_retime_backward.ys  capture flop onto a unique invertible chain whose
+//                         other operands are constant ($buf/$not/$xor/$add/$sub)
 //
 // Memories and FSMs are out of scope: do not add designs for them. Memories
 // are not combinational cells to move a register across; FSM control cones

@@ -30,6 +30,7 @@ root=${OUT:-/tmp/retime_debug_diff_all}
 moves=(
 	"opt_retime_buf.v|retime_probe|-flop f1 -cut b2 -forward"
 	"opt_retime_buf.v|retime_probe|-flop f1 -cut b3 -forward"
+	"opt_retime_buf.v|retime_probe|-flop f1 -cut b1 -backward"
 	"opt_retime_add.v|retime_add|-flop fa -cut a0 -forward"
 	"opt_retime_add.v|retime_add|-flop fb -cut a0 -forward"
 	"opt_retime_add.v|retime_add|-flop fa -cut b0 -forward"
@@ -62,6 +63,8 @@ moves=(
 	"retime_debug_designs.v|halfconst|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|sliced|-flop fb -cut a0 -forward"
 	"retime_debug_designs.v|sliced|-flop f0 -cut a0 -forward"
+	"retime_debug_designs.v|signedshift|-flop fa -cut s0 -forward"
+	"retime_debug_designs.v|signedleft|-flop fa -cut s0 -forward"
 )
 
 # Designs the pass refuses. Keep this list identical to retime_debug_all.sh
@@ -72,11 +75,11 @@ moves=(
 # skips index.html) if a listed move starts succeeding, so move it up.
 refusals=(
 	"retime_debug_designs.v|unflopped|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|unflopped|-flop fq -cut a0 -backward"
 	"retime_debug_designs.v|liveselect|-flop fa -cut m0 -forward"
 	"retime_debug_designs.v|enmix|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|rstmix|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|mixinit|-flop fa -cut a0 -forward"
-	"retime_debug_designs.v|signedshift|-flop fa -cut s0 -forward"
 	"retime_debug_designs.v|fine|-flop fa -cut a0 -forward"
 	"opt_retime_acc.v|retime_acc|-flop f_acc -cut a_acc -forward"
 )

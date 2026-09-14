@@ -1,8 +1,8 @@
 # Hand-written first moves on the retime_probe chain:
 #   f0 -> b0 -> b1 -> f1 -> b2 -> b3 -> f2
 #
-# Backward moves are out of scope, so the two backward moves this file used to
-# cover are replaced by the refusal at the bottom.
+# Backward across b1 is legal: b1.A is combo. Backward across b0 is not: b0.A
+# is already f0, and stacking a second flop on q0 is the last section.
 log -header "Forward: push f1 across b2"
 log -push
 design -reset
@@ -45,17 +45,38 @@ select -assert-count 1 c:f1 %x:+[Q] w:n1 %i
 design -reset
 log -pop
 
-# forward result: f0 -> b0 -> b1 -> b2 -> b3 -> f1 -> f2
-
-# -backward is rejected while parsing arguments, before the flop or the cut is
-# even looked up, so this move is refused even though it would otherwise be
-# legal on a $buf chain.
-#
-# logger -expect error exits yosys successfully, so it has to come last.
-log -header "Backward: refused"
+# ---------------------------------------------------------------------------
+log -header "Backward: pull f1 across b1"
+log -push
 design -reset
 read_verilog -icells opt_retime_buf.v
 hierarchy -top retime_probe
 check -assert
-logger -expect error "Backward moves are not supported" 1
 opt_retime -flop f1 -cut b1 -backward
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+# f1 then b1: f1.D=m0, f1.Q=n0, b1.A=n0, b1.Y=q1
+select -assert-count 1 c:f1 %x:+[D] w:m0 %i
+select -assert-count 1 c:f1 %x:+[Q] w:n0 %i
+select -assert-count 1 c:b1 %x:+[A] w:n0 %i
+select -assert-count 1 c:b1 %x:+[Y] w:q1 %i
+select -assert-count 1 c:b2 %x:+[A] w:q1 %i
+rename retime_probe gate
+read_verilog -icells opt_retime_buf.v
+rename retime_probe gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to come last.
+log -header "Refused: backward does not stack a second flop on q0"
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+logger -expect error "already registered" 1
+opt_retime -flop f1 -cut b0 -backward
