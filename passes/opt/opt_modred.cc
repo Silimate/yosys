@@ -1763,8 +1763,11 @@ struct OptModRedWorker : CutRegionWorker {
 	// an RTL `case` imports as one $bmux over the whole digit, which bmuxmap
 	// expands into S_WIDTH levels of 2:1 mux; charged 1, a four-level fold of
 	// them measures 3 deep and loses every profitability comparison to the tree
-	// that replaces it. $pmux is already one-hot, so its select tree is the
-	// log of the case count rather than the select width.
+	// that replaces it. A $pmux selects one case per select bit rather than one
+	// per code, and a multi-hot select is don't-care, so a lowering is free to
+	// balance it: estimate the log of the case count, not the select width.
+	// Both are estimates of a balanced lowering, and both are floors on what a
+	// single level can hide -- which is all the comparison below needs.
 	int cell_depth_cost(Cell *cell) const
 	{
 		if (cell == nullptr)
@@ -3490,14 +3493,15 @@ struct OptModRedPass : public Pass {
 		log("        cell the rest of the flow may still be relying on.\n");
 		log("\n");
 		log("    -mux-depth\n");
-		log("        charge a select-driven mux the depth of the mux tree it stands\n");
-		log("        for -- S_WIDTH levels for `$bmux`, the log of the case count for\n");
-		log("        `$pmux` -- when weighing a rewrite. A residue table spelled as an\n");
-		log("        RTL `case` imports as one `$bmux` per digit, so a fold of them\n");
-		log("        measures one level per stage and is refused as unprofitable,\n");
-		log("        while the same table spelled as a flat decode measures its real\n");
-		log("        depth and is taken. Off by default: it only widens which proven\n");
-		log("        reductions are judged worth rewriting, never what is matched.\n");
+		log("        estimate a select-driven mux at the depth of the mux tree it\n");
+		log("        stands for -- S_WIDTH levels for `$bmux`, the log of the case\n");
+		log("        count for a balanced `$pmux` lowering -- when weighing a rewrite.\n");
+		log("        A residue table spelled as an RTL `case` imports as one such mux\n");
+		log("        per digit, so a fold of them measures one level per stage and is\n");
+		log("        refused as unprofitable, while the same table spelled as a flat\n");
+		log("        decode measures its real depth and is taken. Off by default: it\n");
+		log("        only widens which proven reductions are judged worth rewriting,\n");
+		log("        never what is matched.\n");
 		log("\n");
 	}
 
