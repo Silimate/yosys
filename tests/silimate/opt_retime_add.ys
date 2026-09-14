@@ -96,9 +96,9 @@ log -pop
 # one expected error fits per run.
 #
 # TODO: the pass still refuses to merge registers on different clocks, and ones
-# with an async load or a set/reset, whose values arrive on a net rather than as
-# a constant and so cannot be folded. Enables, resets and init values are
-# handled: see opt_retime_enable.ys, opt_retime_reset.ys and opt_retime_init.ys.
+# with a set/reset or an async load from a net, whose values cannot be folded.
+# Enables, resets, constant async loads and init values are handled: see
+# opt_retime_enable.ys, opt_retime_reset.ys and opt_retime_init.ys.
 log -header "Refused: a forward move needs every operand registered"
 log -push
 design -reset

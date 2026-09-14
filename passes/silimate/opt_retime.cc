@@ -100,6 +100,42 @@ struct CellPort {
 	IdString port;
 };
 
+// Output-bit driver, including the offset in that port. A 1-bit flop driving
+// one slice of a wide $add.A is a different BitSrc per bit; unique_driver
+// would reject the port because it is not one cell's full Q.
+struct BitSrc {
+	Cell *cell;
+	IdString port;
+	int offset;
+};
+
+// One bit of a data port the walk is crossing. Path bits are the after-path
+// (the named flop's Q, or a previous cell's Y). Everything else on that port
+// has to be a sibling flop on the same clock, or a constant: that is what
+// makes f(reg(x), reg(y)) a legal forward move when x and y were bit-blasted
+// into separate WIDTH=1 registers instead of one wide flop.
+struct PortBit {
+	enum Kind { Path, Flop, Const } kind;
+	int path_offset;
+	Cell *flop;
+	int q_offset;
+	State st;
+};
+
+// Which of a register's stored values a fold is carrying. All three travel the
+// same way, and differ only in where the operands' copies are read from.
+enum class FoldKind { Init, Srst, Arst, Aload };
+
+const char *unmovable_reason(FfData &ff);
+const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff);
+bool describe_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *named,
+		Cell *cell, IdString port, const SigSpec &path_sig,
+		std::vector<PortBit> &desc, bool error);
+Cell *next_on_path(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *named, const SigSpec &cur,
+		IdString &port);
+
 pool<SigBit> wire_bits(const SigSpec &sig)
 {
 	pool<SigBit> bits;
@@ -116,6 +152,50 @@ bool bits_overlap(const pool<SigBit> &bits, const SigSpec &sig)
 	for (auto bit : sig)
 		if (bit.is_wire() && bits.count(bit))
 			return true;
+	return false;
+}
+
+dict<SigBit, BitSrc> index_output_bits(Module *module, SigMap &sigmap)
+{
+	dict<SigBit, BitSrc> drivers;
+	for (auto cell : module->cells()) {
+		for (auto &conn : cell->connections()) {
+			if (!cell->output(conn.first))
+				continue;
+			SigSpec mapped = sigmap(conn.second);
+			for (int i = 0; i < GetSize(mapped); i++)
+				if (mapped[i].is_wire())
+					drivers[mapped[i]] = {cell, conn.first, i};
+		}
+	}
+	return drivers;
+}
+
+// True when something other than except.except_port reads any bit of sig.
+// Partial reads count: a 1-bit Q sliced into a 33-bit $mul.A is a reader, and
+// that is the case a leftover copy has to be left behind for.
+bool has_other_readers(Module *module, SigMap &sigmap, const SigSpec &sig,
+		Cell *except, IdString except_port)
+{
+	pool<SigBit> bits = wire_bits(sig);
+	for (auto cell : module->cells()) {
+		for (auto &conn : cell->connections()) {
+			if (!cell->input(conn.first))
+				continue;
+			if (cell == except && conn.first == except_port)
+				continue;
+			for (auto bit : sigmap(conn.second))
+				if (bit.is_wire() && bits.count(bit))
+					return true;
+		}
+	}
+	for (auto wire : module->wires()) {
+		if (!wire->port_output)
+			continue;
+		for (auto bit : sigmap(SigSpec(wire)))
+			if (bits.count(bit))
+				return true;
+	}
 	return false;
 }
 
@@ -177,7 +257,8 @@ Cell *unique_reader(Module *module, SigMap &sigmap, const SigSpec &sig, IdString
 // Walk the unique after-path of start.Y looking for cut. Used to pick which
 // reader of a multi-fanout flop is the one the move follows; the first hop
 // itself is allowed to share the flop's Q with other readers.
-bool reaches_cut(Module *module, SigMap &sigmap, Cell *start, Cell *cut)
+bool reaches_cut(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *named, Cell *start, Cell *cut)
 {
 	if (start == cut)
 		return true;
@@ -189,8 +270,8 @@ bool reaches_cut(Module *module, SigMap &sigmap, Cell *start, Cell *cut)
 	SigSpec cur = sigmap(start->getPort(ID::Y));
 	while (true) {
 		IdString port;
-		Cell *next = unique_reader(module, sigmap, cur, port);
-		if (!next || !is_data_input(next, port))
+		Cell *next = next_on_path(module, sigmap, drivers, initvals, ref, named, cur, port);
+		if (!next)
 			return false;
 		if (seen.count(next))
 			return false;
@@ -225,62 +306,228 @@ bool signal_reaches(Module *module, SigMap &sigmap, const SigSpec &from, const S
 	}
 }
 
-Cell *unique_driver(Module *module, SigMap &sigmap, const SigSpec &sig, IdString &port)
+// Classify every bit of cell.port relative to the after-path signal path_sig.
+// The whole path has to enter this port. Bits of the port that are not on the
+// path must be sibling flops matching ref, or constants. That is what makes
+// f(reg(x), reg(y)) a legal forward move when x and y were bit-blasted into
+// separate WIDTH=1 registers instead of one wide flop. error logs a cmd_error
+// on a bad sibling (used when this port belongs to -cut); a quiet false is
+// for walking, where a bad port is simply not a hop.
+bool describe_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *named,
+		Cell *cell, IdString port, const SigSpec &path_sig,
+		std::vector<PortBit> &desc, bool error)
 {
-	dict<SigBit, pair<Cell *, IdString>> drivers;
-	for (auto cell : module->cells()) {
-		for (auto &conn : cell->connections()) {
-			if (!cell->output(conn.first))
-				continue;
-			SigSpec mapped = sigmap(conn.second);
-			for (int i = 0; i < GetSize(mapped); i++) {
-				if (mapped[i].is_wire())
-					drivers[mapped[i]] = {cell, conn.first};
-			}
-		}
+	desc.clear();
+	if (!is_data_input(cell, port))
+		return false;
+
+	SigSpec mapped = sigmap(cell->getPort(port));
+	dict<SigBit, int> path_index;
+	for (int i = 0; i < GetSize(path_sig); i++) {
+		if (!path_sig[i].is_wire())
+			return false;
+		path_index[path_sig[i]] = i;
 	}
 
+	int overlap = 0;
+	for (int i = 0; i < GetSize(mapped); i++)
+		if (mapped[i].is_wire() && path_index.count(mapped[i]))
+			overlap++;
+	if (overlap == 0 || overlap != GetSize(path_sig))
+		return false;
+
+	int seen_path = 0;
+	for (int i = 0; i < GetSize(mapped); i++) {
+		SigBit bit = mapped[i];
+		if (bit.is_wire() && path_index.count(bit)) {
+			desc.push_back({PortBit::Path, path_index[bit], nullptr, 0, State::S0});
+			seen_path++;
+			continue;
+		}
+		if (!bit.is_wire()) {
+			desc.push_back({PortBit::Const, 0, nullptr, 0, bit.data});
+			continue;
+		}
+
+		auto it = drivers.find(bit);
+		if (it == drivers.end() || it->second.port != ID::Q ||
+				!it->second.cell->is_builtin_ff()) {
+			if (error)
+				log_cmd_error("Input %s of cell %s is not driven by a flop or a constant, so "
+						"flop %s cannot move forward across it.\n",
+						log_id(port), log_id(cell), log_id(named));
+			return false;
+		}
+
+		Cell *drv = it->second.cell;
+		// A named-flop Q bit that is not in path_sig is a split of the
+		// register across this port and somewhere else; refuse rather than
+		// merge the named flop with itself.
+		if (drv == named) {
+			if (error)
+				log_cmd_error("Input %s of cell %s is only partly driven by flop %s.\n",
+						log_id(port), log_id(cell), log_id(named));
+			return false;
+		}
+
+		FfData ff(&initvals, drv);
+		if (const char *why = mismatch_reason(sigmap, ref, ff)) {
+			if (error)
+				log_cmd_error("Flop %s on input %s of cell %s has %s flop %s.\n",
+						log_id(drv), log_id(port), log_id(cell), why, log_id(named));
+			return false;
+		}
+		if (const char *why = unmovable_reason(ff)) {
+			if (error)
+				log_cmd_error("Flop %s on input %s of cell %s cannot be merged because %s.\n",
+						log_id(drv), log_id(port), log_id(cell), why);
+			return false;
+		}
+		desc.push_back({PortBit::Flop, 0, drv, it->second.offset, State::S0});
+	}
+
+	return seen_path == GetSize(path_sig) && seen_path > 0;
+}
+
+// A data input that is not the after-path: every bit is a sibling flop or a
+// constant. Used for the other operand of $add/$mul/$mux once the path port
+// has been identified.
+bool describe_operand(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *named,
+		Cell *cell, IdString port, std::vector<PortBit> &desc, bool error)
+{
+	desc.clear();
+	SigSpec mapped = sigmap(cell->getPort(port));
+	for (int i = 0; i < GetSize(mapped); i++) {
+		SigBit bit = mapped[i];
+		if (!bit.is_wire()) {
+			desc.push_back({PortBit::Const, 0, nullptr, 0, bit.data});
+			continue;
+		}
+		auto it = drivers.find(bit);
+		if (it == drivers.end() || it->second.port != ID::Q ||
+				!it->second.cell->is_builtin_ff()) {
+			if (error)
+				log_cmd_error("Input %s of cell %s is not driven by a flop or a constant, so "
+						"flop %s cannot move forward across it.\n",
+						log_id(port), log_id(cell), log_id(named));
+			return false;
+		}
+		Cell *drv = it->second.cell;
+		if (drv == named) {
+			if (error)
+				log_cmd_error("Input %s of cell %s is only partly driven by flop %s.\n",
+						log_id(port), log_id(cell), log_id(named));
+			return false;
+		}
+		FfData ff(&initvals, drv);
+		if (const char *why = mismatch_reason(sigmap, ref, ff)) {
+			if (error)
+				log_cmd_error("Flop %s on input %s of cell %s has %s flop %s.\n",
+						log_id(drv), log_id(port), log_id(cell), why, log_id(named));
+			return false;
+		}
+		if (const char *why = unmovable_reason(ff)) {
+			if (error)
+				log_cmd_error("Flop %s on input %s of cell %s cannot be merged because %s.\n",
+						log_id(drv), log_id(port), log_id(cell), why);
+			return false;
+		}
+		desc.push_back({PortBit::Flop, 0, drv, it->second.offset, State::S0});
+	}
+	return true;
+}
+
+Cell *next_on_path(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *named, const SigSpec &cur,
+		IdString &port)
+{
 	Cell *found = nullptr;
 	port = IdString();
-	for (auto bit : sig) {
-		auto it = drivers.find(bit);
-		if (it == drivers.end())
-			return nullptr;
-		if (found && (it->second.first != found || it->second.second != port))
-			return nullptr;
-		found = it->second.first;
-		port = it->second.second;
+	int hits = 0;
+	for (auto cell : module->cells()) {
+		for (auto cand : data_inputs(cell)) {
+			std::vector<PortBit> desc;
+			if (!describe_port(sigmap, drivers, initvals, ref, named, cell, cand,
+					cur, desc, false))
+				continue;
+			hits++;
+			found = cell;
+			port = cand;
+		}
 	}
-	if (!found || sigmap(found->getPort(port)) != sig)
+	if (hits != 1)
 		return nullptr;
 	return found;
 }
 
-std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap, Cell *flop, Cell *cut)
+Const stored_bit(FfInitVals &initvals, Cell *flop, int offset, FoldKind kind)
+{
+	FfData ff(&initvals, flop);
+	Const val;
+	switch (kind) {
+	case FoldKind::Srst:
+		val = ff.val_srst;
+		break;
+	case FoldKind::Arst:
+		val = ff.val_arst;
+		break;
+	case FoldKind::Aload:
+		log_assert(ff.has_aload);
+		log_assert(ff.sig_ad.is_fully_const());
+		val = ff.sig_ad.as_const();
+		break;
+	default:
+		val = ff.val_init;
+		break;
+	}
+	log_assert(offset >= 0 && offset < GetSize(val));
+	return Const(val[offset]);
+}
+
+Const assemble_const(const std::vector<PortBit> &desc, const Const &cur,
+		FfInitVals &initvals, FoldKind kind)
+{
+	std::vector<State> bits;
+	bits.reserve(GetSize(desc));
+	for (auto &bit : desc) {
+		if (bit.kind == PortBit::Path)
+			bits.push_back(cur[bit.path_offset]);
+		else if (bit.kind == PortBit::Const)
+			bits.push_back(bit.st);
+		else
+			bits.push_back(stored_bit(initvals, bit.flop, bit.q_offset, kind)[0]);
+	}
+	return Const(bits);
+}
+
+std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
+		const dict<SigBit, BitSrc> &drivers, FfInitVals &initvals, FfData &ref,
+		Cell *flop, Cell *cut)
 {
 	std::vector<ChainStep> chain;
 	pool<Cell *> seen;
 	SigSpec q = sigmap(flop->getPort(ID::Q));
 
-	// Only the full readers matter here, because all this has to settle is
-	// which one the move follows to the cut. A partial read or a module
-	// output on Q does not change that answer, it only means a copy has to
-	// be left behind, which is apply_move's decision to make.
-	std::vector<CellPort> full;
-	bool partial = false, output = false;
-	scan_readers(module, sigmap, q, full, partial, output);
-	(void)partial;
-	(void)output;
-
+	// First hop: any data-input port that consumes all of Q, including a
+	// wide port that only slices Q as one bit among sibling flop Qs. Extra
+	// readers of Q (full or partial) do not disqualify the hop; they only
+	// mean a copy is left behind, which is apply_move's decision.
 	ChainStep first = {};
 	int paths = 0;
-	for (auto &reader : full) {
-		if (!is_data_input(reader.cell, reader.port))
-			continue;
-		if (!reaches_cut(module, sigmap, reader.cell, cut))
-			continue;
-		paths++;
-		first = {reader.cell, reader.port};
+	for (auto cell : module->cells()) {
+		for (auto port : data_inputs(cell)) {
+			std::vector<PortBit> desc;
+			bool error = cell == cut;
+			if (!describe_port(sigmap, drivers, initvals, ref, flop, cell, port,
+					q, desc, error))
+				continue;
+			if (!reaches_cut(module, sigmap, drivers, initvals, ref, flop, cell, cut))
+				continue;
+			paths++;
+			first = {cell, port};
+		}
 	}
 	if (paths == 0)
 		log_cmd_error("Cut %s is not on the after-path of flop %s.\n", log_id(cut), log_id(flop));
@@ -296,8 +543,8 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap, Cell *flop,
 	SigSpec cur = sigmap(first.cell->getPort(ID::Y));
 	while (true) {
 		IdString port;
-		Cell *next = unique_reader(module, sigmap, cur, port);
-		if (!next || !is_data_input(next, port))
+		Cell *next = next_on_path(module, sigmap, drivers, initvals, ref, flop, cur, port);
+		if (!next)
 			break;
 
 		if (seen.count(next))
@@ -305,6 +552,8 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap, Cell *flop,
 		seen.insert(next);
 		chain.push_back({next, port});
 		if (next == cut)
+			break;
+		if (!next->hasPort(ID::Y))
 			break;
 		cur = sigmap(next->getPort(ID::Y));
 	}
@@ -318,22 +567,22 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap, Cell *flop,
 // from a net rather than from a parameter, so carrying them across a cut would
 // mean building logic to transform that net rather than folding a constant.
 //
+// An async load with a constant AD is the same as an async reset value: the
+// enable is a net that travels with the register, and the value folds. Ibex
+// encodes async reset that way ($aldff + AD=0).
+//
 // A clock enable is deliberately absent: it stores no value of its own, it only
 // decides whether the register updates. Holding commutes with a pure function,
 // since f of an unchanged input is an unchanged f, so the enable travels with
 // the register untouched.
 const char *unmovable_reason(FfData &ff)
 {
-	if (ff.has_aload)
-		return "it has an async load";
+	if (ff.has_aload && !ff.sig_ad.is_fully_const())
+		return "it has an async load from a net";
 	if (ff.has_sr)
 		return "it has a set/reset";
 	return nullptr;
 }
-
-// Which of a register's stored values a fold is carrying. All three travel the
-// same way, and differ only in where the operands' copies are read from.
-enum class FoldKind { Init, Srst, Arst };
 
 const char *fold_kind_name(FoldKind kind)
 {
@@ -342,32 +591,10 @@ const char *fold_kind_name(FoldKind kind)
 		return "sync reset";
 	case FoldKind::Arst:
 		return "async reset";
+	case FoldKind::Aload:
+		return "async load";
 	default:
 		return "init";
-	}
-}
-
-// The value a data input of a chain cell contributes to a fold: a merged
-// register's copy of it, or a constant operand, which holds its own value on
-// every cycle, reset cycles and the first cycle alike. Only called once
-// collect_merges has established that every input is one or the other.
-Const operand_value(Module *module, SigMap &sigmap, FfInitVals &initvals, Cell *cell,
-		IdString port, FoldKind kind)
-{
-	SigSpec in = sigmap(cell->getPort(port));
-	if (in.is_fully_const())
-		return in.as_const();
-	IdString drv_port;
-	Cell *drv = unique_driver(module, sigmap, in, drv_port);
-	log_assert(drv && drv_port == ID::Q);
-	FfData ff(&initvals, drv);
-	switch (kind) {
-	case FoldKind::Srst:
-		return ff.val_srst;
-	case FoldKind::Arst:
-		return ff.val_arst;
-	default:
-		return ff.val_init;
 	}
 }
 
@@ -381,18 +608,35 @@ Const operand_value(Module *module, SigMap &sigmap, FfInitVals &initvals, Cell *
 //
 // A $buf chain needs no arithmetic, being the identity, but the value still has
 // to move onto the register's new Q net rather than stay on the old one, so it
-// is not a special case here.
-Const fold_value(Module *module, SigMap &sigmap, FfInitVals &initvals, Cell *flop,
+// is not a special case here. A bit-sliced operand is assembled bit by bit:
+// path bits from cur, sibling bits from those flops' stored values, constants
+// as themselves.
+Const fold_value(Module *, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *flop,
 		const std::vector<ChainStep> &chain, FoldKind kind, Const cur)
 {
+	SigSpec path = sigmap(flop->getPort(ID::Q));
 	for (auto &step : chain) {
-		if (is_buf(step.cell))
+		if (is_buf(step.cell)) {
+			path = sigmap(step.cell->getPort(ID::Y));
 			continue;
+		}
 
 		std::vector<Const> args;
-		for (auto port : data_inputs(step.cell))
-			args.push_back(port == step.port ? cur
-					: operand_value(module, sigmap, initvals, step.cell, port, kind));
+		for (auto port : data_inputs(step.cell)) {
+			std::vector<PortBit> desc;
+			bool ok;
+			if (port == step.port)
+				ok = describe_port(sigmap, drivers, initvals, ref, flop, step.cell, port,
+						path, desc, true);
+			else
+				ok = describe_operand(sigmap, drivers, initvals, ref, flop, step.cell, port,
+						desc, true);
+			if (!ok)
+				log_cmd_error("Input %s of cell %s is not on the after-path of flop %s.\n",
+						log_id(port), log_id(step.cell), log_id(flop));
+			args.push_back(assemble_const(desc, cur, initvals, kind));
+		}
 
 		bool err = false;
 		Const out;
@@ -410,6 +654,7 @@ Const fold_value(Module *module, SigMap &sigmap, FfInitVals &initvals, Cell *flo
 					log_id(flop), fold_kind_name(kind), log_id(step.cell),
 					log_id(step.cell->type));
 		cur = out;
+		path = sigmap(step.cell->getPort(ID::Y));
 	}
 	return cur;
 }
@@ -419,35 +664,42 @@ Const fold_value(Module *module, SigMap &sigmap, FfInitVals &initvals, Cell *flo
 // carry. A mix of defined and undefined copies is refused rather than folded:
 // evaluating one against the other gives undefined bits back, which would
 // quietly discard what the defined side said.
-bool fold_through(Module *module, SigMap &sigmap, FfInitVals &initvals, Cell *flop,
+bool fold_through(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *flop,
 		const std::vector<ChainStep> &chain, FoldKind kind, Const start, Const &result)
 {
 	bool any = !start.is_fully_undef();
 	bool all = start.is_fully_def();
+	SigSpec path = sigmap(flop->getPort(ID::Q));
 	for (auto &step : chain) {
-		if (is_buf(step.cell))
+		if (is_buf(step.cell)) {
+			path = sigmap(step.cell->getPort(ID::Y));
 			continue;
-		for (auto port : data_inputs(step.cell)) {
-			if (port == step.port)
-				continue;
-			// A constant operand is not a stored value. It holds the same value
-			// on every cycle, so it feeds a fold that is already happening but
-			// never causes one, and it can never be the undefined half of a
-			// mix. Counting it here would demand a stored value of every
-			// register moving across a cell with a constant operand.
-			if (sigmap(step.cell->getPort(port)).is_fully_const())
-				continue;
-			Const val = operand_value(module, sigmap, initvals, step.cell, port, kind);
-			any = any || !val.is_fully_undef();
-			all = all && val.is_fully_def();
 		}
+		for (auto port : data_inputs(step.cell)) {
+			std::vector<PortBit> desc;
+			if (port == step.port)
+				describe_port(sigmap, drivers, initvals, ref, flop, step.cell, port,
+						path, desc, true);
+			else
+				describe_operand(sigmap, drivers, initvals, ref, flop, step.cell, port,
+						desc, true);
+			for (auto &bit : desc) {
+				if (bit.kind != PortBit::Flop)
+					continue;
+				Const val = stored_bit(initvals, bit.flop, bit.q_offset, kind);
+				any = any || !val.is_fully_undef();
+				all = all && val.is_fully_def();
+			}
+		}
+		path = sigmap(step.cell->getPort(ID::Y));
 	}
 	if (!any)
 		return false;
 	if (!all)
 		log_cmd_error("Flop %s cannot move because the move would fold %s values together "
 				"and only some of them are defined.\n", log_id(flop), fold_kind_name(kind));
-	result = fold_value(module, sigmap, initvals, flop, chain, kind, start);
+	result = fold_value(module, sigmap, drivers, initvals, ref, flop, chain, kind, start);
 	return true;
 }
 
@@ -498,60 +750,49 @@ const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
 		if (ff.pol_arst != ref.pol_arst)
 			return "an async reset of the opposite polarity to";
 	}
+	if (ff.has_aload) {
+		if (sigmap(ff.sig_aload) != sigmap(ref.sig_aload))
+			return "a different async load net than";
+		if (ff.pol_aload != ref.pol_aload)
+			return "an async load of the opposite polarity to";
+	}
 	// Widths are deliberately not compared: a $mux merges a 1-bit select
 	// register with its wide data registers.
 	return nullptr;
 }
 
 // A forward move across a multi-input cell folds every other data input into
-// the register it leaves behind. The flop on that input is deleted only when
-// nothing else reads it; extra readers keep the flop and the cut is rewired
-// to its D, which is the same netlist as cloning a fanout-1 copy and merging
-// that copy away.
-std::vector<Merge> collect_merges(Module *module, SigMap &sigmap, FfInitVals &initvals,
-		Cell *flop, FfData &ref, const std::vector<ChainStep> &chain)
+// the register it leaves behind. Bit-sliced operands contribute one merge per
+// sibling flop. The flop is deleted only when nothing else reads it; extra
+// readers keep the flop and only the cut is rewired to D, which is the same
+// netlist as cloning a fanout-1 copy and merging that copy away.
+std::vector<Merge> collect_merges(Module *module, SigMap &sigmap,
+		const dict<SigBit, BitSrc> &drivers, FfInitVals &initvals, Cell *flop,
+		FfData &ref, const std::vector<ChainStep> &chain)
 {
 	std::vector<Merge> merges;
+	pool<Cell *> seen;
+	SigSpec path = sigmap(flop->getPort(ID::Q));
 	for (auto &step : chain) {
 		for (auto port : data_inputs(step.cell)) {
+			std::vector<PortBit> desc;
 			if (port == step.port)
-				continue;
-
-			SigSpec in = sigmap(step.cell->getPort(port));
-
-			// A constant operand needs no register to merge, because it is
-			// already time invariant: reg(c) is c on every cycle, so
-			// f(reg(x), c) equals reg(f(x, c)) for the same reason it holds
-			// when every input is registered. Nothing is folded away and
-			// nothing is rewired, the cut goes on reading the constant where
-			// it sits. A partly constant input still refuses below, since
-			// unique_driver will not find a single flop behind it.
-			if (in.is_fully_const())
-				continue;
-
-			IdString drv_port;
-			Cell *drv = unique_driver(module, sigmap, in, drv_port);
-			if (!drv || drv_port != ID::Q || !drv->is_builtin_ff())
-				log_cmd_error("Input %s of cell %s is not driven by a flop or a constant, so "
-						"flop %s cannot move forward across it.\n",
-						log_id(port), log_id(step.cell), log_id(flop));
-
-			FfData ff(&initvals, drv);
-			// why carries its own preposition, so that a mismatched net and a
-			// mismatched polarity can each be named for what they are.
-			if (const char *why = mismatch_reason(sigmap, ref, ff))
-				log_cmd_error("Flop %s on input %s of cell %s has %s flop %s.\n",
-						log_id(drv), log_id(port), log_id(step.cell), why, log_id(flop));
-			if (const char *why = unmovable_reason(ff))
-				log_cmd_error("Flop %s on input %s of cell %s cannot be merged because %s.\n",
-						log_id(drv), log_id(port), log_id(step.cell), why);
-
-			IdString reader_port;
-			Cell *reader = unique_reader(module, sigmap, sigmap(drv->getPort(ID::Q)), reader_port);
-			bool keep = reader != step.cell || reader_port != port;
-
-			merges.push_back({drv, step.cell, port, drv->getPort(ID::D), keep});
+				describe_port(sigmap, drivers, initvals, ref, flop, step.cell, port,
+						path, desc, true);
+			else
+				describe_operand(sigmap, drivers, initvals, ref, flop, step.cell, port,
+						desc, true);
+			for (auto &bit : desc) {
+				if (bit.kind != PortBit::Flop || seen.count(bit.flop))
+					continue;
+				seen.insert(bit.flop);
+				bool keep = has_other_readers(module, sigmap,
+						sigmap(bit.flop->getPort(ID::Q)), step.cell, port);
+				merges.push_back({bit.flop, step.cell, port, bit.flop->getPort(ID::D), keep});
+			}
 		}
+		if (step.cell->hasPort(ID::Y))
+			path = sigmap(step.cell->getPort(ID::Y));
 	}
 	return merges;
 }
@@ -595,12 +836,12 @@ void apply_move(Module *module, Cell *flop, Cell *cut)
 	if (!ff.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
 		log_cmd_error("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
 
-	std::vector<ChainStep> chain = collect_chain(module, sigmap, flop, cut);
+	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
+	std::vector<ChainStep> chain = collect_chain(module, sigmap, drivers, initvals, ff, flop, cut);
 
-	// The chain walk only follows a port when it carries the whole signal, so
-	// every register on the path already matches the width of the port it
-	// drives. What is left to check is the register the move leaves behind,
-	// which takes the width of the cut output.
+	// The chain walk follows a port that consumes the whole after-path, so a
+	// 1-bit Q may enter a wide $mul.A as one slice among sibling flops. The
+	// register the move leaves behind still takes the width of the cut output.
 	for (auto &step : chain)
 		if (!step.cell->hasPort(ID::Y))
 			log_cmd_error("Cell %s is missing port Y.\n", log_id(step.cell));
@@ -628,15 +869,10 @@ void apply_move(Module *module, Cell *flop, Cell *cut)
 	SigSpec map_y = sigmap(y);
 	SigSpec map_d = sigmap(d);
 
-	std::vector<CellPort> q_readers;
-	bool q_partial = false, q_output = false;
-	scan_readers(module, sigmap, map_q, q_readers, q_partial, q_output);
-	bool peel = q_partial || q_output;
-	if (!peel) {
-		for (auto &reader : q_readers)
-			if (reader.cell != first || reader.port != first_step.port)
-				peel = true;
-	}
+	// A slice of Q into the cut is not "other readers": that is the path. Peel
+	// only when something besides first_step.port still reads Q, including a
+	// module output.
+	bool peel = has_other_readers(module, sigmap, map_q, first, first_step.port);
 
 	// A leftover copy keeps the original D. If that D sits on the after-path
 	// of the cut, rewriting the cut would change the copy's input, so the
@@ -649,18 +885,21 @@ void apply_move(Module *module, Cell *flop, Cell *cut)
 				"not keep its original input.\n",
 				log_id(flop), log_id(cut));
 
-	std::vector<Merge> merges = collect_merges(module, sigmap, initvals, flop, ff, chain);
+	std::vector<Merge> merges = collect_merges(module, sigmap, drivers, initvals, flop, ff, chain);
 
 	// Every stored value the register carries is folded through the chain
 	// before anything is rewired, while the merged registers are still around
 	// to read their copies from.
-	Const init_folded, srst_folded, arst_folded;
-	bool got_init = fold_through(module, sigmap, initvals, flop, chain,
+	Const init_folded, srst_folded, arst_folded, aload_folded;
+	bool got_init = fold_through(module, sigmap, drivers, initvals, ff, flop, chain,
 			FoldKind::Init, ff.val_init, init_folded);
-	bool got_srst = ff.has_srst && fold_through(module, sigmap, initvals, flop, chain,
+	bool got_srst = ff.has_srst && fold_through(module, sigmap, drivers, initvals, ff, flop, chain,
 			FoldKind::Srst, ff.val_srst, srst_folded);
-	bool got_arst = ff.has_arst && fold_through(module, sigmap, initvals, flop, chain,
+	bool got_arst = ff.has_arst && fold_through(module, sigmap, drivers, initvals, ff, flop, chain,
 			FoldKind::Arst, ff.val_arst, arst_folded);
+	bool got_aload = ff.has_aload && ff.sig_ad.is_fully_const() &&
+			fold_through(module, sigmap, drivers, initvals, ff, flop, chain,
+					FoldKind::Aload, ff.sig_ad.as_const(), aload_folded);
 
 	// TODO relax some of these contraints by rewiring these control nets
 	pool<SigBit> forbidden = wire_bits(map_y);
@@ -701,7 +940,37 @@ void apply_move(Module *module, Cell *flop, Cell *cut)
 	} else if (peel) {
 		link = module->addWire(module->uniquify(flop->name.str() + "_retimed"), GetSize(y));
 	}
-	first->setPort(first_step.port, d);
+
+	// Capture each step's after-path before any port is rewritten; SigMap is
+	// a snapshot of the connections as they stood at the start of the move.
+	std::vector<SigSpec> paths;
+	paths.push_back(map_q);
+	for (int i = 0; i + 1 < GetSize(chain); i++)
+		paths.push_back(sigmap(chain[i].cell->getPort(ID::Y)));
+
+	for (int i = 0; i < GetSize(chain); i++) {
+		ChainStep &step = chain[i];
+		SigSpec path = paths[i];
+		for (auto port : data_inputs(step.cell)) {
+			std::vector<PortBit> desc;
+			if (port == step.port)
+				describe_port(sigmap, drivers, initvals, ff, flop, step.cell, port,
+						path, desc, true);
+			else
+				describe_operand(sigmap, drivers, initvals, ff, flop, step.cell, port,
+						desc, true);
+			SigSpec neu;
+			for (auto &bit : desc) {
+				if (bit.kind == PortBit::Path)
+					neu.append(i == 0 ? d[bit.path_offset] : path[bit.path_offset]);
+				else if (bit.kind == PortBit::Flop)
+					neu.append(bit.flop->getPort(ID::D)[bit.q_offset]);
+				else
+					neu.append(SigBit(bit.st));
+			}
+			step.cell->setPort(port, neu);
+		}
+	}
 	last->setPort(ID::Y, link);
 
 	// The old Q net has become the combinational link from the cut, and the
@@ -716,11 +985,10 @@ void apply_move(Module *module, Cell *flop, Cell *cut)
 			initvals.remove_init(sigmap(merge.flop->getPort(ID::Q)));
 
 	// Merged flops with no other readers disappear into the one flop the
-	// move leaves behind. Extra readers keep their flop; only the cut is
-	// rewired to D.
+	// move leaves behind. Extra readers keep their flop; the cut was already
+	// rewired to D above.
 	int kept = 0;
 	for (auto &merge : merges) {
-		merge.cell->setPort(merge.port, merge.sig_d);
 		if (merge.keep) {
 			kept++;
 			continue;
@@ -744,6 +1012,12 @@ void apply_move(Module *module, Cell *flop, Cell *cut)
 		ff.val_srst = got_srst ? srst_folded : Const(State::Sx, GetSize(y));
 	if (ff.has_arst)
 		ff.val_arst = got_arst ? arst_folded : Const(State::Sx, GetSize(y));
+	if (ff.has_aload) {
+		if (got_aload)
+			ff.sig_ad = SigSpec(aload_folded);
+		else if (ff.sig_ad.is_fully_const())
+			ff.sig_ad = Const(State::Sx, GetSize(y));
+	}
 	if (!ff.emit())
 		log_cmd_error("Flop %s did not survive being rebuilt after the move.\n",
 				log_id(flop_name));
@@ -756,6 +1030,9 @@ void apply_move(Module *module, Cell *flop, Cell *cut)
 	if (got_arst)
 		log("Folded async reset value of flop %s to %s.\n", log_id(flop_name),
 				log_signal(arst_folded));
+	if (got_aload)
+		log("Folded async load value of flop %s to %s.\n", log_id(flop_name),
+				log_signal(aload_folded));
 
 	log("Retimed %s forward across %d cell(s) ending at %s, merging %d flop(s).\n",
 			log_id(flop_name), GetSize(chain), log_id(cut), GetSize(merges));
@@ -781,11 +1058,16 @@ struct OptRetimePass : public Pass {
 		log("    -cut <cell>\n");
 		log("        cell on the after-path of the register. May be one or more\n");
 		log("        cells away; every cell between the flop and the cut moves with\n");
-		log("        it. After the flop, the path must be a unique chain. Supported\n");
-		log("        cut types are $buf, $mux, $not, $add, $sub, $mul, $and, $or,\n");
-		log("        $xor, $xnor, $shl, $shr, the comparators ($eq, $ne, $lt,\n");
-		log("        $le, $gt, $ge) and the $reduce_* cells, plus the matching\n");
-		log("        gate-level cells: $_NOT_, $_AND_/$_NAND_/$_OR_/$_NOR_,\n");
+		log("        it. After the flop, the path must be a unique chain. A data\n");
+		log("        input may be wider than the flop: the flop's Q can be one\n");
+		log("        slice of a $mul/$add operand if every other bit of that port\n");
+		log("        is a sibling flop on the same clock (or a constant). The\n");
+		log("        named flop is then resized to the cut output and the sibling\n");
+		log("        bit-flops are merged. Supported cut types are $buf, $mux,\n");
+		log("        $not, $add, $sub, $mul, $and, $or, $xor, $xnor, $shl, $shr,\n");
+		log("        the comparators ($eq, $ne, $lt, $le, $gt, $ge) and the\n");
+		log("        $reduce_* cells, plus the matching gate-level cells:\n");
+		log("        $_NOT_, $_AND_/$_NAND_/$_OR_/$_NOR_,\n");
 		log("        $_XOR_/$_XNOR_, $_ANDNOT_/$_ORNOT_, $_MUX_/$_NMUX_,\n");
 		log("        $_AOI3_/$_OAI3_ and $_AOI4_/$_OAI4_. Every input of the\n");
 		log("        cut counts as a data input, the $mux select and a shift\n");
@@ -811,9 +1093,9 @@ struct OptRetimePass : public Pass {
 		log("        resets to, what the cut would have made of the old value.\n");
 		log("        Merged registers need not reset to the same value, but they\n");
 		log("        do have to reset on the same net, and every value being\n");
-		log("        folded has to be defined. An async load or a set/reset\n");
-		log("        arrives on a net rather than as a constant, so there is\n");
-		log("        nothing to fold and the move is refused.\n");
+		log("        folded has to be defined. An async load with a constant AD\n");
+		log("        folds the same way; an async load from a net, or a set/reset,\n");
+		log("        has nothing to fold and the move is refused.\n");
 		log("\n");
 		log("        A register read by more than one cell is copied: the named\n");
 		log("        flop moves, and a leftover copy keeps the original Q for\n");

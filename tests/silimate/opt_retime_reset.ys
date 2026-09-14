@@ -164,6 +164,45 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
+log -header "Forward: constant async-load value folded through \$eq"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module aldffeq(input clk, rst_n, input [2:0] d, output eq);
+  (* init = 3'h0 *) wire [2:0] q;
+  wire y;
+  $aldff #(.WIDTH(3), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b0))
+    fs (.CLK(clk), .ALOAD(rst_n), .D(d), .AD(3'b000), .Q(q));
+  $eq #(.A_WIDTH(3), .B_WIDTH(3), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    e0 (.A(q), .B(3'b111), .Y(y));
+  $aldff #(.WIDTH(1), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b0))
+    fq (.CLK(clk), .ALOAD(rst_n), .D(y), .AD(1'b0), .Q(eq));
+endmodule
+EOF
+hierarchy -top aldffeq
+setattr -set init 1'b0 w:eq
+check -assert
+select -assert-count 2 t:$aldff
+design -save orig
+opt_retime -flop fs -cut e0 -forward
+check -assert
+select -assert-count 2 t:$aldff
+select -assert-count 1 c:fs
+# 3'b000 == 3'b111 is 0, so the narrowed register async-loads 0
+select -assert-count 1 c:fs r:WIDTH=1 %i
+select -assert-count 1 c:e0 %x:+[A] w:d %i
+select -assert-count 1 c:fs %x:+[Q] w:y %i
+rename aldffeq gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+async2sync
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
 # logger -expect error exits yosys successfully, so this has to come last.
 #
 # The values may differ but the timing may not. fb resets on rst2 while fa
