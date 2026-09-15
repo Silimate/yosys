@@ -150,6 +150,10 @@ struct SimShared
 	// aborting; only the first MAX_MISSING_INPUT_WARNINGS of them are named to bound log size.
 	bool missing_input_warning = false;
 	int missing_inputs = 0;
+	// SILIMATE: -missing-input-file lists every missing input, uncapped, for tools to read
+	struct MissingInput { std::string module, path; int width; };
+	std::string missing_input_file;
+	std::vector<MissingInput> missing_input_list;
 	bool blackbox_children = false;
 	pool<IdString> instance_root_modules;
 	double clk_period_override = 0.0;
@@ -1808,8 +1812,14 @@ struct SimWorker : SimShared
 	}
 
 	// SILIMATE: an input port with no matching FST signal is fatal by default
-	void report_missing_fst_input(const std::string &path, Module *mod)
+	void report_missing_fst_input(const std::string &path, Module *mod, Wire *wire)
 	{
+		// -missing-input-file names every one, so a fatal run still lists them all before it stops
+		if (!missing_input_file.empty()) {
+			missing_input_list.push_back({log_id(mod), path, GetSize(wire)});
+			if (!missing_input_warning)
+				return;
+		}
 		if (!missing_input_warning)
 			log_error("Can't find port '%s' on module '%s' in FST. Use -missing-input-warn to leave it undriven and continue.\n",
 					path.c_str(), log_id(mod));
@@ -1817,11 +1827,43 @@ struct SimWorker : SimShared
 			log_warning("Can't find port '%s' on module '%s' in FST, leaving it undriven.\n", path.c_str(), log_id(mod));
 	}
 
+	// SILIMATE: -missing-input-file, written once every root is bound; then the deferred fatal error
+	void write_missing_input_file()
+	{
+		if (missing_input_file.empty())
+			return;
+		PrettyJson json;
+		if (!json.write_to_file(missing_input_file))
+			log_error("Can't open file `%s' for writing: %s\n", missing_input_file, strerror(errno));
+		int bits = 0;
+		for (auto &m : missing_input_list)
+			bits += m.width;
+		json.begin_object();
+		json.entry("count", GetSize(missing_input_list));
+		json.entry("bits", bits);
+		json.name("missing_inputs");
+		json.begin_array();
+		for (auto &m : missing_input_list) {
+			json.begin_object();
+			json.compact();
+			json.entry("module", m.module);
+			json.entry("path", m.path);
+			json.entry("width", m.width);
+			json.end_object();
+		}
+		json.end_array();
+		json.end_object();
+		if (!missing_input_warning && !missing_input_list.empty())
+			log_error("Can't find port '%s' on module '%s' in FST. Use -missing-input-warn to leave it undriven and continue.\n",
+					missing_input_list.front().path.c_str(), missing_input_list.front().module.c_str());
+	}
+
 	// Bind one port_input from the waveform. First success wins:
-	//   drive_vector          — same name and width (or sim_src slice)
-	//   drive_tied_off        — parent tied the pin to a constant
-	//   drive_bit_selects     — path[k] (packed d[0]/d[1], or din[1][k])
-	//   drive_flattened_word  — `\din[1]` from parent din[8]..din[15]
+	//   drive_vector             — same name and width (or sim_src slice)
+	//   drive_tied_off           — parent tied the pin to a constant
+	//   drive_bit_selects        — path[k] (packed d[0]/d[1], or din[1][k])
+	//   drive_flattened_element  — array element `\coeffs[-1]` / `\grid[1][2]` from a dump that
+	//                              flattened the array: one vector, or one 1-bit var per bit
 	void bind_fst_input(SimInstance *t, Wire *wire, Module *mod)
 	{
 		std::string path = t->scope + "." + wire->name.unescape();
@@ -1831,9 +1873,9 @@ struct SimWorker : SimShared
 			return;
 		if (drive_bit_selects(t, wire, path))
 			return;
-		if (drive_flattened_word(t, wire, path))
+		if (drive_flattened_element(t, wire, mod, path))
 			return;
-		report_missing_fst_input(path, mod);
+		report_missing_fst_input(path, mod, wire);
 	}
 
 	// Same dump name, usable width: either an exact vector or a sim_src_bit slice of a wider one.
@@ -1896,32 +1938,169 @@ struct SimWorker : SimShared
 		return commit_bit_handles(t, wire, fst->getMemoryHandles(path));
 	}
 
-	// Unpacked word `\din[1]` (W bits) dumped as 1-bit din[W]..din[2W) under parent `din`.
-	bool drive_flattened_word(SimInstance *t, Wire *wire, const std::string &path)
+	// The input element wires of one array port in a module, as Verific splits it: `\coeffs[0]`,
+	// `\coeffs[-1]`, `\coeffs[-2]` for `logic [2:0] coeffs [0:-2]`, or `\grid[1][0]`.. for 2-D.
+	struct ArrayDim {
+		int lo = INT_MAX, hi = INT_MIN;
+		bool ascending = false;  // declared [lo:hi], so hi (not lo) is the least significant
+		int size() const { return hi - lo + 1; }
+	};
+	struct ArrayFamily {
+		std::vector<ArrayDim> dims;
+		int width = 0;       // bits per element; -1 when the elements disagree
+		int count = 0;       // element wires seen
+		bool complete = false;  // every index of every dimension is a port, all one width
+	};
+	dict<Module*, dict<std::pair<std::string, int>, ArrayFamily>> array_families;
+
+	// `grid[1][-2]` -> base `grid` and declared indices {1, -2}. Ranges end the index list.
+	static bool split_element_name(const std::string &name, std::string &base, std::vector<int> &indices)
+	{
+		indices.clear();
+		size_t end = name.size();
+		while (end > 0 && name[end - 1] == ']') {
+			size_t open = name.rfind('[', end - 1);
+			if (open == std::string::npos || open == 0)
+				break;
+			std::string inner = name.substr(open + 1, end - open - 2);
+			size_t sign = !inner.empty() && inner[0] == '-';
+			if (inner.size() == sign || inner.size() - sign > 9 ||
+					inner.find_first_not_of("0123456789", sign) != std::string::npos)
+				break;
+			indices.insert(indices.begin(), std::stoi(inner));
+			end = open;
+		}
+		if (indices.empty())
+			return false;
+		base = name.substr(0, end);
+		return true;
+	}
+
+	// Index every array family among a module's inputs once. Verific numbers element ports in
+	// declaration order, so the first port holds every dimension's left bound and the last its
+	// right bound: that is the only trace of whether a dimension was declared [lo:hi] or [hi:lo].
+	const ArrayFamily *array_family(Module *mod, const std::string &base, int ndims)
+	{
+		if (!array_families.count(mod)) {
+			auto &families = array_families[mod];
+			dict<std::pair<std::string, int>, std::pair<std::vector<int>, int>> first, last;
+			for (auto wire : mod->wires()) {
+				std::string b;
+				std::vector<int> idx;
+				if (!wire->port_input || !split_element_name(wire->name.unescape(), b, idx))
+					continue;
+				auto key = std::make_pair(b, GetSize(idx));
+				ArrayFamily &fam = families[key];
+				if (fam.count++ == 0) {
+					fam.dims.resize(idx.size());
+					fam.width = GetSize(wire);
+				} else if (fam.width != GetSize(wire)) {
+					fam.width = -1;
+				}
+				for (int d = 0; d < GetSize(idx); d++) {
+					fam.dims[d].lo = std::min(fam.dims[d].lo, idx[d]);
+					fam.dims[d].hi = std::max(fam.dims[d].hi, idx[d]);
+				}
+				if (!first.count(key) || wire->port_id < first[key].second)
+					first[key] = {idx, wire->port_id};
+				if (!last.count(key) || wire->port_id > last[key].second)
+					last[key] = {idx, wire->port_id};
+			}
+			for (auto &it : families) {
+				ArrayFamily &fam = it.second;
+				int64_t elements = 1;
+				for (int d = 0; d < GetSize(fam.dims); d++) {
+					ArrayDim &dim = fam.dims[d];
+					elements *= dim.size();
+					dim.ascending = dim.size() > 1 && first[it.first].first[d] == dim.lo &&
+							last[it.first].first[d] == dim.hi;
+				}
+				fam.complete = fam.width > 0 && elements == fam.count && elements * fam.width <= INT_MAX;
+			}
+		}
+		auto &families = array_families.at(mod);
+		auto it = families.find({base, ndims});
+		return it == families.end() ? nullptr : &it->second;
+	}
+
+	// Array element `\coeffs[-1]` or `\grid[1][2]` from a dump that flattened its array (or,
+	// for N-D, one outer element of it) into a single object: one vector `coeffs [8:0]`, or one
+	// 1-bit var per bit `coeffs[0]`..`coeffs[8]`. Elements pack as SystemVerilog packs arrays:
+	// each dimension's right-hand declared bound is least significant, whatever its sign.
+	bool drive_flattened_element(SimInstance *t, Wire *wire, Module *mod, const std::string &path)
 	{
 		std::string name = wire->name.unescape();
-		if (name.empty() || name.back() != ']')
+		std::string base;
+		std::vector<int> idx;
+		if (!split_element_name(name, base, idx))
 			return false;
-		size_t open = name.rfind('[');
-		if (open == std::string::npos || open == 0)
-			return false;
-		std::string inner = name.substr(open + 1, name.size() - open - 2);
-		if (inner.empty() || inner.size() > 9 ||
-				inner.find_first_not_of("0123456789") != std::string::npos)
-			return false;
-		if (path.size() < name.size() || path.compare(path.size() - name.size(), name.size(), name) != 0)
-			return false;
-		int word = std::stoi(inner);
+		// scope.coeffs, then scope.grid[1], ...: the object a flattening dumper named
+		std::string object = path.substr(0, path.size() - name.size()) + base;
 		int width = GetSize(wire);
-		auto handles = fst->getMemoryHandles(path.substr(0, path.size() - name.size()) + name.substr(0, open));
-		dict<int, fstHandle> by_hdl;
-		for (int i = 0; i < width; i++) {
-			auto it = handles.find(word * width + i);
-			if (it == handles.end())
-				return false;
-			by_hdl[wire->start_offset + i] = it->second;
+		const ArrayFamily *fam = array_family(mod, base, GetSize(idx));
+
+		if (fam != nullptr && fam->complete) {
+			std::vector<std::string> objects = {object};
+			for (int d = 0; d + 1 < GetSize(idx); d++)
+				objects.push_back(objects.back() + stringf("[%d]", idx[d]));
+
+			// Widen from the innermost dimension outwards, trying each enclosing object in turn;
+			// the dumped object must hold exactly the elements the ports say the array has
+			int elements = 1, offset = 0;
+			for (int d = GetSize(idx) - 1; d >= 0; d--) {
+				const ArrayDim &dim = fam->dims[d];
+				offset += (dim.ascending ? dim.hi - idx[d] : idx[d] - dim.lo) * elements;
+				elements *= dim.size();
+				if (drive_flattened_bits(t, wire, objects[d], elements * width, offset * width))
+					return true;
+			}
 		}
-		return commit_bit_handles(t, wire, by_hdl);
+
+		// The ports do not span the dumped array (some elements are not ports of this module), so
+		// its bounds are unknown: only a 1-D word of a 0-based [hi:0] array can still be placed,
+		// as `\din[1]` at din[W]..din[2W).
+		if (GetSize(idx) != 1 || idx[0] < 0 || (int64_t)idx[0] * width + width > INT_MAX)
+			return false;
+		return drive_flattened_bits(t, wire, object, -1, idx[0] * width);
+	}
+
+	// Drive `wire` from bits [lsb, lsb + width) of dumped `object`, holding `total` bits
+	// (-1 if unknown), as a vector var or as 1-bit vars object[k] numbered from its low bit.
+	bool drive_flattened_bits(SimInstance *t, Wire *wire, const std::string &object, int total, int lsb)
+	{
+		int width = GetSize(wire);
+		fstHandle id = fst->getHandle(object);
+		if (id != 0) {
+			int dumped = fst->getWidth(id);
+			if ((total < 0 || dumped == total) && lsb + width <= dumped) {
+				t->fst_input_sigs.push_back({SigSpec(wire), id, lsb});
+				return true;
+			}
+		}
+		auto handles = fst->getMemoryHandles(object);
+		if (handles.empty())
+			return false;
+		int low = 0;
+		if (total >= 0) {
+			int high = INT_MIN;
+			low = INT_MAX;
+			for (auto &kv : handles) {
+				low = std::min(low, kv.first);
+				high = std::max(high, kv.first);
+			}
+			if (GetSize(handles) != total || (int64_t)high - low + 1 != total)
+				return false;  // some other object's words, or not every bit dumped
+		}
+		std::vector<fstHandle> bits;
+		for (int i = 0; i < width; i++) {
+			auto it = handles.find(low + lsb + i);
+			if (it == handles.end() || fst->getWidth(it->second) != 1)
+				return false;
+			bits.push_back(it->second);
+		}
+		for (int i = 0; i < width; i++)
+			t->fst_input_sigs.push_back({SigSpec(wire, i, 1), bits[i], 0});
+		return true;
 	}
 
 	void run_cosim_fst(Module *topmod, int numcycles, int log_interval)
@@ -1998,6 +2177,8 @@ struct SimWorker : SimShared
 
 			top->addAdditionalInputs();
 		}
+
+		write_missing_input_file();
 
 		// SILIMATE: one line for the tail of the missing-input list that was not named above
 		if (missing_inputs > MAX_MISSING_INPUT_WARNINGS)
@@ -3473,6 +3654,23 @@ struct SimPass : public Pass {
 		log("        undriven instead of aborting the replay. Missing inputs remain X, so\n");
 		log("        downstream activity and derived power estimates can be underestimated.\n");
 		log("\n");
+		log("    -missing-input-file <filename>\n");
+		log("        write every input port missing from the FST/VCD to the given JSON file,\n");
+		log("        not just the first few named in the log:\n");
+		log("            {\"count\": <ports>, \"bits\": <total width>, \"missing_inputs\":\n");
+		log("             [{\"module\": <module>, \"path\": <scope.port>, \"width\": <bits>}, ...]}\n");
+		log("        The file is written, with a count of 0 if nothing is missing, once every\n");
+		log("        root's inputs are bound. Without -missing-input-warn the replay still\n");
+		log("        aborts on the first missing input, but only after the file is written.\n");
+		log("\n");
+		log("    An array port that Verific splits into element wires (`\\coeffs[-1]`,\n");
+		log("    `\\grid[1][0]`) binds to a dump that names the element (`coeffs[-1] [11:0]`,\n");
+		log("    or `[0]` inside scope `grid[1]`), dumps its bits (`coeffs[-1][3]`), or\n");
+		log("    flattens the array into one vector or one 1-bit var per bit (`coeffs [k]`).\n");
+		log("    Flattened elements pack as SystemVerilog packs arrays: the right-hand\n");
+		log("    declared bound of each dimension is least significant, read from the order\n");
+		log("    of the element ports.\n");
+		log("\n");
 		log("    -width <integer>\n");
 		log("        cycle width in generated simulation output (must be divisible by 2).\n");
 		log("\n");
@@ -3739,6 +3937,12 @@ struct SimPass : public Pass {
 			}
 			if (args[argidx] == "-missing-input-warn") {
 				worker.missing_input_warning = true;
+				continue;
+			}
+			if (args[argidx] == "-missing-input-file" && argidx+1 < args.size()) {
+				std::string missing_input_file = args[++argidx];
+				rewrite_filename(missing_input_file);
+				worker.missing_input_file = missing_input_file;
 				continue;
 			}
 			if (args[argidx] == "-x") {
