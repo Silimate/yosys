@@ -8,7 +8,7 @@
 #     if (en2) res2 <= sum;
 #   end
 #
-    10|# proc and opt_dff turn that into a single $add whose Y feeds two $dffe on
+# proc and opt_dff turn that into a single $add whose Y feeds two $dffe on
 # different enable nets. It is written out as icells here so the cells have
 # names -flop and -cut can refer to.
 #
@@ -18,7 +18,7 @@
 # still reading sum for the unregistered one. Neither the enables nor the
 # operator is in the way: the same design with only res1 in it retimes and
 # proves equivalent below. Making the shared version legal means duplicating
-    20|# the $add for res2, which the pass does not do.
+# the $add for res2, which the pass does not do.
 #
 # Forward has the matching case and does handle it, by leaving a copy of the
 # register behind for the extra readers (opt_retime_merge_fanout.ys). There is
@@ -28,7 +28,7 @@
 # ---------------------------------------------------------------------------
 log -header "Backward: one capture flop, so the \$add is not shared"
 log -push
-    30|design -reset
+design -reset
 read_verilog -icells <<EOF
 module board1(input clk, en1, in1, in2, output res1);
   wire sum;
@@ -38,7 +38,7 @@ module board1(input clk, en1, in1, in2, output res1);
     f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
 endmodule
 EOF
-    40|hierarchy -top board1
+hierarchy -top board1
 check -assert
 select -assert-count 1 t:$dffe
 design -save orig
@@ -48,7 +48,7 @@ check -assert
 # updates on the same cycles and the $add never sees a mixed pair of operands.
 select -assert-count 2 t:$dffe
 select -assert-count 1 c:f1 %x:+[D] w:in1 %i
-    50|select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
 select -assert-count 1 c:f1 %x:+[EN] w:en1 %i
 select -assert-count 1 c:f1_B %x:+[EN] w:en1 %i
 select -assert-count 1 c:a0 %x:+[Y] w:res1 %i
@@ -58,7 +58,7 @@ miter -equiv -flatten -make_assert gold gate miter
 hierarchy -top miter
 proc; opt
 # en1 is free stimulus, so the proof covers holding as well as updating
-    60|sat -seq 8 -set-init-zero -prove-asserts -verify
+sat -seq 8 -set-init-zero -prove-asserts -verify
 design -reset
 log -pop
 
@@ -68,7 +68,7 @@ log -header "Refused: the \$add is shared with the other capture flop"
 design -reset
 read_verilog -icells <<EOF
 module board(input clk, en1, en2, in1, in2, output res1, res2);
-    70|  wire sum;
+  wire sum;
   $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
     a0 (.A(in1), .B(in2), .Y(sum));
   $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
@@ -78,7 +78,7 @@ module board(input clk, en1, en2, in1, in2, output res1, res2);
 endmodule
 EOF
 hierarchy -top board
-    80|check -assert
+check -assert
 # sum feeds both capture flops
 select -assert-count 2 w:sum %co c:* %i
 logger -expect error "Y of cell a0 is not uniquely read by f1 port D" 1
