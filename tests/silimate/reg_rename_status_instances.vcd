@@ -1,0 +1,22 @@
+$timescale 1ns $end
+$scope module tb $end
+$scope module dut $end
+$var wire 1 ! clk $end
+$scope module u0 $end
+$var wire 1 ! clk $end
+$var reg 2 " r [1:0] $end
+$upscope $end
+$scope module u1 $end
+$var wire 1 ! clk $end
+$upscope $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+0!
+b00 "
+#5
+1!
+b01 "
+#10
+0!

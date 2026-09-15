@@ -1,0 +1,121 @@
+$timescale 1ns $end
+$scope module tb $end
+$scope module top_i0 $end
+$var wire 1 ! clk $end
+$var wire 1 " rst_n $end
+$var wire 8 # din [7:0] $end
+$var wire 16 $ dout [15:0] $end
+$var wire 4 % sq [3:0] $end
+$scope begin gen_dp[0] $end
+$scope module u_cal $end
+$var wire 1 ! clk $end
+$var wire 1 " rst_n $end
+$var wire 8 & din [7:0] $end
+$var wire 8 ' dout [7:0] $end
+$scope begin hw_gen $end
+$var reg 8 ( thr_p1 [7:0] $end
+$var reg 4 ) cnt [3:0] $end
+$upscope $end
+$upscope $end
+$upscope $end
+$scope begin gen_dp[1] $end
+$scope module u_cal $end
+$var wire 1 ! clk $end
+$var wire 1 " rst_n $end
+$var wire 8 * din [7:0] $end
+$var wire 8 + dout [7:0] $end
+$scope begin hw_gen $end
+$var reg 8 , thr_p1 [7:0] $end
+$var reg 4 - cnt [3:0] $end
+$upscope $end
+$upscope $end
+$upscope $end
+$scope module u_pipe $end
+$var wire 1 ! clk $end
+$var wire 1 " rst_n $end
+$var wire 4 . din [3:0] $end
+$var wire 4 % dout [3:0] $end
+$scope begin data_pipes_reg $end
+$var reg 4 / [0] [3:0] $end
+$var reg 4 0 [1] [3:0] $end
+$var reg 4 1 [2] [3:0] $end
+$var reg 4 2 [3] [3:0] $end
+$upscope $end
+$upscope $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+0!
+0"
+b00000000 #
+b00000000 &
+b00000000 (
+b0000 )
+b00000000 '
+b00000001 *
+b00000000 ,
+b0000 -
+b00000000 +
+b0000000000000000 $
+b0000 .
+b0000 %
+b0000 /
+b0000 0
+b0000 1
+b0000 2
+#5
+1!
+#10
+0!
+1"
+b01010010 #
+b01010010 &
+b01010011 *
+b0010 .
+b0010 /
+#15
+1!
+b01010010 (
+b0001 )
+b01000011 '
+b01010011 ,
+b0001 -
+b01000010 +
+b0100001001000011 $
+b0010 0
+#20
+0!
+b11110010 #
+b11110010 &
+b11110011 *
+#25
+1!
+b11110010 (
+b0010 )
+b11010000 '
+b11110011 ,
+b0010 -
+b11010001 +
+b1101000111010000 $
+b0010 1
+#30
+0!
+b00100110 #
+b00100110 &
+b00100111 *
+b0110 .
+b0110 /
+#35
+1!
+b00100110 (
+b0011 )
+b00010101 '
+b00100111 ,
+b0011 -
+b00010100 +
+b0001010000010101 $
+b0010 %
+b0110 0
+b0010 2
+#40

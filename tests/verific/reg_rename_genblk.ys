@@ -1,0 +1,52 @@
+# reg_rename against Xcelium-shaped dumps of reg_rename_genblk.sv, elaborated the way Preqorsor
+# does for such dumps (block separator ".", for-generate blocks named "%s[%s]").
+#
+#   gen_dp[g].u_cal  registers in the named generate-if block hw_gen; the dump opens
+#                    `$scope begin hw_gen` inside the instance. The Q nets already carry
+#                    the dumped names, which count as bound.
+#   u_pipe           `logic [3:0] data_pipes_reg [0:3]`, element 0 the input, 1..3 flops,
+#                    dumped per element (_elem), as a scope over its elements (_scope), or
+#                    with element 0 only (_elem0).
+
+verific -cfg db_block_name_separator "."
+verific -cfg db_for_generate_block_naming_style "%s[%s]"
+verific -cfg db_synopsys_register_names 1
+verific -sv reg_rename_genblk.sv
+verific -import top
+hierarchy -top top
+design -save imported
+
+log -header "Per-element dump: every flop binds, generate-block registers included"
+log -push
+logger -expect log "Bound 16 flop\(s\); unstamped 0, object absent 0, bit unplaced 0" 1
+logger -expect log "Bound 36 of 36 Q bit\(s\); unstamped 0, absent 0, unplaced 0, conflict 0, unwired 0" 1
+reg_rename -waveform reg_rename_genblk_elem.vcd -scope tb.top_i0
+logger -check-expected
+select -assert-count 1 cal/hw_gen.thr_p1_reg a:rtl_bind_status=bound*8 %i
+select -assert-count 1 cal/hw_gen.cnt_reg a:rtl_bind_status=bound*4 %i
+select -assert-count 12 shift_pipe/t:$aldff shift_pipe/a:rtl_bind_status=bound %i
+log -pop
+
+log -header "An array dumped as a scope over its elements binds each element by index"
+log -push
+design -load imported
+logger -expect log "Bound 16 flop\(s\); unstamped 0, object absent 0, bit unplaced 0" 1
+reg_rename -waveform reg_rename_genblk_scope.vcd -scope tb.top_i0
+logger -check-expected
+select -assert-count 12 shift_pipe/t:$aldff shift_pipe/a:rtl_bind_status=bound %i
+select -assert-count 1 shift_pipe/w:data_pipes_reg?2? shift_pipe/a:sim_src=tb.top_i0.u_pipe.data_pipes_reg.?2? %i
+log -pop
+
+log -header "Elements missing from the dump are absent, with one warning naming what it does hold"
+log -push
+design -load imported
+logger -expect warning "Cannot place 8 bit\(s\) of 2 objects data_pipes_reg\[1\], data_pipes_reg\[2\] of 4 bits each, 8 cell\(s\), e\.g\. .*, in scope tb\.top_i0\.u_pipe: not in the waveform; the waveform has data_pipes_reg only as 1 signal\(s\) spanning 4 bit\(s\): data_pipes_reg\[0\] \[3:0\]" 1
+logger -expect log "Bound 8 flop\(s\); unstamped 0, object absent 8, bit unplaced 0" 1
+logger -expect log "Bound 28 of 36 Q bit\(s\); unstamped 0, absent 8, unplaced 0, conflict 0, unwired 0" 1
+reg_rename -waveform reg_rename_genblk_elem0.vcd -scope tb.top_i0
+logger -check-expected
+select -assert-count 8 shift_pipe/t:$aldff shift_pipe/a:rtl_bind_status=absent %i
+# Element 3 drives output port dout, which the dump holds, so its flops bind through that net
+select -assert-count 4 shift_pipe/c:data_pipes_reg_reg?3?* shift_pipe/a:rtl_bind_status=bound %i
+select -assert-count 2 cal/t:$aldff cal/a:rtl_bind_status=bound* %i
+log -pop

@@ -58,7 +58,8 @@ struct Unbound {
 	int bits = 0;
 	std::vector<std::string> objects; // distinct objects in the group, first seen first
 	pool<std::string> object_set;
-	int width = 0; // of the first object
+	int width = 0; // of the objects, when they agree
+	bool mixed_width = false;
 	std::vector<std::string> cells; // distinct cells, first seen first
 	pool<Cell *> cell_set;
 	std::string detail; // first conflicting target, or the first width mismatch
@@ -98,9 +99,33 @@ static std::string leaf_label(const DumpLeaf &leaf)
 	return stringf("%s [%d:%d]", leaf.name.c_str(), leaf.offset + leaf.width - 1, leaf.offset);
 }
 
-// Up to `cap` entries of `items`, comma separated, with how many were left out
-static std::string capped_list(const std::vector<std::string> &items, int cap)
+// Name order with embedded numbers compared by value, so x[2] comes before x[10]
+static bool natural_less(const std::string &a, const std::string &b)
 {
+	size_t i = 0, j = 0;
+	while (i < a.size() && j < b.size()) {
+		if (isdigit((unsigned char)a[i]) && isdigit((unsigned char)b[j])) {
+			size_t ie = std::min(a.find_first_not_of("0123456789", i), a.size());
+			size_t je = std::min(b.find_first_not_of("0123456789", j), b.size());
+			std::string na = a.substr(i, ie - i), nb = b.substr(j, je - j);
+			na.erase(0, std::min(na.find_first_not_of('0'), na.size() - 1));
+			nb.erase(0, std::min(nb.find_first_not_of('0'), nb.size() - 1));
+			if (na.size() != nb.size() || na != nb)
+				return na.size() != nb.size() ? na.size() < nb.size() : na < nb;
+			i = ie, j = je;
+			continue;
+		}
+		if (a[i] != b[j])
+			return a[i] < b[j];
+		i++, j++;
+	}
+	return a.size() - i < b.size() - j;
+}
+
+// Up to `cap` entries of `items` in name order, comma separated, with how many were left out
+static std::string capped_list(std::vector<std::string> items, int cap)
+{
+	std::sort(items.begin(), items.end(), natural_less);
 	std::string out;
 	for (int i = 0; i < GetSize(items) && i < cap; i++)
 		out += (i ? ", " : "") + items[i];
@@ -399,6 +424,7 @@ struct RegRenameInstance {
 		}
 		Unbound &u = stats.summaries[it->second];
 		u.bits += count;
+		u.mixed_width |= obj_width != u.width;
 		if (!obj.empty() && u.object_set.insert(obj).second)
 			u.objects.push_back(obj);
 		if (u.cell_set.insert(cell).second && GetSize(u.cells) < 8)
@@ -525,6 +551,20 @@ struct RegRenameInstance {
 					leaf = {obj, "", GetSize(pin), pin->start_offset, ""};
 					leaf_bit = obj_bit;
 					placed = true;
+				}
+
+				// The stamp may name an object the dump does not hold as such: a layout rebuilt
+				// from wire names takes the generate block of `hw_gen.cnt` for a struct. Q still
+				// drives that net, so bind through the net's own name when the dump has it.
+				if (!placed && old_wire->name.isPublic()) {
+					auto net_it = objects.find(vcd_scope + "." + RTLIL::unescape_id(old_wire->name));
+					placed = net_it != objects.end() &&
+							resolve(net_it->second, GetSize(old_wire), qbits.offset + start, leaf, leaf_bit);
+					dump_path = placed ? leaf.src : "";
+					if (placed && debug)
+						log("Placing %s[%d] of cell %s by its Q net as %s, not by its RTL bind %s[%d]\n",
+								log_id(old_wire), qbits.offset + start, log_id(cell->name),
+								leaf.name.c_str(), obj.c_str(), obj_bit);
 				}
 
 				if (!placed) {
@@ -790,11 +830,13 @@ static void report_unbound(const BindStats &stats, const dict<std::string, std::
 	const int max_warnings = 100;
 	int shown = 0, hidden = 0, hidden_bits = 0;
 	for (auto &u : stats.summaries) {
-		std::string cells = stringf("%d cell(s), e.g. %s", GetSize(u.cell_set),
-				capped_list(std::vector<std::string>(u.cells.begin(), u.cells.begin() + std::min(3, GetSize(u.cells))), 3).c_str());
+		std::vector<std::string> examples = u.cells;
+		std::sort(examples.begin(), examples.end(), natural_less);
+		examples.resize(std::min(3, GetSize(examples)));
+		std::string cells = stringf("%d cell(s), e.g. %s", GetSize(u.cell_set), capped_list(examples, 3).c_str());
 		if (u.kind == KIND_UNWIRED) { // never bindable, and not a waveform problem
-			log("%d Q bit(s) of %s in scope %s drive no wire reg_rename can rename\n", u.bits,
-					cells.c_str(), u.scope.c_str());
+			log("In scope %s, %d Q bit(s) of %s, drive no wire reg_rename can rename\n", u.scope.c_str(),
+					u.bits, cells.c_str());
 			continue;
 		}
 		if (!debug && shown >= max_warnings) {
@@ -804,25 +846,29 @@ static void report_unbound(const BindStats &stats, const dict<std::string, std::
 		}
 		shown++;
 
-		// `8-bit object x` or `3 objects x[1], x[2], x[3] (4 bits each)` for elements of one array
+		std::vector<std::string> objs = u.objects;
+		std::sort(objs.begin(), objs.end(), natural_less);
+		std::string first = objs.empty() ? "" : objs[0];
+
+		// `8-bit object x`, or `3 objects x[1], x[2], x[3] of 4 bits each` for elements of one array
 		std::string what = GetSize(u.objects) == 1
-			? stringf("%d-bit object %s", u.width, u.objects[0].c_str())
-			: stringf("%d objects %s (the first %d bits wide)", GetSize(u.objects),
-					capped_list(u.objects, 4).c_str(), u.width);
+			? stringf("%d-bit object %s", u.width, first.c_str())
+			: stringf("%d objects %s%s", GetSize(u.objects), capped_list(u.objects, 4).c_str(),
+					u.mixed_width ? "" : stringf(" of %d bits each", u.width).c_str());
 		switch (u.kind) {
 		case KIND_UNSTAMPED:
-			log_warning("%s in scope %s have no usable RTL bind stamp for %d Q bit(s)%s%s\n", cells.c_str(),
-					u.scope.c_str(), u.bits, u.detail.empty() ? "" : "; ", u.detail.c_str());
+			log_warning("In scope %s, %d Q bit(s) of %s, have no usable RTL bind stamp%s%s\n", u.scope.c_str(),
+					u.bits, cells.c_str(), u.detail.empty() ? "" : "; ", u.detail.c_str());
 			break;
 		case KIND_ABSENT:
 			log_warning("Cannot place %d bit(s) of %s, %s, in scope %s: not in the waveform; %s\n", u.bits,
 					what.c_str(), cells.c_str(), u.scope.c_str(),
-					dumped_context(objects, u.scope, u.objects[0]).c_str());
+					dumped_context(objects, u.scope, first).c_str());
 			break;
 		case KIND_UNPLACED: {
-			auto it = objects.find(u.scope + "." + u.objects[0]);
+			auto it = objects.find(u.scope + "." + first);
 			log_warning("Cannot place %d bit(s) of %s, %s, in scope %s: the waveform has %s as %s\n", u.bits,
-					what.c_str(), cells.c_str(), u.scope.c_str(), u.objects[0].c_str(),
+					what.c_str(), cells.c_str(), u.scope.c_str(), first.c_str(),
 					it == objects.end() ? "nothing" : describe_dump(it->second).c_str());
 			break;
 		}

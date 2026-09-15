@@ -1,0 +1,197 @@
+# reg_rename stamps what it made of every Q bit as `rtl_bind_status` and reports each object
+# it could not bind once, rather than once per bit. reg_rename_status.vcd dumps scope tb.dut.
+#
+#   cell        rtl_bind         Q wire        dump                         expected
+#   renamed     cnt/4            q_ren         cnt [3:0]                    bound*4 (renamed to cnt)
+#   named       acc/4            acc           acc [3:0]                    bound*4 (already named)
+#   gone_ff     gone/2           gone          -                            absent*2
+#   m1_ff/m2_ff mem[1]/2 mem[2]  m1_q/m2_q     mem[0] [1:0] only            absent*2 each, one warning
+#   wide_ff     wide/8[0:2]      wide_q        wide [5:0]                   unplaced*3
+#   ns_ff       (none)           ns            -                            unstamped
+#   pp_ff       - pp/2[1]        pp            pp [1:0]                     unstamped bound
+#   dupa/dupb   dup/1 twice      qa/qb         dup                          one bound, one conflict
+#   uw_ff       uw/2             {u1, u0}      -                            unwired*2
+#   st_ff       st/8             st_q          st.a [3:0], st.b [3:0]       bound*8, split over both
+#   arr_ff      arr[1]/4         arr_q         $scope arr: [0], [1] [3:0]   bound*4, as arr[1]
+#   hw_cnt/thr  hw_gen/12 (a layout that took the generate block for a struct)
+#                                hw_gen.cnt/thr $scope hw_gen: cnt, thr, dbg bound*4 / bound*8 via the Q net
+
+read_rtlil <<EOT
+module \top
+  wire input 1 \clk
+  wire width 4 input 2 \d4
+  wire width 8 input 3 \d8
+  wire width 4 \q_ren
+  wire width 4 \acc
+  wire width 2 \gone
+  wire width 2 \m1_q
+  wire width 2 \m2_q
+  wire width 3 \wide_q
+  wire \ns
+  wire width 2 \pp
+  wire \qa
+  wire \qb
+  wire \u0
+  wire \u1
+  wire width 8 \st_q
+  wire width 4 \arr_q
+  wire width 4 \hw_gen.cnt
+  wire width 8 \hw_gen.thr
+  wire width 8 output 4 \y
+  attribute \rtl_bind "cnt/4[0:3]"
+  cell $dff \renamed
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d4
+    connect \Q \q_ren
+  end
+  attribute \rtl_bind "acc/4[0:3]"
+  cell $dff \named
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d4
+    connect \Q \acc
+  end
+  attribute \rtl_bind "gone/2[0:1]"
+  cell $dff \gone_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 2
+    connect \CLK \clk
+    connect \D \d4 [1:0]
+    connect \Q \gone
+  end
+  attribute \rtl_bind "mem[1]/2[0:1]"
+  cell $dff \m1_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 2
+    connect \CLK \clk
+    connect \D \d4 [1:0]
+    connect \Q \m1_q
+  end
+  attribute \rtl_bind "mem[2]/2[0:1]"
+  cell $dff \m2_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 2
+    connect \CLK \clk
+    connect \D \m1_q
+    connect \Q \m2_q
+  end
+  attribute \rtl_bind "wide/8[0:2]"
+  cell $dff \wide_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 3
+    connect \CLK \clk
+    connect \D \d4 [2:0]
+    connect \Q \wide_q
+  end
+  cell $dff \ns_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \d4 [0]
+    connect \Q \ns
+  end
+  attribute \rtl_bind "- pp/2[1]"
+  cell $dff \pp_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 2
+    connect \CLK \clk
+    connect \D \d4 [1:0]
+    connect \Q \pp
+  end
+  attribute \rtl_bind "dup/1[0]"
+  cell $dff \dupa
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \d4 [0]
+    connect \Q \qa
+  end
+  attribute \rtl_bind "dup/1[0]"
+  cell $dff \dupb
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \d4 [0]
+    connect \Q \qb
+  end
+  attribute \rtl_bind "uw/2[0:1]"
+  cell $dff \uw_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 2
+    connect \CLK \clk
+    connect \D \d4 [1:0]
+    connect \Q { \u1 \u0 }
+  end
+  attribute \rtl_bind "st/8[0:7]"
+  cell $dff \st_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 8
+    connect \CLK \clk
+    connect \D \d8
+    connect \Q \st_q
+  end
+  attribute \rtl_bind "arr[1]/4[0:3]"
+  cell $dff \arr_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d4
+    connect \Q \arr_q
+  end
+  attribute \rtl_bind "hw_gen/12[8:11]"
+  cell $dff \hw_cnt
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d4
+    connect \Q \hw_gen.cnt
+  end
+  attribute \rtl_bind "hw_gen/12[0:7]"
+  cell $dff \hw_thr
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 8
+    connect \CLK \clk
+    connect \D \d8
+    connect \Q \hw_gen.thr
+  end
+  connect \y { \st_q [7:4] \arr_q }
+end
+EOT
+hierarchy -top top
+
+logger -expect warning "Cannot place 2 bit\(s\) of 2-bit object gone, 1 cell\(s\), e\.g\. gone_ff, in scope tb\.dut: not in the waveform; nothing named gone is dumped in that scope" 1
+logger -expect warning "Cannot place 4 bit\(s\) of 2 objects mem\[1\], mem\[2\] of 2 bits each, 2 cell\(s\), e\.g\. m1_ff, m2_ff, in scope tb\.dut: not in the waveform; the waveform has mem only as 1 signal\(s\) spanning 2 bit\(s\): mem\[0\] \[1:0\]" 1
+logger -expect warning "Cannot place 3 bit\(s\) of 8-bit object wide, 1 cell\(s\), e\.g\. wide_ff, in scope tb\.dut: the waveform has wide as 1 signal\(s\) spanning 6 bit\(s\): wide \[5:0\]" 1
+logger -expect warning "In scope tb\.dut, 2 Q bit\(s\) of 2 cell\(s\), e\.g\. ns_ff, pp_ff, have no usable RTL bind stamp" 1
+logger -expect warning "Cannot place 1 bit\(s\) of 1-bit object dup, 1 cell\(s\), e\.g\. dup[ab], in scope tb\.dut: dumped bit dup\[0\] is already driven by another cell" 1
+logger -expect log "Bound 8 flop\(s\); unstamped 2, object absent 3, bit unplaced 1" 1
+logger -expect log "Bound 34 of 48 Q bit\(s\); unstamped 2, absent 6, unplaced 3, conflict 1, unwired 2" 1
+logger -expect log "In scope tb\.dut, 2 Q bit\(s\) of 1 cell\(s\), e\.g\. uw_ff, drive no wire reg_rename can rename" 1
+reg_rename -waveform reg_rename_status.vcd -scope tb.dut
+logger -check-expected
+
+# No per-bit warning survives without -d
+logger -expect-no-warnings
+
+select -assert-count 1 c:renamed a:rtl_bind_status=bound*4 %i
+select -assert-count 1 w:cnt
+select -assert-count 0 w:q_ren
+select -assert-count 1 c:named a:rtl_bind_status=bound*4 %i
+select -assert-count 1 c:gone_ff a:rtl_bind_status=absent*2 %i
+select -assert-count 2 c:m1_ff c:m2_ff %u a:rtl_bind_status=absent*2 %i
+select -assert-count 1 c:wide_ff a:rtl_bind_status=unplaced*3 %i
+select -assert-count 1 c:ns_ff a:rtl_bind_status=unstamped %i
+select -assert-count 1 c:pp_ff a:rtl_bind_status=unstamped\ bound %i
+select -assert-count 1 c:dupa c:dupb %u a:rtl_bind_status=bound %i
+select -assert-count 1 c:dupa c:dupb %u a:rtl_bind_status=conflict %i
+select -assert-count 1 c:uw_ff a:rtl_bind_status=unwired*2 %i
+select -assert-count 1 c:st_ff a:rtl_bind_status=bound*8 %i
+select -assert-count 2 w:st.a w:st.b %u
+select -assert-count 1 c:arr_ff a:rtl_bind_status=bound*4 %i
+select -assert-count 1 w:arr?1? a:sim_src=tb.dut.arr.?1? %i
+select -assert-count 1 c:hw_cnt a:rtl_bind_status=bound*4 %i
+select -assert-count 1 c:hw_thr a:rtl_bind_status=bound*8 %i
+select -assert-count 15 t:$dff a:rtl_bind_status %i
