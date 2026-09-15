@@ -18,6 +18,7 @@
  */
 
 #include "kernel/yosys.h"
+#include "kernel/consteval.h"
 #include "kernel/sigtools.h"
 #include "kernel/utils.h"
 
@@ -1140,6 +1141,9 @@ struct OptVpsWorker
 					       idx.konst + bitpos});
 		}
 
+		if (read_support > 0 && !groups.empty())
+			gather_ce.reset(new ConstEval(module));
+
 		for (auto &it : groups) {
 			const GatherKey &key = it.first;
 			std::vector<GatherCand> &cands = it.second;
@@ -1175,6 +1179,20 @@ struct OptVpsWorker
 					span = M - 1;
 					amt_bits = key.width;
 				}
+				if (read_support > 0) {
+					// Sized as emit_modular_gather() would build the barrel.
+					int64_t out_w = std::min(emax, M - 1) + 1;
+					int64_t src_w = std::min<int64_t>(2 * M, out_w + span);
+					int64_t lomod = ((lo % M) + M) % M;
+					int64_t narrow = 0, barrel = 0;
+					if (narrow_reads_cheaper(cands, M, lomod, amt_bits, src_w, narrow, barrel)) {
+						log("  VPS gather: %d modular select(s) (M=%d, elem=%d) left as narrow "
+						    "reads: %lld mux(es) against %lld for the barrel\n",
+						    GetSize(cands), (int)M, GetSize(key.table) / (int)M,
+						    (long long)narrow, (long long)barrel);
+						continue;
+					}
+				}
 				emit_modular_gather(key, cands, dmin, emax, lo, span, amt_bits);
 			} else {
 				// The wrap guard was checked per cell; only refuse groups whose
@@ -1185,6 +1203,8 @@ struct OptVpsWorker
 			}
 		}
 
+		// Tabulated against cells about to be retired.
+		gather_ce.reset();
 		for (auto cell : gather_dead)
 			remove_cell(cell);
 		gather_dead.clear();
@@ -1300,6 +1320,207 @@ struct OptVpsWorker
 		    GetSize(cands), (int)src_w, (int)out_w, amt_bits);
 		gathers_folded++;
 		groups_optimized++;
+	}
+
+	// ------------------------------------------------------------------
+	// SMALL-SUPPORT READS -- a read whose select depends on only a few bits.
+	//
+	// A $bmux select computed from k flop or port bits reaches at most 2^k of the
+	// table's 2^S_WIDTH entries however it is computed -- including arithmetic
+	// affine_of() cannot see through: a modulo or divide by a mode-dependent
+	// divisor, a product of two signals, `(x % D) + bank*D` with D below the
+	// table depth. Tabulate the select over every leaf assignment and rebuild the
+	// read as a 2^k-entry $bmux keyed on the leaves themselves. A 2^n:1 read
+	// costs 2^n-1 muxes per element bit and k < n, so this never grows a read;
+	// the index arithmetic loses its reader and is left to opt_clean.
+	//
+	// Runs after the uniform gathers. A gather group whose reads all rebuild this
+	// way is folded only when its barrel is the cheaper of the two (see
+	// narrow_reads_cheaper()); otherwise its reads are left here.
+
+	int read_support = 0;
+	int small_support_reads = 0;
+	int64_t small_support_entries_before = 0;
+	int64_t small_support_entries_after = 0;
+
+	static const int SMALL_SUPPORT_MAX_CONE = 4096;
+	int64_t small_support_eval_budget = 50000000;
+
+	// Built before the gather phase emits anything and dropped before it retires
+	// the cells it folded, so every group's cost is weighed against the module as
+	// it was when the groups were formed -- the same state bit_drivers describes.
+	std::unique_ptr<ConstEval> gather_ce;
+
+	// Leaf bits of `sig`'s combinational cone in first-seen order: module
+	// inputs, undriven bits, storage outputs and cells that are not internal.
+	// False once the cone has more than max_leaves leaves or too many cells.
+	bool cone_leaves(const SigSpec &sig, int max_leaves, SigSpec &leaves, int &cone_cells)
+	{
+		pool<SigBit> seen;
+		pool<Cell *> cells;
+		std::vector<SigBit> stack;
+		for (auto bit : sigmap(sig))
+			if (bit.wire)
+				stack.push_back(bit);
+		leaves = SigSpec();
+		while (!stack.empty()) {
+			SigBit bit = stack.back();
+			stack.pop_back();
+			if (!seen.insert(bit).second)
+				continue;
+			Cell *drv = bit_drivers.at(bit, nullptr);
+			if (!drv || is_sequential(drv) || !drv->type.begins_with("$")) {
+				leaves.append(bit);
+				if (GetSize(leaves) > max_leaves)
+					return false;
+				continue;
+			}
+			if (!cells.insert(drv).second)
+				continue;
+			if (GetSize(cells) > SMALL_SUPPORT_MAX_CONE)
+				return false;
+			for (auto &conn : drv->connections())
+				if (drv->input(conn.first))
+					for (auto b : sigmap(conn.second))
+						if (b.wire)
+							stack.push_back(b);
+		}
+		cone_cells = GetSize(cells);
+		return true;
+	}
+
+	// The select's leaves and its value under every assignment to them. False
+	// when it depends on more than max_leaves bits, runs through something
+	// ConstEval cannot model, or would exhaust the evaluation budget.
+	bool tabulate_select(ConstEval &ce, const SigSpec &sel, int max_leaves,
+			     SigSpec &leaves, std::vector<int64_t> &entry)
+	{
+		int cone_cells = 0;
+		if (!cone_leaves(sel, max_leaves, leaves, cone_cells) || leaves.empty())
+			return false;
+		int k = GetSize(leaves);
+		int64_t cost = (int64_t(1) << k) * std::max(cone_cells, 1);
+		if (cost > small_support_eval_budget)
+			return false;
+		small_support_eval_budget -= cost;
+
+		entry.clear();
+		for (int64_t v = 0; v < (int64_t(1) << k); v++) {
+			ce.push();
+			ce.set(leaves, Const(v, k));
+			SigSpec s = sel, undef;
+			bool ok = ce.eval(s, undef) && s.is_fully_def();
+			if (ok)
+				entry.push_back(s.as_const().as_int());
+			ce.pop();
+			if (!ok)
+				return false;
+		}
+		return true;
+	}
+
+	// A live $bmux read whose select has fewer leaves than bits, tabulated.
+	bool narrow_read(ConstEval &ce, Cell *cell, SigSpec &leaves, std::vector<int64_t> &entry)
+	{
+		if (cell->type != ID($bmux) || removed_cells.count(cell))
+			return false;
+		int sw = cell->getParam(ID::S_WIDTH).as_int();
+		if (sw < 2 || sw > 24 || cell->getParam(ID::WIDTH).as_int() < 1)
+			return false;
+		SigSpec sel = sigmap(cell->getPort(ID::S));
+		if (sel.is_fully_const())
+			return false;
+		return tabulate_select(ce, sel, std::min(read_support, sw - 1), leaves, entry);
+	}
+
+	// Whether a modular gather group is cheaper as narrow reads than as the
+	// barrel emit_modular_gather() would build, both counted in 2:1 muxes per
+	// element bit. A narrow read costs one fewer than its distinct entries. The
+	// barrel costs a src_w-wide level per amount bit that actually varies: one
+	// that does not is a wire once its constant propagates, so `ptr * 32 + i`,
+	// a 7-bit amount taking four values, keeps two levels, not seven. Its last
+	// levels are narrower than src_w once ABC drops unread outputs, so this is
+	// the barrel's upper bound, which only ever tips a close call toward the
+	// narrow reads. Keeps the barrel unless every read in the group rebuilds.
+	bool narrow_reads_cheaper(const std::vector<GatherCand> &cands, int64_t M, int64_t lomod,
+				  int amt_bits, int64_t src_w, int64_t &narrow, int64_t &barrel)
+	{
+		narrow = 0;
+		int64_t varying = 0;
+		int64_t mask = (int64_t(1) << amt_bits) - 1;
+		for (int i = 0; i < GetSize(cands); i++) {
+			SigSpec leaves;
+			std::vector<int64_t> entry;
+			if (!narrow_read(*gather_ce, cands[i].cell, leaves, entry))
+				return false;
+			narrow += GetSize(pool<int64_t>(entry.begin(), entry.end())) - 1;
+			// The barrel's amount is the lowest-constant member's index less
+			// lomod; cands arrive sorted, so that member is the first.
+			if (i == 0) {
+				auto amount = [&](int64_t e) { return (((e - lomod) % M) + M) % M & mask; };
+				for (auto e : entry)
+					varying |= amount(e) ^ amount(entry.front());
+			}
+		}
+		int live_levels = 0;
+		for (int b = 0; b < amt_bits; b++)
+			live_levels += (varying >> b) & 1;
+		barrel = int64_t(live_levels) * src_w;
+		return narrow < barrel;
+	}
+
+	void process_small_support_reads()
+	{
+		struct Rewrite {
+			Cell *cell;
+			SigSpec leaves;
+			std::vector<int64_t> entry;
+		};
+		std::vector<Rewrite> rewrites;
+		ConstEval ce(module);
+
+		// Tabulate every select against the unmodified module first. A rewrite
+		// only swaps one $bmux for an equivalent one, so a select whose cone runs
+		// through a rewritten read would tabulate identically either way.
+		for (auto cell : module->selected_cells()) {
+			SigSpec leaves;
+			std::vector<int64_t> entry;
+			if (narrow_read(ce, cell, leaves, entry))
+				rewrites.push_back({cell, leaves, entry});
+		}
+
+		for (auto &rw : rewrites) {
+			Cell *cell = rw.cell;
+			int sw = cell->getParam(ID::S_WIDTH).as_int();
+			int w = cell->getParam(ID::WIDTH).as_int();
+			SigSpec a = cell->getPort(ID::A);
+			SigSpec y = cell->getPort(ID::Y);
+			std::string src = cell_src(cell);
+			pool<int64_t> distinct(rw.entry.begin(), rw.entry.end());
+
+			remove_cell(cell);
+			if (GetSize(distinct) == 1) {
+				module->connect(y, a.extract(rw.entry.front() * w, w));
+			} else {
+				SigSpec table;
+				for (auto e : rw.entry)
+					table.append(a.extract(e * w, w));
+				module->addBmux(NEW_ID_SUFFIX("vps_small_support"), table, rw.leaves, y, src);
+			}
+			log_debug("  VPS small-support read: S_WIDTH=%d -> %d leaf bit(s) %s, %d distinct entr%s\n",
+				  sw, GetSize(rw.leaves), log_signal(rw.leaves), GetSize(distinct),
+				  GetSize(distinct) == 1 ? "y" : "ies");
+			small_support_reads++;
+			small_support_entries_before += int64_t(1) << sw;
+			small_support_entries_after += GetSize(distinct);
+		}
+
+		if (small_support_reads) {
+			log("  VPS small-support reads: %d $bmux, %lld reachable of %lld table entries\n",
+			    small_support_reads, (long long)small_support_entries_after,
+			    (long long)small_support_entries_before);
+			groups_optimized++;
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -1674,13 +1895,23 @@ struct OptVpsWorker
 		return true;
 	}
 
-	void run(int min_gather, int max_gather_table, int min_scatter)
+	void run(int min_gather, int max_gather_table, int min_scatter, int max_read_support = 0)
 	{
+		read_support = max_read_support;
+
 		// Runs first: it works on the raw Verific per-bit gathers, and the
 		// decoder phases below never look at $bmux.
 		if (min_gather > 0) {
 			process_uniform_gathers(min_gather, max_gather_table);
 			if (gathers_folded)
+				rebuild_maps();
+		}
+
+		// Whatever the gather fold left as a per-element $bmux, including the
+		// groups it judged cheaper this way.
+		if (read_support > 0) {
+			process_small_support_reads();
+			if (small_support_reads)
 				rebuild_maps();
 		}
 
@@ -2941,6 +3172,18 @@ struct OptVpsPass : public Pass {
 		log("        divisor the index can really reach is a rotate, not a\n");
 		log("        window read, and is left alone.\n");
 		log("\n");
+		log("    -read-support <n>\n");
+		log("        Rebuild a $bmux read whose select is a function of at most n\n");
+		log("        flop, port or undriven bits -- fewer than its select width --\n");
+		log("        as a read keyed on those bits, over only the entries the\n");
+		log("        select can reach. That covers selects the uniform-gather fold\n");
+		log("        cannot prove affine: a modulo or divide by a mode-dependent\n");
+		log("        divisor, a product of two signals, a bank offset under the\n");
+		log("        table depth. Runs after that fold, which also consults it:\n");
+		log("        a gather group whose reads all rebuild this way is folded\n");
+		log("        into a barrel only if the barrel is the cheaper of the two.\n");
+		log("        0 disables. Default: 0.\n");
+		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
@@ -2951,6 +3194,7 @@ struct OptVpsPass : public Pass {
 		bool msb_inv_sext = false;
 		bool dead_mod = false;
 		bool wrap_atom = false;
+		int read_support = 0;
 
 		log_header(design, "Executing OPT_VPS pass (optimize Verific VPS patterns).\n");
 
@@ -2984,6 +3228,11 @@ struct OptVpsPass : public Pass {
 				wrap_atom = true;
 				continue;
 			}
+			if ((args[argidx] == "-read-support" || args[argidx] == "-read_support") &&
+			    argidx + 1 < args.size()) {
+				read_support = std::stoi(args[++argidx]);
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -2996,7 +3245,7 @@ struct OptVpsPass : public Pass {
 				continue;
 
 			OptVpsWorker worker(module, min_stride, msb_inv_sext, dead_mod, wrap_atom);
-			worker.run(min_gather, max_gather_table, min_scatter);
+			worker.run(min_gather, max_gather_table, min_scatter, read_support);
 
 			if (worker.groups_optimized > 0)
 				log("  Module %s: %d VPS group(s), %d $pmux replaced, "
