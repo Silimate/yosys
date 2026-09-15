@@ -5,7 +5,8 @@
 # that copy away.
 #
 # Split out from opt_retime_add.ys because it used to be a logger -expect error
-# case (only one expected error fits per file). It is a real move now.
+# case (only one expected error fits per file). It is a real move now, as is
+# the backward case below, so nothing in this file refuses any more.
 design -reset
 read_verilog -icells <<EOF
 module tapped(input clk, input [7:0] a, b, output [7:0] q, tap);
@@ -42,10 +43,14 @@ proc; opt
 sat -seq 8 -set-init-zero -prove-asserts -verify
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
-# Forward can leave a copy for extra readers of Q; backward needs the cut Y
-# to drive only the flop being moved.
-log -header "Refused: backward needs a unique reader of the cut"
+# The backward side of the same question, and it used to be the expected-error
+# case of this file for the same reason the move above used to be one.
+#
+# The two directions answer it differently because they are copying different
+# things. Forward has extra readers on a register, so it leaves a register
+# behind. Backward has them on a combinational cell, the move having delayed
+# what that cell computes, so the copy left behind is logic.
+log -header "Backward: the cut is duplicated for the reader off the path"
 design -reset
 read_verilog -icells <<EOF
 module backfanout(input clk, input [7:0] a, output [7:0] q, tap);
@@ -57,5 +62,25 @@ endmodule
 EOF
 hierarchy -top backfanout
 check -assert
-logger -expect error "Y of cell b0 is not uniquely read by fq port D" 1
+# y feeds the capture flop and the tap
+select -assert-count 2 w:y %co c:* %i
+select -assert-count 2 t:$buf
+design -save orig
 opt_retime -flop fq -cut b0 -backward
+check -assert
+# fq samples the port and b0 drives the old Q net, one buffer later than before
+select -assert-count 1 t:$dff
+select -assert-count 3 t:$buf
+select -assert-count 1 c:fq %x:+[D] w:a %i
+select -assert-count 1 c:fq %x:+[Q] w:y %i
+select -assert-count 1 c:b0 %x:+[A] w:y %i
+select -assert-count 1 c:b0 %x:+[Y] w:q %i
+# the tap keeps reading an undelayed copy rather than the retimed b0
+select -assert-count 1 c:b0_dup %x:+[A] w:a %i
+select -assert-count 1 c:bt %x:+[A] w:b0_dup_y %i
+rename backfanout gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify

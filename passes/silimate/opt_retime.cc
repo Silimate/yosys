@@ -273,6 +273,44 @@ void scan_readers(Module *module, SigMap &sigmap, const SigSpec &sig,
 	}
 }
 
+// Readers of sig other than except.except_port. A cell reading only some bits
+// counts, since a duplicate has to serve it bit for bit, so this is a list of
+// ports rather than the full/partial split scan_readers makes. Module outputs
+// have no port to rewrite and are reported on their own.
+void scan_extra_readers(Module *module, SigMap &sigmap, const SigSpec &sig,
+		Cell *except, IdString except_port,
+		std::vector<CellPort> &readers, bool &output)
+{
+	pool<SigBit> bits = wire_bits(sig);
+	readers.clear();
+	output = false;
+
+	for (auto cell : module->cells()) {
+		for (auto &conn : cell->connections()) {
+			if (!cell->input(conn.first))
+				continue;
+			if (cell == except && conn.first == except_port)
+				continue;
+			for (auto bit : sigmap(conn.second)) {
+				if (bit.is_wire() && bits.count(bit)) {
+					readers.push_back({cell, conn.first});
+					break;
+				}
+			}
+		}
+	}
+	for (auto wire : module->wires()) {
+		if (!wire->port_output)
+			continue;
+		for (auto bit : sigmap(SigSpec(wire))) {
+			if (bits.count(bit)) {
+				output = true;
+				break;
+			}
+		}
+	}
+}
+
 Cell *unique_reader(Module *module, SigMap &sigmap, const SigSpec &sig, IdString &port)
 {
 	std::vector<CellPort> full;
@@ -1061,12 +1099,15 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 	return x;
 }
 
-// From flop.D back to cut: each hop's Y is uniquely the next hop's path port
-// (or D, for the first). chain.front() is the cell driving D, chain.back()
-// is the cut.
+// From flop.D back to cut: each hop's Y drives the next hop's path port (or D,
+// for the first). chain.front() is the cell driving D, chain.back() is the cut.
+// extra comes back parallel to the chain, holding the readers of each hop's Y
+// that are not the path and so have to be served from a duplicate.
 std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
-		const dict<SigBit, BitSrc> &drivers, Cell *flop, Cell *cut)
+		const dict<SigBit, BitSrc> &drivers, Cell *flop, Cell *cut,
+		std::vector<std::vector<CellPort>> &extra)
 {
+	extra.clear();
 	std::vector<ChainStep> chain;
 	pool<Cell *> seen;
 	Cell *reader = flop;
@@ -1084,14 +1125,25 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 					"backward across yet.\n",
 					log_id(cell), log_id(cell->type));
 
-		IdString uniq_port;
-		Cell *uniq = unique_reader(module, sigmap,
-				sigmap(cell->getPort(ID::Y)), uniq_port);
-		if (uniq != reader || uniq_port != reader_port)
-			refuse("Y of cell %s is not uniquely read by %s port %s, so flop "
-					"%s cannot move backward across it.\n",
-					log_id(cell), log_id(reader), log_id(reader_port),
-					log_id(flop));
+		// Readers of Y that are not the path do not stop the move; the cell is
+		// duplicated for them. A module output is the one reader that cannot
+		// be served that way, having no port to point somewhere else. The flop
+		// is the other: it is rebuilt at the end from the FfData snapshot taken
+		// before any rewiring, which would bring its original control nets back
+		// with it and undo the substitution.
+		std::vector<CellPort> others;
+		bool drives_output = false;
+		scan_extra_readers(module, sigmap, sigmap(cell->getPort(ID::Y)),
+				reader, reader_port, others, drives_output);
+		if (drives_output)
+			refuse("Y of cell %s is a module output as well as the before-path "
+					"of flop %s, so there is no net to hand the duplicate that "
+					"would keep driving it.\n", log_id(cell), log_id(flop));
+		for (auto &rd : others)
+			if (rd.cell == flop)
+				refuse("Flop %s reads Y of cell %s on port %s as well as on its "
+						"before-path, so it cannot move backward across it.\n",
+						log_id(flop), log_id(cell), log_id(rd.port));
 
 		if (seen.count(cell))
 			refuse("Cycle on the before-path of flop %s.\n", log_id(flop));
@@ -1099,6 +1151,7 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 
 		IdString path_port = backward_path_port(sigmap, drivers, cell, flop);
 		chain.push_back({cell, path_port});
+		extra.push_back(others);
 		if (cell == cut)
 			return chain;
 		reader = cell;
@@ -1125,8 +1178,9 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 		refuse("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
+	std::vector<std::vector<CellPort>> extra;
 	std::vector<ChainStep> chain = collect_backward_chain(module, sigmap, drivers,
-			flop, cut);
+			flop, cut, extra);
 
 	for (auto &step : chain)
 		if (!step.cell->hasPort(ID::Y))
@@ -1142,6 +1196,26 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 	if (chain.back().cell != cut)
 		refuse("Cut %s is not on the before-path of flop %s.\n",
 				log_id(cut), log_id(flop));
+
+	// A duplicate reads the duplicate of the hop below it, and nothing else on
+	// the chain, so a chain cell reading another hop off the path would need
+	// the same substitution made on the duplicate's own operands. That is not
+	// done, so reconvergence inside the chain is refused rather than wired up
+	// to the delayed copy by mistake.
+	pool<Cell *> chain_cells;
+	for (auto &step : chain)
+		chain_cells.insert(step.cell);
+	int dup_from = GetSize(chain);
+	for (int i = 0; i < GetSize(chain); i++) {
+		for (auto &rd : extra[i])
+			if (chain_cells.count(rd.cell))
+				refuse("Cell %s is on the before-path of flop %s and also reads "
+						"Y of %s off it, which opt_retime cannot duplicate "
+						"yet.\n", log_id(rd.cell), log_id(flop),
+						log_id(chain[i].cell));
+		if (!extra[i].empty() && i < dup_from)
+			dup_from = i;
+	}
 
 	// Which ports of which hop get a clone, one set per chain step. A clone at
 	// an intermediate hop is what makes a mux tree worth walking: the whole
@@ -1254,6 +1328,53 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 					forbidden.insert(bit);
 	check_controls(ff, sigmap, forbidden);
 
+	// The move leaves the chain computing the value one cycle later than it did,
+	// which is what the path wants and what every other reader of a hop does
+	// not. Those readers get a duplicate of the hop that still computes the
+	// undelayed value. A duplicate's path operand is the undelayed output of
+	// the hop below, so duplication runs from the first hop read off the path
+	// all the way down to the cut, whose path input is the one net the move
+	// leaves in place. Its other operands are the nets the originals read
+	// before the clones went in, which is why this runs first.
+	//
+	// This is the backward answer to the leftover copy a forward move leaves
+	// for extra readers of Q, and it costs more: what has extra readers here is
+	// a combinational cell, so the copy is logic rather than a register.
+	dict<Cell *, SigSpec> dup_y;
+	int ndup = 0;
+	for (int i = GetSize(chain) - 1; i >= dup_from; i--) {
+		Cell *cell = chain[i].cell;
+		SigSpec y = cell->getPort(ID::Y);
+		Cell *copy = module->addCell(module->uniquify(cell->name.str() + "_dup"), cell);
+		SigSpec ywire = module->addWire(
+				module->uniquify(cell->name.str() + "_dup_y"), GetSize(y));
+		copy->setPort(ID::Y, ywire);
+		if (i + 1 < GetSize(chain))
+			copy->setPort(chain[i].port, dup_y.at(chain[i + 1].cell));
+		dup_y[cell] = ywire;
+
+		dict<SigBit, SigBit> subst;
+		SigSpec mapped = sigmap(y);
+		for (int b = 0; b < GetSize(mapped); b++)
+			subst[mapped[b]] = ywire[b];
+		for (auto &rd : extra[i]) {
+			SigSpec neu;
+			for (auto bit : rd.cell->getPort(rd.port)) {
+				auto it = subst.find(sigmap(bit));
+				neu.append(it == subst.end() ? bit : it->second);
+			}
+			rd.cell->setPort(rd.port, neu);
+		}
+		if (!extra[i].empty())
+			log("Duplicating cell %s as %s for %d reader(s) off the before-path "
+					"of flop %s.\n", log_id(cell), log_id(copy),
+					GetSize(extra[i]), log_id(flop));
+		else
+			log("Duplicating cell %s as %s to feed the duplicate above it.\n",
+					log_id(cell), log_id(copy));
+		ndup++;
+	}
+
 	int nclone = 0;
 	for (int i = 0; i < GetSize(chain); i++) {
 		Cell *cell = chain[i].cell;
@@ -1348,6 +1469,8 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 	else
 		log("Retimed %s backward across %d cell(s) ending at %s.\n",
 				log_id(flop_name), GetSize(chain), log_id(cut));
+	if (ndup)
+		log("Duplicated %d chain cell(s) for readers off the before-path.\n", ndup);
 }
 
 void apply_forward_move(Module *module, Cell *flop, Cell *cut)
@@ -1679,7 +1802,7 @@ struct OptRetimePass : public Pass {
 		log("\n");
 		log("    -backward\n");
 		log("        move the register upstream, onto the path input of -cut. The\n");
-		log("        cut's Y must uniquely drive the flop (or a unique invertible\n");
+		log("        cut's Y must drive the flop (or a unique invertible\n");
 		log("        chain into it). Every other live data input, at the cut and\n");
 		log("        at each hop in between, gets a clone of the flop; constants\n");
 		log("        stay, since f(reg(x), c) is already reg(f(x, c)). A unique\n");
@@ -1707,6 +1830,19 @@ struct OptRetimePass : public Pass {
 		log("        are placed at every hop and not only at the cut, a chain is\n");
 		log("        not stopped by a live select at each level, and a whole mux\n");
 		log("        tree walks back in one move.\n");
+		log("\n");
+		log("        A hop whose Y is read off the path is duplicated, because\n");
+		log("        the move leaves the chain computing its value a cycle later\n");
+		log("        and those readers still want it when they always did. The\n");
+		log("        duplicate of a hop reads the duplicate of the hop below it,\n");
+		log("        so duplication runs from the topmost such hop down to the\n");
+		log("        cut. This is the counterpart of the copy a forward move\n");
+		log("        leaves for extra readers of Q, and it costs more: the cell\n");
+		log("        being copied is combinational, so the move trades area for\n");
+		log("        the depth it removes. Reconvergence inside the chain, a hop\n");
+		log("        read off the path by another hop, is refused, as is a hop\n");
+		log("        whose Y is a module output or feeds the moved flop's own\n");
+		log("        control inputs.\n");
 		log("\n");
 		log("    -if-legal\n");
 		log("        report a refused move instead of aborting, and carry on. A\n");

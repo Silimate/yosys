@@ -12,21 +12,24 @@
 # different enable nets. It is written out as icells here so the cells have
 # names -flop and -cut can refer to.
 #
-# Backward retiming res1's flop across that $add is refused, and the sharing is
-# the whole reason. The move leaves the $add reading the flop and driving the
-# old Q net, so the value on sum becomes the registered one, and res2's flop is
-# still reading sum for the unregistered one. Neither the enables nor the
-# operator is in the way: the same design with only res1 in it retimes and
-# proves equivalent below. Making the shared version legal means duplicating
-# the $add for res2, which the pass does not do.
+# Retiming res1's flop back across that $add leaves the $add computing its
+# value a cycle later than it used to, which is what res1 now wants and what
+# res2 does not: res2 is still after a register of its own and still wants the
+# undelayed sum. So the $add is duplicated, the original staying on the path
+# and the duplicate keeping res2 fed.
 #
-# Forward has the matching case and does handle it, by leaving a copy of the
-# register behind for the extra readers (opt_retime_merge_fanout.ys). There is
-# no copy to leave behind here, because the cell with extra readers is the
-# combinational one rather than the register.
+# That is the backward counterpart of the copy a forward move leaves behind for
+# extra readers of Q (opt_retime_merge_fanout.ys), and it is the more expensive
+# one: what has extra readers here is a combinational cell, so the copy is
+# logic. The move trades an adder for a level of depth.
+#
+# Classical retiming cannot make this move at all. Pulling a register back
+# across a gate legally means taking one off every fanout edge at once, and
+# these two fanout registers hold on different enables, so no single pair of
+# input registers can stand in for both. Duplicating is what buys it.
 
 # ---------------------------------------------------------------------------
-log -header "Backward: one capture flop, so the \$add is not shared"
+log -header "Backward: one capture flop, so nothing has to be duplicated"
 log -push
 design -reset
 read_verilog -icells <<EOF
@@ -47,6 +50,7 @@ check -assert
 # f1 slides onto A and a clone takes B. Both carry en1, so the pair holds and
 # updates on the same cycles and the $add never sees a mixed pair of operands.
 select -assert-count 2 t:$dffe
+select -assert-count 1 t:$add
 select -assert-count 1 c:f1 %x:+[D] w:in1 %i
 select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
 select -assert-count 1 c:f1 %x:+[EN] w:en1 %i
@@ -63,8 +67,8 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
-log -header "Refused: the \$add is shared with the other capture flop"
+log -header "Backward: the \$add is shared, so it is duplicated for res2"
+log -push
 design -reset
 read_verilog -icells <<EOF
 module board(input clk, en1, en2, in1, in2, output res1, res2);
@@ -79,7 +83,141 @@ endmodule
 EOF
 hierarchy -top board
 check -assert
-# sum feeds both capture flops
+# sum feeds both capture flops, which is what forces the duplicate
 select -assert-count 2 w:sum %co c:* %i
-logger -expect error "Y of cell a0 is not uniquely read by f1 port D" 1
+design -save orig
+opt_retime -flop f1 -cut a0 -backward
+check -assert
+# one adder became two, and f1 became itself plus a clone on the operand it
+# did not slide onto
+select -assert-count 2 t:$add
+select -assert-count 3 t:$dffe
+# the retimed half: f1 and its clone sample the inputs, a0 sums the registers
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 c:f1_B %x:+[EN] w:en1 %i
+select -assert-count 1 c:a0 %x:+[Y] w:res1 %i
+# the old sum net is the moved register's Q now, so it carries the delayed
+# value and a0 reads it as its path operand
+select -assert-count 1 c:f1 %x:+[Q] w:sum %i
+select -assert-count 1 c:a0 %x:+[A] w:sum %i
+# res2 is untouched behind an undelayed copy of the adder
+select -assert-count 1 c:a0_dup %x:+[A] w:in1 %i
+select -assert-count 1 c:a0_dup %x:+[B] w:in2 %i
+select -assert-count 1 c:f2 %x:+[D] w:a0_dup_y %i
+select -assert-count 1 c:f2 %x:+[EN] w:en2 %i
+rename board gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# en1 and en2 are both free, so the proof covers the two flops holding and
+# updating independently, which is the reason the adder had to be copied
+sat -seq 10 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A duplicate's path operand is the undelayed output of the hop below it, so
+# needing one anywhere means needing one at every hop from there down to the
+# cut. Only the top hop is read off the path here; the cut is duplicated purely
+# to feed that duplicate, which is the propagation this section is for.
+log -header "Backward: duplication runs down the chain to the cut"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module deep(input clk, input [7:0] a, b, c, output [7:0] q, tap);
+  wire [7:0] m, y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(b), .Y(m));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(m), .B(c), .Y(y));
+  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top deep
+check -assert
+# m is read only by the path; y is what the tap shares
+select -assert-count 1 w:m %co c:* %i
+select -assert-count 2 w:y %co c:* %i
+design -save orig
+opt_retime -flop fq -cut a0 -backward
+check -assert
+# fq plus a clone on the operand each hop was not entered on
+select -assert-count 3 t:$dff
+select -assert-count 1 c:fq %x:+[D] w:a %i
+select -assert-count 1 c:fq_B %x:+[D] w:b %i
+select -assert-count 1 c:fq_x0_B %x:+[D] w:c %i
+select -assert-count 1 c:x0 %x:+[Y] w:q %i
+# both hops duplicated, the cut only so the hop above it has something
+# undelayed to read
+select -assert-count 2 t:$add
+select -assert-count 2 t:$xor
+select -assert-count 1 c:a0_dup %x:+[A] w:a %i
+select -assert-count 1 c:a0_dup %x:+[B] w:b %i
+select -assert-count 1 c:x0_dup %x:+[A] w:a0_dup_y %i
+select -assert-count 1 c:x0_dup %x:+[B] w:c %i
+select -assert-count 1 c:bt %x:+[A] w:x0_dup_y %i
+rename deep gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A duplicate reads the duplicate of the hop below it and nothing else on the
+# chain, so a hop that reads another hop off the path would need that same
+# substitution made on the duplicate's own operands. Refused rather than wired
+# to the delayed copy by mistake. -if-legal keeps the script alive so the
+# design can be checked for being untouched, and so the module-output refusal
+# below still gets the file's one expected error.
+log -header "Refused: reconvergence inside the chain"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module recon(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] m, y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(b), .Y(m));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(m), .B(m), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top recon
+check -assert
+opt_retime -flop fq -cut a0 -backward -if-legal
+check -assert
+# nothing duplicated, nothing cloned, nothing rewired
+select -assert-count 1 t:$add
+select -assert-count 1 t:$xor
+select -assert-count 1 t:$dff
+select -assert-count 1 c:fq %x:+[D] w:y %i
+select -assert-count 1 c:x0 %x:+[A] w:m %i
+select -assert-count 1 c:x0 %x:+[B] w:m %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to come last.
+# A duplicate serves extra readers by taking over their input port. A module
+# output has no port to repoint: the cone's Y net is the output, and the move
+# needs that same net for the path.
+log -header "Refused: the shared net is a module output"
+design -reset
+read_verilog -icells <<EOF
+module outtap(input clk, en1, in1, in2, output res1, output sum);
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+endmodule
+EOF
+hierarchy -top outtap
+check -assert
+logger -expect error "Y of cell a0 is a module output as well as the before-path" 1
 opt_retime -flop f1 -cut a0 -backward
