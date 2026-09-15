@@ -1,0 +1,85 @@
+# Two capture flops sharing one combinational cone, which is what an RTL block
+# with two independently enabled assignments to the same expression comes out
+# as:
+#
+#   wire sum = in1 + in2;
+#   always @(posedge clk) begin
+#     if (en1) res1 <= sum;
+#     if (en2) res2 <= sum;
+#   end
+#
+    10|# proc and opt_dff turn that into a single $add whose Y feeds two $dffe on
+# different enable nets. It is written out as icells here so the cells have
+# names -flop and -cut can refer to.
+#
+# Backward retiming res1's flop across that $add is refused, and the sharing is
+# the whole reason. The move leaves the $add reading the flop and driving the
+# old Q net, so the value on sum becomes the registered one, and res2's flop is
+# still reading sum for the unregistered one. Neither the enables nor the
+# operator is in the way: the same design with only res1 in it retimes and
+# proves equivalent below. Making the shared version legal means duplicating
+    20|# the $add for res2, which the pass does not do.
+#
+# Forward has the matching case and does handle it, by leaving a copy of the
+# register behind for the extra readers (opt_retime_merge_fanout.ys). There is
+# no copy to leave behind here, because the cell with extra readers is the
+# combinational one rather than the register.
+
+# ---------------------------------------------------------------------------
+log -header "Backward: one capture flop, so the \$add is not shared"
+log -push
+    30|design -reset
+read_verilog -icells <<EOF
+module board1(input clk, en1, in1, in2, output res1);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+endmodule
+EOF
+    40|hierarchy -top board1
+check -assert
+select -assert-count 1 t:$dffe
+design -save orig
+opt_retime -flop f1 -cut a0 -backward
+check -assert
+# f1 slides onto A and a clone takes B. Both carry en1, so the pair holds and
+# updates on the same cycles and the $add never sees a mixed pair of operands.
+select -assert-count 2 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+    50|select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 c:f1 %x:+[EN] w:en1 %i
+select -assert-count 1 c:f1_B %x:+[EN] w:en1 %i
+select -assert-count 1 c:a0 %x:+[Y] w:res1 %i
+rename board1 gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# en1 is free stimulus, so the proof covers holding as well as updating
+    60|sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to come last.
+log -header "Refused: the \$add is shared with the other capture flop"
+design -reset
+read_verilog -icells <<EOF
+module board(input clk, en1, en2, in1, in2, output res1, res2);
+    70|  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(sum), .Q(res2));
+endmodule
+EOF
+hierarchy -top board
+    80|check -assert
+# sum feeds both capture flops
+select -assert-count 2 w:sum %co c:* %i
+logger -expect error "Y of cell a0 is not uniquely read by f1 port D" 1
+opt_retime -flop f1 -cut a0 -backward

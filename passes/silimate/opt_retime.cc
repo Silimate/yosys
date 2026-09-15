@@ -25,6 +25,31 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+// A move the pass will not make, carrying the explanation the user sees.
+//
+// Thrown rather than logged so that asking whether a move is legal does not
+// end the script. The command wrapper catches it and calls log_cmd_error, so
+// running opt_retime by hand is unchanged; try_forward_move and
+// try_backward_move hand the reason back instead, which is what lets a caller
+// try a move, be told no, and carry on.
+//
+// Every refusal is raised before the module is touched, so a refused move
+// leaves the design exactly as it found it. That is a property of where the
+// checks sit rather than of any rollback: nothing here can undo a half-applied
+// move, which is why the failures that can only be noticed mid-rewrite are
+// log_error instead. See the note above the emit calls.
+struct MoveRefused {
+	std::string reason;
+};
+
+// Takes its arguments the way log_cmd_error does, so a call reads the same
+// after the rename and the format string is still checked against them.
+template <typename... Args>
+[[noreturn]] void refuse(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	throw MoveRefused{fmt.format(args...)};
+}
+
 bool is_buf(Cell *cell)
 {
 	return cell->type.in(ID($buf), ID($_BUF_));
@@ -148,7 +173,7 @@ pool<SigBit> wire_bits(const SigSpec &sig)
 	pool<SigBit> bits;
 	for (auto bit : sig) {
 		if (!bit.is_wire())
-			log_cmd_error("Retiming signal %s contains a constant bit.\n", log_signal(sig));
+			refuse("Retiming signal %s contains a constant bit.\n", log_signal(sig));
 		bits.insert(bit);
 	}
 	return bits;
@@ -361,7 +386,7 @@ bool describe_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		if (it == drivers.end() || it->second.port != ID::Q ||
 				!it->second.cell->is_builtin_ff()) {
 			if (error)
-				log_cmd_error("Input %s of cell %s is not driven by a flop or a constant, so "
+				refuse("Input %s of cell %s is not driven by a flop or a constant, so "
 						"flop %s cannot move forward across it.\n",
 						log_id(port), log_id(cell), log_id(named));
 			return false;
@@ -373,7 +398,7 @@ bool describe_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		// merge the named flop with itself.
 		if (drv == named) {
 			if (error)
-				log_cmd_error("Input %s of cell %s is only partly driven by flop %s.\n",
+				refuse("Input %s of cell %s is only partly driven by flop %s.\n",
 						log_id(port), log_id(cell), log_id(named));
 			return false;
 		}
@@ -381,13 +406,13 @@ bool describe_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		FfData ff(&initvals, drv);
 		if (const char *why = mismatch_reason(sigmap, ref, ff)) {
 			if (error)
-				log_cmd_error("Flop %s on input %s of cell %s has %s flop %s.\n",
+				refuse("Flop %s on input %s of cell %s has %s flop %s.\n",
 						log_id(drv), log_id(port), log_id(cell), why, log_id(named));
 			return false;
 		}
 		if (const char *why = unmovable_reason(ff)) {
 			if (error)
-				log_cmd_error("Flop %s on input %s of cell %s cannot be merged because %s.\n",
+				refuse("Flop %s on input %s of cell %s cannot be merged because %s.\n",
 						log_id(drv), log_id(port), log_id(cell), why);
 			return false;
 		}
@@ -416,7 +441,7 @@ bool describe_operand(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		if (it == drivers.end() || it->second.port != ID::Q ||
 				!it->second.cell->is_builtin_ff()) {
 			if (error)
-				log_cmd_error("Input %s of cell %s is not driven by a flop or a constant, so "
+				refuse("Input %s of cell %s is not driven by a flop or a constant, so "
 						"flop %s cannot move forward across it.\n",
 						log_id(port), log_id(cell), log_id(named));
 			return false;
@@ -424,20 +449,20 @@ bool describe_operand(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		Cell *drv = it->second.cell;
 		if (drv == named) {
 			if (error)
-				log_cmd_error("Input %s of cell %s is only partly driven by flop %s.\n",
+				refuse("Input %s of cell %s is only partly driven by flop %s.\n",
 						log_id(port), log_id(cell), log_id(named));
 			return false;
 		}
 		FfData ff(&initvals, drv);
 		if (const char *why = mismatch_reason(sigmap, ref, ff)) {
 			if (error)
-				log_cmd_error("Flop %s on input %s of cell %s has %s flop %s.\n",
+				refuse("Flop %s on input %s of cell %s has %s flop %s.\n",
 						log_id(drv), log_id(port), log_id(cell), why, log_id(named));
 			return false;
 		}
 		if (const char *why = unmovable_reason(ff)) {
 			if (error)
-				log_cmd_error("Flop %s on input %s of cell %s cannot be merged because %s.\n",
+				refuse("Flop %s on input %s of cell %s cannot be merged because %s.\n",
 						log_id(drv), log_id(port), log_id(cell), why);
 			return false;
 		}
@@ -537,9 +562,9 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 		}
 	}
 	if (paths == 0)
-		log_cmd_error("Cut %s is not on the after-path of flop %s.\n", log_id(cut), log_id(flop));
+		refuse("Cut %s is not on the after-path of flop %s.\n", log_id(cut), log_id(flop));
 	if (paths > 1)
-		log_cmd_error("Cut %s is reachable from flop %s on more than one path.\n",
+		refuse("Cut %s is reachable from flop %s on more than one path.\n",
 				log_id(cut), log_id(flop));
 
 	seen.insert(first.cell);
@@ -555,7 +580,7 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 			break;
 
 		if (seen.count(next))
-			log_cmd_error("Cycle on the after-path of flop %s.\n", log_id(flop));
+			refuse("Cycle on the after-path of flop %s.\n", log_id(flop));
 		seen.insert(next);
 		chain.push_back({next, port});
 		if (next == cut)
@@ -566,7 +591,7 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 	}
 
 	if (chain.back().cell != cut)
-		log_cmd_error("Cut %s is not on the after-path of flop %s.\n", log_id(cut), log_id(flop));
+		refuse("Cut %s is not on the after-path of flop %s.\n", log_id(cut), log_id(flop));
 	return chain;
 }
 
@@ -640,7 +665,7 @@ Const fold_value(Module *, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 				ok = describe_operand(sigmap, drivers, initvals, ref, flop, step.cell, port,
 						desc, true);
 			if (!ok)
-				log_cmd_error("Input %s of cell %s is not on the after-path of flop %s.\n",
+				refuse("Input %s of cell %s is not on the after-path of flop %s.\n",
 						log_id(port), log_id(step.cell), log_id(flop));
 			args.push_back(assemble_const(desc, cur, initvals, kind));
 		}
@@ -654,7 +679,7 @@ Const fold_value(Module *, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		else
 			out = CellTypes::eval(step.cell, args[0], Const(), &err);
 		if (err)
-			log_cmd_error("Flop %s has a %s value that opt_retime cannot fold through "
+			refuse("Flop %s has a %s value that opt_retime cannot fold through "
 					"cell %s, because it cannot evaluate %s on constants.\n",
 					log_id(flop), fold_kind_name(kind), log_id(step.cell),
 					log_id(step.cell->type));
@@ -702,7 +727,7 @@ bool fold_through(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &dr
 	if (!any)
 		return false;
 	if (!all)
-		log_cmd_error("Flop %s cannot move because the move would fold %s values together "
+		refuse("Flop %s cannot move because the move would fold %s values together "
 				"and only some of them are defined.\n", log_id(flop), fold_kind_name(kind));
 	result = fold_value(module, sigmap, drivers, initvals, ref, flop, chain, kind, start);
 	return true;
@@ -806,7 +831,7 @@ void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbidden)
 {
 	auto check = [&](const SigSpec &sig, const char *what) {
 		if (bits_overlap(forbidden, sigmap(sig)))
-			log_cmd_error("Flop %s control %s uses a data wire being retimed.\n", log_id(ff.cell), what);
+			refuse("Flop %s control %s uses a data wire being retimed.\n", log_id(ff.cell), what);
 	};
 	if (ff.has_clk)
 		check(ff.sig_clk, "CLK");
@@ -917,7 +942,7 @@ IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 			continue;
 		live++;
 		if (!sig_all_wires(sig))
-			log_cmd_error("Input %s of cell %s is only partly a wire, so flop %s "
+			refuse("Input %s of cell %s is only partly a wire, so flop %s "
 					"cannot move backward onto it.\n",
 					log_id(port), log_id(cell), log_id(flop));
 		if (driven_by_ff(drivers, sig)) {
@@ -929,10 +954,10 @@ IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 			path = port;
 	}
 	if (live == 0)
-		log_cmd_error("Every data input of cell %s is constant, so flop %s has "
+		refuse("Every data input of cell %s is constant, so flop %s has "
 				"nothing to slide onto.\n", log_id(cell), log_id(flop));
 	if (path == IdString())
-		log_cmd_error("Input %s of cell %s is already registered, so flop %s "
+		refuse("Input %s of cell %s is already registered, so flop %s "
 				"cannot move backward onto it: that would stack a second "
 				"register on the same net.\n",
 				log_id(first_ff), log_id(cell), log_id(flop));
@@ -942,7 +967,7 @@ IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 	// at the stored value rather than at a fixed identity, which is a per-fold
 	// starting value and not what clone_start hands out.
 	if (cell->type == ID($mux) && path == ID::S)
-		log_cmd_error("Both data inputs of %s are constant or already "
+		refuse("Both data inputs of %s are constant or already "
 				"registered, so flop %s would have to slide onto the "
 				"select, which opt_retime does not do yet.\n",
 				log_id(cell), log_id(flop));
@@ -987,7 +1012,7 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 
 	int len = GetSize(cell->getPort(path_port));
 	if (GetSize(cell->getPort(ID::Y)) != len)
-		log_cmd_error("Cell %s has Y width %d and path port %s width %d; a "
+		refuse("Cell %s has Y width %d and path port %s width %d; a "
 				"backward move cannot invert a width change yet.\n",
 				log_id(cell), GetSize(cell->getPort(ID::Y)),
 				log_id(path_port), len);
@@ -1013,7 +1038,7 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 	else if (cell->type.in(ID($and), ID($or), ID($mux)))
 		x = y;
 	else
-		log_cmd_error("Cell %s has type %s, which opt_retime cannot invert yet.\n",
+		refuse("Cell %s has type %s, which opt_retime cannot invert yet.\n",
 				log_id(cell), log_id(cell->type));
 
 	// Running the cell forward on the candidate is the whole argument that a
@@ -1030,7 +1055,7 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 		back = path_port == ID::A ? CellTypes::eval(cell, x, other, &err)
 				: CellTypes::eval(cell, other, x, &err);
 	if (err || back != y)
-		log_cmd_error("Cell %s has no input on %s that produces %s, so a "
+		refuse("Cell %s has no input on %s that produces %s, so a "
 				"backward move has no stored value to leave behind.\n",
 				log_id(cell), log_id(path_port), log_signal(y));
 	return x;
@@ -1052,10 +1077,10 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 		IdString y_port;
 		Cell *cell = unique_full_driver(drivers, sigmap, cur, y_port);
 		if (cell == nullptr || y_port != ID::Y)
-			log_cmd_error("The before-path of flop %s is not a unique cell Y at %s.\n",
+			refuse("The before-path of flop %s is not a unique cell Y at %s.\n",
 					log_id(flop), log_signal(cur));
 		if (!is_invertible_backward(cell))
-			log_cmd_error("Cut cell %s has type %s, which opt_retime cannot move "
+			refuse("Cut cell %s has type %s, which opt_retime cannot move "
 					"backward across yet.\n",
 					log_id(cell), log_id(cell->type));
 
@@ -1063,13 +1088,13 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 		Cell *uniq = unique_reader(module, sigmap,
 				sigmap(cell->getPort(ID::Y)), uniq_port);
 		if (uniq != reader || uniq_port != reader_port)
-			log_cmd_error("Y of cell %s is not uniquely read by %s port %s, so flop "
+			refuse("Y of cell %s is not uniquely read by %s port %s, so flop "
 					"%s cannot move backward across it.\n",
 					log_id(cell), log_id(reader), log_id(reader_port),
 					log_id(flop));
 
 		if (seen.count(cell))
-			log_cmd_error("Cycle on the before-path of flop %s.\n", log_id(flop));
+			refuse("Cycle on the before-path of flop %s.\n", log_id(flop));
 		seen.insert(cell);
 
 		IdString path_port = backward_path_port(sigmap, drivers, cell, flop);
@@ -1085,19 +1110,19 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 {
 	if (!flop->is_builtin_ff())
-		log_cmd_error("Cell %s is not a built-in flip-flop.\n", log_id(flop));
+		refuse("Cell %s is not a built-in flip-flop.\n", log_id(flop));
 	if (data_inputs(cut).empty())
-		log_cmd_error("Cut cell %s has type %s, which opt_retime cannot move across yet.\n",
+		refuse("Cut cell %s has type %s, which opt_retime cannot move across yet.\n",
 				log_id(cut), log_id(cut->type));
 	if (flop == cut)
-		log_cmd_error("Flop and cut must be different cells.\n");
+		refuse("Flop and cut must be different cells.\n");
 
 	SigMap sigmap(module);
 	FfInitVals initvals(&sigmap, module);
 
 	FfData ff(&initvals, flop);
 	if (!ff.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
-		log_cmd_error("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
+		refuse("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
 	std::vector<ChainStep> chain = collect_backward_chain(module, sigmap, drivers,
@@ -1105,17 +1130,17 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 
 	for (auto &step : chain)
 		if (!step.cell->hasPort(ID::Y))
-			log_cmd_error("Cell %s is missing port Y.\n", log_id(step.cell));
+			refuse("Cell %s is missing port Y.\n", log_id(step.cell));
 
 	for (auto &step : chain)
 		if (!is_buf(step.cell))
 			if (const char *why = unmovable_reason(ff))
-				log_cmd_error("Flop %s cannot move across cell %s because %s, which "
+				refuse("Flop %s cannot move across cell %s because %s, which "
 						"the move would have to push through the cell.\n",
 						log_id(flop), log_id(step.cell), why);
 
 	if (chain.back().cell != cut)
-		log_cmd_error("Cut %s is not on the before-path of flop %s.\n",
+		refuse("Cut %s is not on the before-path of flop %s.\n",
 				log_id(cut), log_id(flop));
 
 	// Which ports of which hop get a clone, one set per chain step. A clone at
@@ -1142,7 +1167,7 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 	SigSpec q = flop->getPort(ID::Q);
 
 	if (GetSize(path_in) != GetSize(q))
-		log_cmd_error("Backward move across %s would resize flop %s from %d to %d "
+		refuse("Backward move across %s would resize flop %s from %d to %d "
 				"bits, which is not supported yet.\n",
 				log_id(cut), log_id(flop), GetSize(q), GetSize(path_in));
 
@@ -1161,7 +1186,7 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 				continue;
 			if (cell->type == ID($mux) && port == ID::S && n == 1)
 				continue;
-			log_cmd_error("Backward move across %s would clone flop %s onto "
+			refuse("Backward move across %s would clone flop %s onto "
 					"input %s of %s of width %d, from %d bits, which is "
 					"not supported yet.\n",
 					log_id(cut), log_id(flop), log_id(port),
@@ -1170,12 +1195,12 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 
 	pool<SigBit> qbits = wire_bits(sigmap(q));
 	if (bits_overlap(qbits, sigmap(path_in)))
-		log_cmd_error("Flop %s cannot move backward across %s: the path input "
+		refuse("Flop %s cannot move backward across %s: the path input "
 				"depends on the flop's Q.\n", log_id(flop), log_id(cut));
 	for (int i = 0; i < GetSize(chain); i++)
 		for (auto port : clone_ports[i])
 			if (bits_overlap(qbits, sigmap(chain[i].cell->getPort(port))))
-				log_cmd_error("Flop %s cannot move backward across %s: input "
+				refuse("Flop %s cannot move backward across %s: input "
 						"%s of %s depends on the flop's Q.\n",
 						log_id(flop), log_id(cut), log_id(port),
 						log_id(chain[i].cell));
@@ -1201,7 +1226,7 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 		if (start.is_fully_undef())
 			return false;
 		if (!start.is_fully_def())
-			log_cmd_error("Flop %s cannot move because its %s value is only partly "
+			refuse("Flop %s cannot move because its %s value is only partly "
 					"defined, so the inverse fold would be ambiguous.\n",
 					log_id(flop), fold_kind_name(kind));
 		Const cur = start;
@@ -1258,8 +1283,14 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 				cloned.val_arst = got_arst ? start : Const(State::Sx, n);
 			if (cloned.has_aload && cloned.sig_ad.is_fully_const())
 				cloned.sig_ad = got_aload ? start : Const(State::Sx, n);
+			// Not a refusal, and deliberately fatal. FfData::emit only declines
+			// to build a cell for a zero width or for a register left with no
+			// control input at all, neither of which can reach here: the width
+			// comes from a real port and has_clk was required up front. It also
+			// removes the old cell before it can decline, so there is nothing
+			// to hand back to a caller even if this were a legality question.
 			if (!cloned.emit())
-				log_cmd_error("Clone of flop %s onto input %s of %s did not "
+				log_error("Clone of flop %s onto input %s of %s did not "
 						"survive being built.\n",
 						log_id(flop), log_id(port), log_id(cell));
 			cell->setPort(port, qwire);
@@ -1292,8 +1323,10 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 		else if (ff.sig_ad.is_fully_const())
 			ff.sig_ad = Const(State::Sx, GetSize(path_in));
 	}
+	// Fatal rather than refused, for the same reason as the clone above: emit
+	// removes the old cell before it can decline to build the new one.
 	if (!ff.emit())
-		log_cmd_error("Flop %s did not survive being rebuilt after the move.\n",
+		log_error("Flop %s did not survive being rebuilt after the move.\n",
 				log_id(flop_name));
 
 	if (got_init)
@@ -1320,19 +1353,19 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 {
 	if (!flop->is_builtin_ff())
-		log_cmd_error("Cell %s is not a built-in flip-flop.\n", log_id(flop));
+		refuse("Cell %s is not a built-in flip-flop.\n", log_id(flop));
 	if (data_inputs(cut).empty())
-		log_cmd_error("Cut cell %s has type %s, which opt_retime cannot move across yet.\n",
+		refuse("Cut cell %s has type %s, which opt_retime cannot move across yet.\n",
 				log_id(cut), log_id(cut->type));
 	if (flop == cut)
-		log_cmd_error("Flop and cut must be different cells.\n");
+		refuse("Flop and cut must be different cells.\n");
 
 	SigMap sigmap(module);
 	FfInitVals initvals(&sigmap, module);
 
 	FfData ff(&initvals, flop);
 	if (!ff.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
-		log_cmd_error("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
+		refuse("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
 	std::vector<ChainStep> chain = collect_chain(module, sigmap, drivers, initvals, ff, flop, cut);
@@ -1342,7 +1375,7 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	// register the move leaves behind still takes the width of the cut output.
 	for (auto &step : chain)
 		if (!step.cell->hasPort(ID::Y))
-			log_cmd_error("Cell %s is missing port Y.\n", log_id(step.cell));
+			refuse("Cell %s is missing port Y.\n", log_id(step.cell));
 
 	// Every cell on the chain except a $buf transforms the values the register
 	// loads, and the ones left in unmovable_reason arrive on a net rather than
@@ -1351,7 +1384,7 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	for (auto &step : chain)
 		if (!is_buf(step.cell))
 			if (const char *why = unmovable_reason(ff))
-				log_cmd_error("Flop %s cannot move across cell %s because %s, which the move "
+				refuse("Flop %s cannot move across cell %s because %s, which the move "
 						"would have to push through the cell.\n",
 						log_id(flop), log_id(step.cell), why);
 
@@ -1378,7 +1411,7 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	// before merges so a loop with an observe tap fails for that reason
 	// rather than whatever the other operand happens to look like.
 	if (peel && signal_reaches(module, sigmap, map_y, map_d))
-		log_cmd_error("Flop %s cannot move across %s: other readers need a copy left "
+		refuse("Flop %s cannot move across %s: other readers need a copy left "
 				"behind, but the flop's D depends on the cut, so that copy would "
 				"not keep its original input.\n",
 				log_id(flop), log_id(cut));
@@ -1414,6 +1447,15 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	// TODO relax control checks
 	check_controls(ff, sigmap, forbidden);
 
+	// Last thing checked before anything is rewritten. A fine cell is one bit
+	// wide with no width parameter to grow, so a cut whose output is a
+	// different size has nowhere to put the result. The natural place for this
+	// is the resize below, but by then a peeled copy has been added to the
+	// module, and a refusal has no way to take it back out.
+	if (GetSize(y) != GetSize(q) && ff.is_fine)
+		refuse("Flop %s is a single-bit cell and cannot widen to %d bits.\n",
+				log_id(flop), GetSize(y));
+
 	if (peel) {
 		IdString left_name = module->uniquify(flop->name.str() + "_fanout");
 		module->addCell(left_name, flop);
@@ -1430,9 +1472,6 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	// fresh link.
 	SigSpec link = q;
 	if (GetSize(y) != GetSize(q)) {
-		if (ff.is_fine)
-			log_cmd_error("Flop %s is a single-bit cell and cannot widen to %d bits.\n",
-					log_id(flop), GetSize(y));
 		log("Resizing flop %s from %d to %d bits.\n", log_id(flop), GetSize(q), GetSize(y));
 		link = module->addWire(module->uniquify(flop->name.str() + "_retimed"), GetSize(y));
 	} else if (peel) {
@@ -1450,13 +1489,19 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 		ChainStep &step = chain[i];
 		SigSpec path = paths[i];
 		for (auto port : data_inputs(step.cell)) {
+			// Asked with the error flag off, unlike the identical pass
+			// collect_merges made over this same chain and port list before
+			// any of this ran. Anything worth refusing was refused there, so
+			// a failure here is a broken invariant rather than an illegal
+			// move, and has to read as one: the rewrite is already under way
+			// and a refusal would have nothing to return to.
 			std::vector<PortBit> desc;
-			if (port == step.port)
-				describe_port(sigmap, drivers, initvals, ff, flop, step.cell, port,
-						path, desc, true);
-			else
-				describe_operand(sigmap, drivers, initvals, ff, flop, step.cell, port,
-						desc, true);
+			bool described = port == step.port
+					? describe_port(sigmap, drivers, initvals, ff, flop, step.cell,
+							port, path, desc, false)
+					: describe_operand(sigmap, drivers, initvals, ff, flop, step.cell,
+							port, desc, false);
+			log_assert(described);
 			SigSpec neu;
 			for (auto &bit : desc) {
 				if (bit.kind == PortBit::Path)
@@ -1516,8 +1561,10 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 		else if (ff.sig_ad.is_fully_const())
 			ff.sig_ad = Const(State::Sx, GetSize(y));
 	}
+	// Fatal rather than refused, for the same reason as the clone above: emit
+	// removes the old cell before it can decline to build the new one.
 	if (!ff.emit())
-		log_cmd_error("Flop %s did not survive being rebuilt after the move.\n",
+		log_error("Flop %s did not survive being rebuilt after the move.\n",
 				log_id(flop_name));
 
 	if (got_init)
@@ -1536,6 +1583,34 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 			log_id(flop_name), GetSize(chain), log_id(cut), GetSize(merges));
 	if (kept)
 		log("Kept %d merged flop(s) that still have other readers.\n", kept);
+}
+
+// Make a move if it is legal, and say why not if it is not. An empty string
+// means the move was made; anything else is the reason, ready to print, and
+// the module is untouched.
+//
+// This is the entry point anything driving the pass should use. Picking moves
+// automatically means proposing ones that turn out to be illegal, and the
+// answer to an illegal proposal has to be "no" rather than the end of the
+// script.
+std::string try_forward_move(Module *module, Cell *flop, Cell *cut)
+{
+	try {
+		apply_forward_move(module, flop, cut);
+	} catch (const MoveRefused &refused) {
+		return refused.reason;
+	}
+	return "";
+}
+
+std::string try_backward_move(Module *module, Cell *flop, Cell *cut)
+{
+	try {
+		apply_backward_move(module, flop, cut);
+	} catch (const MoveRefused &refused) {
+		return refused.reason;
+	}
+	return "";
 }
 
 struct OptRetimePass : public Pass {
@@ -1633,6 +1708,30 @@ struct OptRetimePass : public Pass {
 		log("        not stopped by a live select at each level, and a whole mux\n");
 		log("        tree walks back in one move.\n");
 		log("\n");
+		log("    -if-legal\n");
+		log("        report a refused move instead of aborting, and carry on. A\n");
+		log("        refusal is decided before the design is touched, so the\n");
+		log("        module is left exactly as it was and the next command runs\n");
+		log("        against it. Use this to try a move that may not be legal,\n");
+		log("        rather than having to know it is legal before asking.\n");
+		log("\n");
+		log("Whether the move happened is left in the scratchpad, so a caller does\n");
+		log("not have to read the log to find out:\n");
+		log("\n");
+		log("    opt_retime.moved      true if the move was made, false if it was\n");
+		log("                          refused.\n");
+		log("    opt_retime.refusal    why it was refused. Unset when the move was\n");
+		log("                          made, rather than emptied, so a reason left\n");
+		log("                          by an earlier call cannot be read as this\n");
+		log("                          one's.\n");
+		log("    opt.did_something     set when the move was made, the convention\n");
+		log("                          opt drives its fixpoint loop on.\n");
+		log("\n");
+		log("These are written whether or not -if-legal is given, so a script that\n");
+		log("meant the move to happen can follow it with\n");
+		log("\n");
+		log("    scratchpad -assert opt_retime.moved true\n");
+		log("\n");
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -1640,7 +1739,7 @@ struct OptRetimePass : public Pass {
 		log_header(design, "Executing OPT_RETIME pass.\n");
 
 		std::string flop, cut_cell;
-		bool forward = false, backward = false;
+		bool forward = false, backward = false, if_legal = false;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -1658,6 +1757,10 @@ struct OptRetimePass : public Pass {
 			}
 			if (args[argidx] == "-backward") {
 				backward = true;
+				continue;
+			}
+			if (args[argidx] == "-if-legal") {
+				if_legal = true;
 				continue;
 			}
 			break;
@@ -1695,10 +1798,34 @@ struct OptRetimePass : public Pass {
 				log_id(module), log_id(flop_cell),
 				backward ? "backward" : "forward", log_id(cut));
 
-		if (backward)
-			apply_backward_move(module, flop_cell, cut);
-		else
-			apply_forward_move(module, flop_cell, cut);
+		std::string refused = backward ? try_backward_move(module, flop_cell, cut)
+				: try_forward_move(module, flop_cell, cut);
+
+		// What happened, for a caller that cannot read the log: opt_retime.moved
+		// is the answer and opt_retime.refusal is the reason when it is false.
+		// The reason is unset rather than emptied on success, so that a stale
+		// one left by an earlier call cannot be read as belonging to this one.
+		// Trailing newline trimmed, which the log wants and a scratchpad
+		// comparison does not.
+		design->scratchpad_set_bool("opt_retime.moved", refused.empty());
+		if (refused.empty()) {
+			design->scratchpad_unset("opt_retime.refusal");
+			// The convention opt and its passes drive their fixpoint loop on.
+			design->scratchpad_set_bool("opt.did_something", true);
+			return;
+		}
+		std::string reason = refused;
+		while (!reason.empty() && reason.back() == '\n')
+			reason.pop_back();
+		design->scratchpad_set_string("opt_retime.refusal", reason);
+
+		// Named one move by hand, a refusal is a hard error: it is not going to
+		// happen and there is nothing to carry on with. Under -if-legal the
+		// caller is asking rather than telling, so the reason is the answer and
+		// the script keeps going with the design as it was.
+		if (!if_legal)
+			log_cmd_error("%s", refused.c_str());
+		log("Refused: %s", refused.c_str());
 	}
 } OptRetimePass;
 

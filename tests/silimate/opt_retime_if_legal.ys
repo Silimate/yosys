@@ -1,0 +1,118 @@
+# Design test for -if-legal: a refused move reports and carries on.
+#
+# Every other test here pins a refusal with `logger -expect error`, which proves
+# the pass says no but also ends the run, so none of them can say what the
+# design looks like afterwards. That is the question this file exists for. A
+# caller choosing moves on its own will propose illegal ones, and the answer to
+# an illegal proposal has to be an answer rather than the end of the script.
+#
+# What is pinned is that a refused move leaves the module exactly as it was,
+# down to the individual connections. That holds because every refusal is
+# raised before the first rewrite, not because anything rolls back: once the
+# register has been rebuilt there is no putting it back, which is why the two
+# failures only visible mid-rewrite are log_error rather than refusals.
+#
+# retime_probe is f0 -> b0 -> b1 -> f1 -> b2 -> b3 -> f2, so f1 sits between two
+# $buf pairs with a legal move one way and a refusal the other.
+
+# ---------------------------------------------------------------------------
+log -header "Refused under -if-legal: the run survives and the design is untouched"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+design -save orig
+
+# b0's A is q0, already registered by f0, so a backward move onto it would
+# stack a second register on the same net. Without -if-legal this aborts.
+opt_retime -flop f1 -cut b0 -backward -if-legal
+
+# reaching this line at all is half the test
+log -header "Still running, so the refusal did not end the script."
+check -assert
+
+# the other half is being able to tell, without reading the log
+scratchpad -assert opt_retime.moved false
+scratchpad -assert-set opt_retime.refusal
+scratchpad -assert opt_retime.refusal "Input A of cell b0 is already registered, so flop f1 cannot move backward onto it: that would stack a second register on the same net."
+
+# nothing added, nothing removed, nothing rewired
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+select -assert-count 1 c:f1 %x:+[D] w:n0 %i
+select -assert-count 1 c:f1 %x:+[Q] w:q1 %i
+select -assert-count 1 c:b2 %x:+[A] w:q1 %i
+select -assert-count 1 c:b0 %x:+[A] w:q0 %i
+
+# and it is still the design that was read in
+rename retime_probe gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 4 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Legal under -if-legal: the move still happens"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+design -save orig
+# -if-legal changes what a refusal does and nothing else, so a legal move runs
+# exactly as it would without the option
+opt_retime -flop f1 -cut b2 -forward -if-legal
+check -assert
+scratchpad -assert opt_retime.moved true
+# unset rather than emptied on success, so no earlier reason can be mistaken
+# for this call's
+scratchpad -assert-unset opt_retime.refusal
+scratchpad -assert opt.did_something true
+select -assert-count 3 t:$dff
+# f1 hopped b2: the buffer now reads f1's old D and drives the link the
+# register captures
+select -assert-count 1 c:b2 %x:+[A] w:n0 %i
+select -assert-count 1 c:b2 %x:+[Y] w:q1 %i
+select -assert-count 1 c:f1 %x:+[D] w:q1 %i
+select -assert-count 1 c:f1 %x:+[Q] w:m1 %i
+rename retime_probe gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 4 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused twice over, then a legal move on the same design"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+# a refusal leaves nothing behind for the next command to trip over, so they
+# can be proposed one after another and a real move still lands afterwards.
+# This is the shape a move-picking driver runs in.
+opt_retime -flop f1 -cut b0 -backward -if-legal
+scratchpad -assert opt_retime.moved false
+opt_retime -flop f1 -cut b0 -backward -if-legal
+scratchpad -assert opt_retime.moved false
+select -assert-count 3 t:$dff
+select -assert-count 1 c:f1 %x:+[D] w:n0 %i
+# the refusals set no did_something, so a driver looping on it terminates
+scratchpad -assert-unset opt.did_something
+opt_retime -flop f1 -cut b2 -forward
+check -assert
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt.did_something true
+select -assert-count 3 t:$dff
+select -assert-count 1 c:f1 %x:+[Q] w:m1 %i
+design -reset
+log -pop
