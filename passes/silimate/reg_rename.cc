@@ -410,7 +410,7 @@ struct RegRenameInstance {
 			return;
 
 		std::string group = element_group(obj);
-		std::string key = stringf("%d.%s.%s", kind, vcd_scope.c_str(), group.c_str());
+		std::string key = stringf("%d\n%s\n%s", kind, vcd_scope.c_str(), group.c_str());
 		auto it = stats.summary_index.find(key);
 		if (it == stats.summary_index.end()) {
 			it = stats.summary_index.insert(std::make_pair(key, GetSize(stats.summaries))).first;
@@ -905,7 +905,15 @@ struct RegRenamePass : public Pass {
 		log("        scope to process in the waveform\n");
 		log("\n");
 		log("    -d\n");
-		log("        enable debug output\n");
+		log("        enable debug output, including a line for every flop bit left unbound\n");
+		log("        and every unbound-object warning (at most 100 are printed without -d)\n");
+		log("\n");
+		log("Every sequential cell visited gets an `rtl_bind_status` attribute with one word\n");
+		log("per Q bit, from Q[0], as runs `word` or `word*count` (e.g. \"bound*4 absent*28\"):\n");
+		log("bound (renamed onto its dumped signal, or already named that), unstamped (no\n");
+		log("usable `rtl_bind`), absent (object not in the waveform), unplaced (object\n");
+		log("dumped, bit not found in it), conflict (dumped bit already driven by another\n");
+		log("flop) or unwired (Q is not a slice of one renamable wire).\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
