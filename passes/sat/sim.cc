@@ -2038,12 +2038,11 @@ struct SimWorker : SimShared
 		std::string object = path.substr(0, path.size() - name.size()) + base;
 		int width = GetSize(wire);
 		const ArrayFamily *fam = array_family(mod, base, GetSize(idx));
+		std::vector<std::string> objects = {object};
+		for (int d = 0; d + 1 < GetSize(idx); d++)
+			objects.push_back(objects.back() + stringf("[%d]", idx[d]));
 
 		if (fam != nullptr && fam->complete) {
-			std::vector<std::string> objects = {object};
-			for (int d = 0; d + 1 < GetSize(idx); d++)
-				objects.push_back(objects.back() + stringf("[%d]", idx[d]));
-
 			// Widen from the innermost dimension outwards, trying each enclosing object in turn;
 			// the dumped object must hold exactly the elements the ports say the array has
 			int elements = 1, offset = 0;
@@ -2057,11 +2056,12 @@ struct SimWorker : SimShared
 		}
 
 		// The ports do not span the dumped array (some elements are not ports of this module), so
-		// its bounds are unknown: only a 1-D word of a 0-based [hi:0] array can still be placed,
-		// as `\din[1]` at din[W]..din[2W).
-		if (GetSize(idx) != 1 || idx[0] < 0 || (int64_t)idx[0] * width + width > INT_MAX)
+		// its bounds are unknown: place the element by its last index alone, as a word of a
+		// 0-based [hi:0] innermost dimension -- `\din[1]` at din[W]..din[2W), `\grid[1][1]` at
+		// grid[1][W]..grid[1][2W). This is how every flattened element was placed before.
+		if (idx.back() < 0 || (int64_t)idx.back() * width + width > INT_MAX)
 			return false;
-		return drive_flattened_bits(t, wire, object, -1, idx[0] * width);
+		return drive_flattened_bits(t, wire, objects.back(), -1, idx.back() * width);
 	}
 
 	// Drive `wire` from bits [lsb, lsb + width) of dumped `object`, holding `total` bits

@@ -47,11 +47,12 @@ module array_port_controls (
 	input  wire [7:0] vec,       // same name and width
 	input  wire [1:0] bits,      // bit-blasted as bits[1], bits[0]
 	input  wire [7:0] \din[1] ,  // only element of din [1:0] that is a port: 0-based word din[8..15]
+	input  wire [3:0] \part[1][1] ,  // likewise for 2-D: 0-based word part[1][4..7] of its row
 	(* sim_const = "1010" *)
 	input  wire [3:0] tied,      // parent tied it off; not in the dump
 	(* sim_src = "tb.src", sim_src_bit = "2" *)
 	input  wire [3:0] slice,     // bits [5:2] of another scope's vector
-	output wire [25:0] ctl_q
+	output wire [29:0] ctl_q
 );
-	assign ctl_q = {vec, bits, \din[1] , tied, slice};
+	assign ctl_q = {vec, bits, \din[1] , \part[1][1] , tied, slice};
 endmodule

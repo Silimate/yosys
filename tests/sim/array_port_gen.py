@@ -10,6 +10,9 @@ Verific splits it into (`\\coeffs[-1]`, `\\grid[1][0]`) from each of them:
   vector     the array flattened into one vector              coeffs [8:0]
   rows       each outer element flattened (2-D only)          grid[1] [11:0], grid[0] [k]
 
+The controls dump holds shapes that bound before, including elements whose siblings are not
+ports of the module (`\\din[1]`, `\\part[1][1]`), placed by last index as 0-based words.
+
 Flattened shapes pack elements the SystemVerilog way: the left declared bound of every
 dimension is most significant, so `coeffs [0:-2]` puts [-2] in the low bits and `offs [1:3]`
 puts [3] there. The dumped outputs are those same packings, so `sim -sim-cmp` catches an element
@@ -168,13 +171,17 @@ def controls(path):
     din = lambda s: format((0xC3 ^ (s * 0x11)) & 0xFF, "08b")  # din[1], bits 15..8 of the dump
     din0 = lambda s: "10010110"  # din[0], not a port of the module
     src = lambda s: format((0x96 + 29 * s) & 0xFF, "08b")
+    part = lambda s: format((0x9 + 7 * s) & 0xF, "04b")  # part[1][1], bits 7..4 of row part[1]
+    row = lambda s: "0110" + part(s) + "1100"  # part[1][2] and part[1][0] are not ports
     dump.var("vec", 8, vec)
     dump.var("bits", 1, lambda s: bitv(s)[0], vrange="[1]")
     dump.var("bits", 1, lambda s: bitv(s)[1], vrange="[0]")
     for k in range(16):
         dump.var(f"din[{k}]", 1, lambda s, k=k: (din(s) + din0(s))[15 - k], vrange="")
+    for k in reversed(range(12)):
+        dump.var("part[1]", 1, lambda s, k=k: row(s)[11 - k], vrange=f"[{k}]")
     dump.var("src", 8, src, scope="tb")
-    dump.var("ctl_q", 26, lambda s: vec(s) + bitv(s) + din(s) + "1010" + src(s)[2:6])
+    dump.var("ctl_q", 30, lambda s: vec(s) + bitv(s) + din(s) + part(s) + "1010" + src(s)[2:6])
     dump.write(path)
 
 
