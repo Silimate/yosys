@@ -1205,8 +1205,10 @@ struct OptVpsWorker
 
 		// Tabulated against cells about to be retired.
 		gather_ce.reset();
-		for (auto cell : gather_dead)
+		for (auto cell : gather_dead) {
+			tabulated.erase(cell);
 			remove_cell(cell);
+		}
 		gather_dead.clear();
 	}
 
@@ -1389,59 +1391,96 @@ struct OptVpsWorker
 		return true;
 	}
 
-	// The select's leaves and its value under every assignment to them. False
-	// when it depends on more than max_leaves bits, runs through something
+	// The select's leaves and its value under every assignment to them. Leaves
+	// the value never depends on are dropped, so the table is keyed on what
+	// matters and a rebuilt read is no larger than it has to be. False when the
+	// select depends on more than max_leaves bits, runs through something
 	// ConstEval cannot model, or would exhaust the evaluation budget.
 	bool tabulate_select(ConstEval &ce, const SigSpec &sel, int max_leaves,
 			     SigSpec &leaves, std::vector<int64_t> &entry)
 	{
+		SigSpec all;
 		int cone_cells = 0;
-		if (!cone_leaves(sel, max_leaves, leaves, cone_cells) || leaves.empty())
+		if (!cone_leaves(sel, max_leaves, all, cone_cells) || all.empty())
 			return false;
-		int k = GetSize(leaves);
+		int k = GetSize(all);
 		int64_t cost = (int64_t(1) << k) * std::max(cone_cells, 1);
 		if (cost > small_support_eval_budget)
 			return false;
 		small_support_eval_budget -= cost;
 
-		entry.clear();
+		std::vector<int64_t> full;
 		for (int64_t v = 0; v < (int64_t(1) << k); v++) {
 			ce.push();
-			ce.set(leaves, Const(v, k));
+			ce.set(all, Const(v, k));
 			SigSpec s = sel, undef;
 			bool ok = ce.eval(s, undef) && s.is_fully_def();
 			if (ok)
-				entry.push_back(s.as_const().as_int());
+				full.push_back(s.as_const().as_int());
 			ce.pop();
 			if (!ok)
 				return false;
 		}
+
+		std::vector<int> kept;
+		for (int b = 0; b < k; b++)
+			for (int64_t v = 0; v < (int64_t(1) << k); v++)
+				if (full[v] != full[v ^ (int64_t(1) << b)]) {
+					kept.push_back(b);
+					break;
+				}
+		leaves = SigSpec();
+		for (int b : kept)
+			leaves.append(all[b]);
+		entry.clear();
+		for (int64_t r = 0; r < (int64_t(1) << GetSize(kept)); r++) {
+			int64_t v = 0;
+			for (int i = 0; i < GetSize(kept); i++)
+				if ((r >> i) & 1)
+					v |= int64_t(1) << kept[i];
+			entry.push_back(full[v]);
+		}
 		return true;
 	}
+
+	// Tabulations the gather phase already paid for, so the rebuild that follows
+	// it does not charge the budget for the same reads twice. Entries for cells the
+	// gather phase retires are dropped before the cells go.
+	dict<Cell *, std::pair<SigSpec, std::vector<int64_t>>> tabulated;
 
 	// A live $bmux read whose select has fewer leaves than bits, tabulated.
 	bool narrow_read(ConstEval &ce, Cell *cell, SigSpec &leaves, std::vector<int64_t> &entry)
 	{
 		if (cell->type != ID($bmux) || removed_cells.count(cell))
 			return false;
+		auto it = tabulated.find(cell);
+		if (it != tabulated.end()) {
+			leaves = it->second.first;
+			entry = it->second.second;
+			return true;
+		}
 		int sw = cell->getParam(ID::S_WIDTH).as_int();
 		if (sw < 2 || sw > 24 || cell->getParam(ID::WIDTH).as_int() < 1)
 			return false;
 		SigSpec sel = sigmap(cell->getPort(ID::S));
 		if (sel.is_fully_const())
 			return false;
-		return tabulate_select(ce, sel, std::min(read_support, sw - 1), leaves, entry);
+		if (!tabulate_select(ce, sel, std::min(read_support, sw - 1), leaves, entry))
+			return false;
+		tabulated[cell] = {leaves, entry};
+		return true;
 	}
 
 	// Whether a modular gather group is cheaper as narrow reads than as the
 	// barrel emit_modular_gather() would build, both counted in 2:1 muxes per
-	// element bit. A narrow read costs one fewer than its distinct entries. The
-	// barrel costs a src_w-wide level per amount bit that actually varies: one
-	// that does not is a wire once its constant propagates, so `ptr * 32 + i`,
-	// a 7-bit amount taking four values, keeps two levels, not seven. Its last
-	// levels are narrower than src_w once ABC drops unread outputs, so this is
-	// the barrel's upper bound, which only ever tips a close call toward the
-	// narrow reads. Keeps the barrel unless every read in the group rebuilds.
+	// element bit. A narrow read keyed on k leaves costs 2^k-1: bmuxmap builds the
+	// whole tree, repeated entries and all, so its distinct entries are not the
+	// price. The barrel costs a src_w-wide level per amount bit that actually
+	// varies: one that does not is a wire once its constant propagates, so
+	// `ptr * 32 + i`, a 7-bit amount taking four values, keeps two levels, not
+	// seven. Its last levels are narrower than src_w once ABC drops unread
+	// outputs, so the barrel side is an upper bound; the narrow side is exact.
+	// Keeps the barrel unless every read in the group rebuilds.
 	bool narrow_reads_cheaper(const std::vector<GatherCand> &cands, int64_t M, int64_t lomod,
 				  int amt_bits, int64_t src_w, int64_t &narrow, int64_t &barrel)
 	{
@@ -1453,7 +1492,7 @@ struct OptVpsWorker
 			std::vector<int64_t> entry;
 			if (!narrow_read(*gather_ce, cands[i].cell, leaves, entry))
 				return false;
-			narrow += GetSize(pool<int64_t>(entry.begin(), entry.end())) - 1;
+			narrow += GetSize(entry) - 1;
 			// The barrel's amount is the lowest-constant member's index less
 			// lomod; cands arrive sorted, so that member is the first.
 			if (i == 0) {
@@ -1514,6 +1553,9 @@ struct OptVpsWorker
 			small_support_entries_before += int64_t(1) << sw;
 			small_support_entries_after += GetSize(distinct);
 		}
+
+		// The rebuilt cells are gone; nothing may look them up again.
+		tabulated.clear();
 
 		if (small_support_reads) {
 			log("  VPS small-support reads: %d $bmux, %lld reachable of %lld table entries\n",
