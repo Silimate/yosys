@@ -144,6 +144,52 @@ static std::string remove_spaces(std::string str)
 	return str;
 }
 
+// Index `prefix + name` by full name and, when it ends in an address, as a memory word.
+// With `keep_existing`, a key that is already indexed is left pointing where it was.
+static void index_name(FstIndex &idx, const std::string &prefix, const std::string &name, fstHandle id,
+		bool keep_existing)
+{
+	auto add_word = [&](const std::string &mem, int addr) {
+		auto &words = idx.memory_to_handle[mem];
+		if (!keep_existing || !words.count(addr))
+			words[addr] = id;
+	};
+
+	// Handle memory addresses
+	size_t pos = name.find_last_of("<");
+	if (pos != std::string::npos && name.back() == '>') {
+		std::string mem_cell = name.substr(0, pos);
+		normalize_brackets(mem_cell);
+		std::string addr = name.substr(pos+1);
+		addr.pop_back(); // remove closing bracket
+		char *endptr;
+		int mem_addr = strtol(addr.c_str(), &endptr, 16);
+		if (*endptr) {
+			log_debug("Error parsing memory address in : %s\n", name);
+		} else {
+			add_word(prefix + mem_cell, mem_addr);
+		}
+	}
+	pos = name.find_last_of("[");
+	if (pos != std::string::npos && name.back() == ']') {
+		std::string mem_cell = name.substr(0, pos);
+		normalize_brackets(mem_cell);
+		std::string addr = name.substr(pos+1);
+		addr.pop_back(); // remove closing bracket
+		char *endptr;
+		int mem_addr = strtol(addr.c_str(), &endptr, 10);
+		if (*endptr) {
+			log_debug("Error parsing memory address in : %s\n", name);
+		} else {
+			add_word(prefix + mem_cell, mem_addr);
+		}
+	}
+	std::string clean_name = name;
+	normalize_brackets(clean_name);
+	if (!keep_existing || !idx.name_to_handle.count(prefix + clean_name))
+		idx.name_to_handle[prefix + clean_name] = id;
+}
+
 void FstData::registerVar(FstIndex &idx, const FstVar &var)
 {
 	idx.vars.push_back(var);
@@ -164,37 +210,21 @@ void FstData::registerVar(FstIndex &idx, const FstVar &var)
 		}
 	}
 
-	// Handle memory addresses
-	size_t pos = clean_name.find_last_of("<");
-	if (pos != std::string::npos && clean_name.back() == '>') {
-		std::string mem_cell = clean_name.substr(0, pos);
-		normalize_brackets(mem_cell);
-		std::string addr = clean_name.substr(pos+1);
-		addr.pop_back(); // remove closing bracket
-		char *endptr;
-		int mem_addr = strtol(addr.c_str(), &endptr, 16);
-		if (*endptr) {
-			log_debug("Error parsing memory address in : %s\n", clean_name);
-		} else {
-			idx.memory_to_handle[var.scope+"."+mem_cell][mem_addr] = var.id;
-		}
+	index_name(idx, var.scope + ".", clean_name, var.id, false);
+
+	// A dumper that opens a scope per array index dumps element `x[7][1]` as `[1]` inside scope
+	// `x[7]` (or as `[7][1]` inside `x`). Index it under the joined name as well, so a lookup by
+	// the element's own name finds it; a signal really dumped under that name keeps precedence.
+	std::string full = var.scope + "." + clean_name;
+	normalize_brackets(full);
+	if (full.find(".[") != std::string::npos) {
+		std::string joined;
+		joined.reserve(full.size());
+		for (size_t i = 0; i < full.size(); i++)
+			if (full[i] != '.' || i + 1 == full.size() || full[i + 1] != '[')
+				joined += full[i];
+		index_name(idx, "", joined, var.id, true);
 	}
-	pos = clean_name.find_last_of("[");
-	if (pos != std::string::npos && clean_name.back() == ']') {
-		std::string mem_cell = clean_name.substr(0, pos);
-		normalize_brackets(mem_cell);
-		std::string addr = clean_name.substr(pos+1);
-		addr.pop_back(); // remove closing bracket
-		char *endptr;
-		int mem_addr = strtol(addr.c_str(), &endptr, 10);
-		if (*endptr) {
-			log_debug("Error parsing memory address in : %s\n", clean_name);
-		} else {
-			idx.memory_to_handle[var.scope+"."+mem_cell][mem_addr] = var.id;
-		}
-	}
-	normalize_brackets(clean_name);
-	idx.name_to_handle[var.scope+"."+clean_name] = var.id;
 }
 
 void FstData::extractVarNames(FstIndex &idx)

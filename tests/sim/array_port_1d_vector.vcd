@@ -1,0 +1,34 @@
+$timescale 1ns $end
+$scope module tb $end
+$scope module dut $end
+$var wire 9 ! coeffs [8:0] $end
+$var wire 6 " offs [5:0] $end
+$var wire 12 # asc [11:0] $end
+$var wire 9 $ coeffs_q [8:0] $end
+$var wire 6 % offs_q [5:0] $end
+$var wire 12 & asc_q [11:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+b011110001 !
+b111001 "
+b001101101001 #
+b011110001 $
+b111001 %
+b001101101001 &
+#10
+b000011110 !
+b001110 "
+b100010111110 #
+b000011110 $
+b001110 %
+b100010111110 &
+#20
+b101000011 !
+b010011 "
+b110100000011 #
+b101000011 $
+b010011 %
+b110100000011 &
+#30
