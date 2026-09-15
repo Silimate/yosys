@@ -1,0 +1,38 @@
+$timescale 1ns $end
+$scope module tb $end
+$scope module dut $end
+$var wire 1 ! clk $end
+$var wire 2 " d [1:0] $end
+$scope module u0 $end
+$var wire 1 ! clk $end
+$var wire 2 " d [1:0] $end
+$scope begin mem $end
+$var reg 2 # [0] [1:0] $end
+$var reg 2 $ [1] [1:0] $end
+$upscope $end
+$upscope $end
+$scope module u1 $end
+$var wire 1 ! clk $end
+$var wire 2 " d [1:0] $end
+$scope begin mem $end
+$var reg 2 % [0] [1:0] $end
+$var reg 2 & [1] [1:0] $end
+$upscope $end
+$upscope $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+0!
+b00 "
+b00 #
+b00 $
+b00 %
+b00 &
+#5
+1!
+b01 "
+b01 $
+b10 &
+#10
+0!

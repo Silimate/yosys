@@ -392,23 +392,74 @@ std::string YOSYS_NAMESPACE_PREFIX rtl_bind_compress(const std::vector<RtlBindBi
 	return out;
 }
 
-// Keep only some of a width-bit cell's rtl_bind entries (the Q bits in `bits`)
+// `rtl_bind_status` runs, one word per Q bit: "bound*2 absent" -> bound, bound, absent
+std::vector<std::string> YOSYS_NAMESPACE_PREFIX rtl_bind_status_expand(const std::string &value)
+{
+	std::vector<std::string> bits;
+	std::istringstream tokens(value);
+	for (std::string token; tokens >> token;) {
+		size_t star = token.find('*');
+		std::string status = token.substr(0, star), count = star == std::string::npos ? "1" : token.substr(star + 1);
+		bool known = std::any_of(std::begin(RTL_BIND_STATUS_WORDS), std::end(RTL_BIND_STATUS_WORDS),
+				[&](const char *word) { return status == word; });
+		if (!known || count.empty() || count.size() > 7 || count.find_first_not_of("0123456789") != std::string::npos)
+			return {}; // malformed: drop the whole attribute
+		// an empty run, or one longer than any cell, is malformed too and must not allocate its length
+		int n = atoi(count.c_str());
+		if (n == 0 || bits.size() + n > (1 << 20))
+			return {};
+		bits.insert(bits.end(), n, status);
+	}
+	return bits;
+}
+
+// Inverse of expand: merge each run of one status into status*count
+std::string YOSYS_NAMESPACE_PREFIX rtl_bind_status_compress(const std::vector<std::string> &bits)
+{
+	std::string out;
+	for (size_t i = 0, j; i < bits.size(); i = j) {
+		for (j = i + 1; j < bits.size() && bits[j] == bits[i]; j++);
+		if (!out.empty())
+			out += ' ';
+		out += bits[i];
+		if (j - i > 1)
+			out += "*" + std::to_string(j - i);
+	}
+	return out;
+}
+
+// Keep only some of a width-bit cell's rtl_bind and rtl_bind_status entries (the Q bits in `bits`)
 void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, const std::vector<int> &bits)
 {
 	auto it = attributes.find(ID(rtl_bind));
-	if (it == attributes.end())
-		return;
-	std::vector<RtlBindBit> all = rtl_bind_expand(it->second.decode_string());
-	if (GetSize(all) != width) {
-		attributes.erase(it); // string does not match this cell; drop it rather than lie
-		return;
+	if (it != attributes.end()) {
+		std::vector<RtlBindBit> all = rtl_bind_expand(it->second.decode_string());
+		if (GetSize(all) != width) {
+			attributes.erase(it); // string does not match this cell; drop it rather than lie
+		} else {
+			std::vector<RtlBindBit> kept;
+			for (int b : bits) {
+				log_assert(b >= 0 && b < width);
+				kept.push_back(all[b]); // parent Q bit b becomes the next bit of the slice
+			}
+			it->second = Const(rtl_bind_compress(kept));
+		}
 	}
-	std::vector<RtlBindBit> kept;
-	for (int b : bits) {
-		log_assert(b >= 0 && b < width);
-		kept.push_back(all[b]); // parent Q bit b becomes the next bit of the slice
+
+	it = attributes.find(ID(rtl_bind_status));
+	if (it != attributes.end()) {
+		std::vector<std::string> all = rtl_bind_status_expand(it->second.decode_string());
+		if (GetSize(all) != width) {
+			attributes.erase(it);
+		} else {
+			std::vector<std::string> kept;
+			for (int b : bits) {
+				log_assert(b >= 0 && b < width);
+				kept.push_back(all[b]);
+			}
+			it->second = Const(rtl_bind_status_compress(kept));
+		}
 	}
-	it->second = Const(rtl_bind_compress(kept));
 }
 
 // Same as above for a contiguous [lsb, msb] slice
