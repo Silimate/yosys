@@ -1,0 +1,131 @@
+# Forward moves across $logic_and, $logic_or, $logic_not, $eqx and $nex.
+#
+# Same rule as the comparators in opt_retime_ops.ys: a pure function of two
+# registered operands, narrowing the register it leaves behind to one bit. What
+# splits this file in two is the initial state, exactly as it splits that one.
+# A move leaves the register holding f(state) rather than state, so
+# -set-init-zero is only a fair comparison when f maps the all-zero state to
+# zero. Checked with opt -full on constant-zero inputs:
+#
+#   $logic_and, $logic_or, $nex     all 0, zero-init ok
+#   $logic_not, $eqx                1 on the zero state, need the init mapped
+#
+# The second group is the interesting one: $eqx is in it for the same reason
+# $eq is, being true on two equal zero operands, and $logic_not because it
+# inverts.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$logic_and, \$logic_or and \$nex"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module logiczero(input clk, input [7:0] a, b, c, d, e, g, output qa, qo, qn);
+  wire [7:0] ra, rb, rc, rd, re, rg;
+  wire ya, yo, yn;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(clk), .D(g), .Q(rg));
+  $logic_and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    l_and (.A(ra), .B(rb), .Y(ya));
+  $logic_or #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    l_or (.A(rc), .B(rd), .Y(yo));
+  $nex #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    c_nex (.A(re), .B(rg), .Y(yn));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqa (.CLK(clk), .D(ya), .Q(qa));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqo (.CLK(clk), .D(yo), .Q(qo));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqn (.CLK(clk), .D(yn), .Q(qn));
+endmodule
+EOF
+hierarchy -top logiczero
+check -assert
+select -assert-count 9 t:$dff
+design -save orig
+opt_retime -flop fa -cut l_and -forward
+opt_retime -flop fc -cut l_or -forward
+opt_retime -flop fe -cut c_nex -forward
+check -assert
+# each cut merged its second operand away and narrowed its survivor from 8
+# bits to 1: 9 registers become 6, and 51 register bits become 6
+select -assert-count 6 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fd
+select -assert-count 0 c:fg
+select -assert-count 1 c:l_and %x:+[A] w:a %i
+select -assert-count 1 c:l_and %x:+[B] w:b %i
+select -assert-count 1 c:l_and %x:+[Y] w:fa_retimed %i
+select -assert-count 1 c:fa %x:+[Q] w:ya %i
+select -assert-count 1 c:l_or %x:+[A] w:c %i
+select -assert-count 1 c:l_or %x:+[B] w:d %i
+select -assert-count 1 c:fc %x:+[Q] w:yo %i
+select -assert-count 1 c:c_nex %x:+[A] w:e %i
+select -assert-count 1 c:c_nex %x:+[B] w:g %i
+select -assert-count 1 c:fe %x:+[Q] w:yn %i
+rename logiczero gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$logic_not and \$eqx, whose zero state is one"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module logicones(input clk, input [7:0] a, b, c, output qn, qe);
+  wire [7:0] ra, rb, rc;
+  wire yn, ye;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $logic_not #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0)) l_not (.A(ra), .Y(yn));
+  $eqx #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    c_eqx (.A(rb), .B(rc), .Y(ye));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqn (.CLK(clk), .D(yn), .Q(qn));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fqe (.CLK(clk), .D(ye), .Q(qe));
+endmodule
+EOF
+hierarchy -top logicones
+check -assert
+select -assert-count 5 t:$dff
+design -save orig
+opt_retime -flop fa -cut l_not -forward
+opt_retime -flop fb -cut c_eqx -forward
+check -assert
+# $logic_not is unary and merges nothing; $eqx merges fc. Both narrow their
+# survivor from 8 bits to 1, so 5 registers become 4 and 26 bits become 4.
+select -assert-count 4 t:$dff
+select -assert-count 0 c:fc
+select -assert-count 1 c:l_not %x:+[A] w:a %i
+select -assert-count 1 c:l_not %x:+[Y] w:fa_retimed %i
+select -assert-count 1 c:fa %x:+[Q] w:yn %i
+select -assert-count 1 c:c_eqx %x:+[A] w:b %i
+select -assert-count 1 c:c_eqx %x:+[B] w:c %i
+select -assert-count 1 c:fb %x:+[Q] w:ye %i
+rename logicones gate
+# Both survivors hold a value the all-zero state does not produce, so the two
+# designs only line up if the initial state is pushed through the cell: 8'h00
+# becomes 1'b1 on the $logic_not, and on the $eqx because two equal zero
+# operands are identical. -set-init-zero would compare 0 against those and
+# fail on the first cycle with no input stimulus at all.
+setattr -set init 1'b1 gate/w:yn
+setattr -set init 1'b1 gate/w:ye
+setattr -set init 1'b0 gate/w:qn
+setattr -set init 1'b0 gate/w:qe
+design -import orig -as gold
+setattr -set init 8'h00 gold/w:ra
+setattr -set init 8'h00 gold/w:rb
+setattr -set init 8'h00 gold/w:rc
+setattr -set init 1'b0 gold/w:qn
+setattr -set init 1'b0 gold/w:qe
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop

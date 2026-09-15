@@ -127,21 +127,24 @@ log -pop
 
 # ---------------------------------------------------------------------------
 # logger -expect error exits yosys successfully, so this has to come last.
-# $div is a pure function of two operands the same way $mul is; it is left
-# out of the forward allowlist until something tests it.
-log -header "Refused: forward across \$div"
+# $div used to sit here as a type left out of the allowlist; it is a forward
+# cut now, proved in opt_retime_arith.ys. What is still refused is a gate-level
+# cut, and that one is a boundary rather than a to-do: this pass retimes
+# word-level IR, before splitcells, so a $_AND_ is not something it expects to
+# meet. The same move on the $and this gate would come from is in
+# opt_retime_cmp.ys.
+log -header "Refused: forward across a gate-level \$_AND_"
 design -reset
 read_verilog -icells <<EOF
-module divcut(input clk, input [7:0] a, b, output [7:0] q);
-  wire [7:0] ra, rb, y;
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
-  $div #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
-    d0 (.A(ra), .B(rb), .Y(y));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+module gatecut(input clk, input a, b, output q);
+  wire ra, rb, y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $_AND_ g0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
 endmodule
 EOF
-hierarchy -top divcut
+hierarchy -top gatecut
 check -assert
 logger -expect error "which opt_retime cannot move across yet" 1
-opt_retime -flop fa -cut d0 -forward
+opt_retime -flop fa -cut g0 -forward

@@ -1,0 +1,126 @@
+# Forward moves across the selects beyond $mux: $pmux, $bwmux, $bmux, $demux.
+#
+# $mux is in opt_retime_mux.ys, and the rule there carries over unchanged: a
+# select is a data input like any other, because reg(S) ? reg(B) : reg(A)
+# equals reg(S ? B : A) only when S is registered too. What these four add is
+# that the select is not always a third operand. $bmux and $demux index with S
+# where the arithmetic cells take a B, so the pass lists them {A, S}, and
+# CellTypes::eval has to be handed the operands in that order or it folds the
+# table against itself.
+#
+# Every register here starts at a defined value chosen so the folded result
+# could not have come from any other port. $pmux picks arm 1 of three that are
+# all different from its default; $bmux picks entry 2 of four; $demux lands its
+# operand in block 1 of four; and $bwmux takes alternating bits from two
+# operands that share no bits. A port order that fell back on the $mux layout
+# would still produce a netlist, and would still move; these are the assertions
+# that would catch it.
+#
+# $pmux is deliberately entered on A with its whole packed B registered, one
+# arm per select bit. Registering only the arm the select picks would be a
+# smaller move, and is not one the pass makes for $mux either.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$pmux, \$bwmux, \$bmux and \$demux"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module selops(input clk,
+              input [7:0] pa, input [23:0] pb, input [2:0] ps,
+              input [7:0] wa, wb, ws,
+              input [31:0] ba, input [1:0] bs,
+              input [7:0] da, input [1:0] ds,
+              output [7:0] qp, qw, qb, output [31:0] qd);
+  (* init = 8'h11 *)       wire [7:0] rpa;
+  (* init = 24'h332211 *)  wire [23:0] rpb;
+  (* init = 3'b010 *)      wire [2:0] rps;
+  (* init = 8'h0f *)       wire [7:0] rwa;
+  (* init = 8'hf0 *)       wire [7:0] rwb;
+  (* init = 8'haa *)       wire [7:0] rws;
+  (* init = 32'h44332211 *) wire [31:0] rba;
+  (* init = 2'd2 *)        wire [1:0] rbs;
+  (* init = 8'hab *)       wire [7:0] rda;
+  (* init = 2'd1 *)        wire [1:0] rds;
+  wire [7:0] yp, yw, yb;
+  wire [31:0] yd;
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fpa (.CLK(clk), .D(pa), .Q(rpa));
+  $dff #(.WIDTH(24), .CLK_POLARITY(1'b1)) fpb (.CLK(clk), .D(pb), .Q(rpb));
+  $dff #(.WIDTH(3),  .CLK_POLARITY(1'b1)) fps (.CLK(clk), .D(ps), .Q(rps));
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fwa (.CLK(clk), .D(wa), .Q(rwa));
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fwb (.CLK(clk), .D(wb), .Q(rwb));
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fws (.CLK(clk), .D(ws), .Q(rws));
+  $dff #(.WIDTH(32), .CLK_POLARITY(1'b1)) fba (.CLK(clk), .D(ba), .Q(rba));
+  $dff #(.WIDTH(2),  .CLK_POLARITY(1'b1)) fbs (.CLK(clk), .D(bs), .Q(rbs));
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fda (.CLK(clk), .D(da), .Q(rda));
+  $dff #(.WIDTH(2),  .CLK_POLARITY(1'b1)) fds (.CLK(clk), .D(ds), .Q(rds));
+  $pmux  #(.WIDTH(8), .S_WIDTH(3)) m_p (.A(rpa), .B(rpb), .S(rps), .Y(yp));
+  $bwmux #(.WIDTH(8))              m_w (.A(rwa), .B(rwb), .S(rws), .Y(yw));
+  $bmux  #(.WIDTH(8), .S_WIDTH(2)) m_b (.A(rba), .S(rbs), .Y(yb));
+  $demux #(.WIDTH(8), .S_WIDTH(2)) m_d (.A(rda), .S(rds), .Y(yd));
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fqp (.CLK(clk), .D(yp), .Q(qp));
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fqw (.CLK(clk), .D(yw), .Q(qw));
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fqb (.CLK(clk), .D(yb), .Q(qb));
+  $dff #(.WIDTH(32), .CLK_POLARITY(1'b1)) fqd (.CLK(clk), .D(yd), .Q(qd));
+endmodule
+EOF
+hierarchy -top selops
+# miter -make_assert compares cycle 0, and two undefined registers are
+# independent free variables that need not agree there, so the observing
+# registers need a defined start as well. Set before the save, so gold and
+# gate get the same one.
+setattr -set init 8'h00 w:qp
+setattr -set init 8'h00 w:qw
+setattr -set init 8'h00 w:qb
+setattr -set init 32'h00000000 w:qd
+check -assert
+select -assert-count 14 t:$dff
+design -save orig
+opt_retime -flop fpa -cut m_p -forward
+opt_retime -flop fwa -cut m_w -forward
+opt_retime -flop fba -cut m_b -forward
+opt_retime -flop fda -cut m_d -forward
+check -assert
+# $pmux and $bwmux merge two operands each, $bmux and $demux one each:
+# 14 registers become 8. The widths move both ways, $bmux narrowing its
+# survivor from 32 bits to 8 and $demux widening its own from 8 to 32.
+select -assert-count 8 t:$dff
+select -assert-count 0 c:fpb
+select -assert-count 0 c:fps
+select -assert-count 0 c:fwb
+select -assert-count 0 c:fws
+select -assert-count 0 c:fbs
+select -assert-count 0 c:fds
+# S is 3'b010, so the $pmux takes arm 1 of its packed B, which is 8'h22.
+# Its default A is 8'h11 and the other two arms are 8'h11 and 8'h33.
+select -assert-count 1 w:yp a:init=8'h22 %i
+# S is 8'haa, so the $bwmux takes the odd bits of B (8'hf0) and the even bits
+# of A (8'h0f), which interleave to 8'ha5. Either operand alone is not that.
+select -assert-count 1 w:yw a:init=8'ha5 %i
+# S is 2'd2, so the $bmux takes entry 2 of four 8-bit entries, which is 8'h33.
+select -assert-count 1 w:yb a:init=8'h33 %i
+# S is 2'd1, so the $demux lands 8'hab in block 1 and zeroes the rest.
+select -assert-count 1 w:yd a:init=32'h0000ab00 %i
+select -assert-count 0 w:rpa a:init %i
+select -assert-count 0 w:rba a:init %i
+select -assert-count 1 c:m_p %x:+[A] w:pa %i
+select -assert-count 1 c:m_p %x:+[B] w:pb %i
+select -assert-count 1 c:m_p %x:+[S] w:ps %i
+select -assert-count 1 c:fpa %x:+[Q] w:yp %i
+select -assert-count 1 c:m_w %x:+[A] w:wa %i
+select -assert-count 1 c:m_w %x:+[B] w:wb %i
+select -assert-count 1 c:m_w %x:+[S] w:ws %i
+select -assert-count 1 c:fwa %x:+[Q] w:yw %i
+select -assert-count 1 c:m_b %x:+[A] w:ba %i
+select -assert-count 1 c:m_b %x:+[S] w:bs %i
+select -assert-count 1 c:fba %x:+[Q] w:yb %i
+select -assert-count 1 c:m_d %x:+[A] w:da %i
+select -assert-count 1 c:m_d %x:+[S] w:ds %i
+select -assert-count 1 c:fda %x:+[Q] w:yd %i
+rename selops gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop

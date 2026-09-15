@@ -1,5 +1,5 @@
-# Design test for opt_retime_shift.v: $shl/$shr/$sshl/$sshr as cuts. Forward
-# moves only.
+# Design test for opt_retime_shift.v: $shl/$shr/$sshl/$sshr as cuts, plus
+# $shift and $shiftx. Forward moves only.
 #
 # No new rule here. reg(A) >> reg(B) equals reg(A >> B) when both are
 # registered, so the amount is a data input that merges like a $mux select,
@@ -200,6 +200,72 @@ miter -equiv -flatten -make_assert gold gate miter
 hierarchy -top miter
 proc; opt
 sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$shift with a signed amount, and \$shiftx"
+log -push
+design -reset
+# The two shifts whose amount is not just a count. $shift takes a signed B, so
+# a negative amount shifts the other way, and $shiftx fills from outside A with
+# x rather than zero. Both fold through the same path as $shr, so what these
+# assertions are for is the amount: an amount register that folded as unsigned
+# would shift 8'h0f right by 15 and leave nothing behind.
+read_verilog -icells <<EOF
+module varshift(input clk, input [7:0] a, b, input [3:0] sh, input [1:0] xs,
+                output [7:0] qs, output [3:0] qx);
+  (* init = 8'h0f *) wire [7:0] ra;
+  (* init = 4'hf *)  wire [3:0] rsh;
+  (* init = 8'hdb *) wire [7:0] rb;
+  (* init = 2'd2 *)  wire [1:0] rxs;
+  wire [7:0] ys;
+  wire [3:0] yx;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa  (.CLK(clk), .D(a),  .Q(ra));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fsh (.CLK(clk), .D(sh), .Q(rsh));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb  (.CLK(clk), .D(b),  .Q(rb));
+  $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fxs (.CLK(clk), .D(xs), .Q(rxs));
+  $shift #(.A_WIDTH(8), .B_WIDTH(4), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(1))
+    s0 (.A(ra), .B(rsh), .Y(ys));
+  $shiftx #(.A_WIDTH(8), .B_WIDTH(2), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(rb), .B(rxs), .Y(yx));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqs (.CLK(clk), .D(ys), .Q(qs));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fqx (.CLK(clk), .D(yx), .Q(qx));
+endmodule
+EOF
+hierarchy -top varshift
+setattr -set init 8'h00 w:qs
+setattr -set init 4'h0 w:qx
+check -assert
+select -assert-count 6 t:$dff
+design -save orig
+opt_retime -flop fa -cut s0 -forward
+opt_retime -flop fb -cut x0 -forward
+check -assert
+# each shift merges its amount register away: 6 registers become 4
+select -assert-count 4 t:$dff
+select -assert-count 0 c:fsh
+select -assert-count 0 c:fxs
+# 4'hf as a signed amount is -1, so $shift moves 8'h0f left by one to 8'h1e.
+# Read as unsigned it would be a right shift by 15, leaving 8'h00.
+select -assert-count 1 w:ys a:init=8'h1e %i
+# 8'hdb is 8'b11011011 and $shiftx takes the 4 bits at offset 2, which are
+# 4'b0110. The amount is small enough that nothing is filled from outside A.
+select -assert-count 1 w:yx a:init=4'h6 %i
+select -assert-count 0 w:ra a:init %i
+select -assert-count 0 w:rb a:init %i
+select -assert-count 1 c:s0 %x:+[A] w:a %i
+select -assert-count 1 c:s0 %x:+[B] w:sh %i
+select -assert-count 1 c:fa %x:+[Q] w:ys %i
+select -assert-count 1 c:x0 %x:+[A] w:b %i
+select -assert-count 1 c:x0 %x:+[B] w:xs %i
+select -assert-count 1 c:fb %x:+[Q] w:yx %i
+rename varshift gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
 design -reset
 log -pop
 

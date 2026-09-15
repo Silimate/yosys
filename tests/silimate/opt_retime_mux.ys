@@ -109,7 +109,8 @@ log -pop
 # If S were dropped from the cut's data inputs, this move would be accepted and
 # would silently change when the output samples sel.
 #
-# TODO: a $pmux design once this is settled; a one-hot select changes the rules.
+# $pmux, $bwmux, $bmux and $demux are in opt_retime_select.ys, and this same
+# rule is what puts their selects on the data-input list too.
 log -header "Refused: the select has to be registered too"
 log -push
 design -reset

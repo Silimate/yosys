@@ -41,21 +41,36 @@ bool is_buf(Cell *cell)
 // conventionally called control: a $mux select is listed here because
 // reg(S) ? reg(B) : reg(A) equals reg(S ? B : A) only when S is registered too.
 //
-// The same holds for $logic_and, $eqx, $neg and so on: one entry each, left out
-// until something tests them. Gate-level $_AND_/$_NOR_/$_AOI* cells are not
-// listed: this pass retimes word-level IR, before splitcells.
+// The list is also the argument order fold_value hands to CellTypes::eval, so a
+// type whose eval reads its operands in a different order has to be listed in
+// that order rather than alphabetically: $bmux and $demux index with S where
+// the arithmetic cells take a second operand, and are listed {A, S} for that
+// reason. $slice reads its OFFSET off the cell, so its one data input is A.
+//
+// Gate-level $_AND_/$_NOR_/$_AOI* cells are not listed: this pass retimes
+// word-level IR, before splitcells.
 std::vector<IdString> data_inputs(Cell *cell)
 {
 	if (cell->type.in(ID($buf), ID($_BUF_)))
 		return {ID::A};
-	if (cell->type.in(ID($not), ID($reduce_and), ID($reduce_or),
-			ID($reduce_xor), ID($reduce_xnor), ID($reduce_bool)))
+	if (cell->type.in(ID($not), ID($neg), ID($pos), ID($logic_not), ID($slice),
+			ID($reduce_and), ID($reduce_or), ID($reduce_xor),
+			ID($reduce_xnor), ID($reduce_bool)))
 		return {ID::A};
-	if (cell->type.in(ID($add), ID($sub), ID($mul), ID($and), ID($or), ID($xor),
-			ID($xnor), ID($eq), ID($ne), ID($lt), ID($le), ID($gt),
-			ID($ge), ID($shl), ID($sshl), ID($shr), ID($sshr)))
+	if (cell->type.in(ID($add), ID($sub), ID($mul), ID($div), ID($mod),
+			ID($divfloor), ID($modfloor), ID($pow), ID($and), ID($or),
+			ID($xor), ID($xnor), ID($logic_and), ID($logic_or), ID($eq),
+			ID($ne), ID($eqx), ID($nex), ID($lt), ID($le), ID($gt), ID($ge),
+			ID($shl), ID($sshl), ID($shr), ID($sshr), ID($shift),
+			ID($shiftx), ID($concat)))
 		return {ID::A, ID::B};
-	if (cell->type == ID($mux))
+	if (cell->type.in(ID($bmux), ID($demux)))
+		return {ID::A, ID::S};
+	// $pmux is here on the same terms as $mux: its whole packed B, one arm per
+	// select bit, has to be registered alongside the select. Registering only
+	// the arm the select picks would be a smaller move, and is not one the
+	// pass makes for $mux either.
+	if (cell->type.in(ID($mux), ID($bwmux), ID($pmux)))
 		return {ID::A, ID::B, ID::S};
 	return {};
 }
@@ -1302,7 +1317,7 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 				log_id(flop_name), GetSize(chain), log_id(cut));
 }
 
-void apply_move(Module *module, Cell *flop, Cell *cut)
+void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 {
 	if (!flop->is_builtin_ff())
 		log_cmd_error("Cell %s is not a built-in flip-flop.\n", log_id(flop));
@@ -1547,12 +1562,16 @@ struct OptRetimePass : public Pass {
 		log("        of that port is a sibling flop on the same clock (or a\n");
 		log("        constant). The named flop is then resized to the cut output\n");
 		log("        and the sibling bit-flops are merged. Supported cut types\n");
-		log("        are $buf, $mux, $not, $add, $sub, $mul, $and, $or, $xor,\n");
-		log("        $xnor, $shl, $sshl, $shr, $sshr, the comparators ($eq, $ne,\n");
-		log("        $lt, $le, $gt, $ge) and the $reduce_* cells. Every input of\n");
-		log("        the cut counts as a data input, the $mux select and a shift\n");
-		log("        amount included, so all of them have to be registered or\n");
-		log("        constant.\n");
+		log("        are $buf, $not, $pos, $neg, $slice, $concat, the\n");
+		log("        arithmetic cells ($add, $sub, $mul, $div, $mod, $divfloor,\n");
+		log("        $modfloor, $pow), the bitwise cells ($and, $or, $xor,\n");
+		log("        $xnor), the logic cells ($logic_and, $logic_or,\n");
+		log("        $logic_not), the shifts ($shl, $sshl, $shr, $sshr, $shift,\n");
+		log("        $shiftx), the comparators ($eq, $ne, $eqx, $nex, $lt, $le,\n");
+		log("        $gt, $ge), the $reduce_* cells and the selects ($mux,\n");
+		log("        $pmux, $bwmux, $bmux, $demux). Every input of the cut counts\n");
+		log("        as a data input, a select and a shift amount included, so\n");
+		log("        all of them have to be registered or constant.\n");
 		log("\n");
 		log("    -forward\n");
 		log("        move the register downstream, past -cut. Where the\n");
@@ -1679,7 +1698,7 @@ struct OptRetimePass : public Pass {
 		if (backward)
 			apply_backward_move(module, flop_cell, cut);
 		else
-			apply_move(module, flop_cell, cut);
+			apply_forward_move(module, flop_cell, cut);
 	}
 } OptRetimePass;
 

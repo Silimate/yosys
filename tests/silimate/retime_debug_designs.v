@@ -57,6 +57,34 @@ module signedmul(input clk, input [3:0] a, b, output [7:0] q);
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
 endmodule
 
+// $div (from opt_retime_arith.ys). The same merge as $mul, and here to show
+// that the allowlist is about the port list rather than what the cell
+// computes: nothing in the move cares that a divider is expensive.
+module divcut(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $div #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    d0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// $pmux (from opt_retime_select.ys). The $mux move with a wider select: all
+// three arms are packed into B, so the move merges a 24-bit register and a
+// 3-bit one into the 8-bit survivor. 35 register bits become 8, the largest
+// drop in this file.
+module pmuxcut(input clk, input [7:0] a, input [23:0] b, input [2:0] s,
+               output [7:0] q);
+  wire [7:0] ra, y;
+  wire [23:0] rb;
+  wire [2:0] rs;
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(24), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(3),  .CLK_POLARITY(1'b1)) fs (.CLK(clk), .D(s), .Q(rs));
+  $pmux #(.WIDTH(8), .S_WIDTH(3)) m0 (.A(ra), .B(rb), .S(rs), .Y(y));
+  $dff #(.WIDTH(8),  .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
 // $or and $xor, two independent cones (from opt_retime_cmp.ys). Each move
 // merges its other operand away: 6 registers become 4.
 module bitwise(input clk, input [7:0] a, b, c, d, output [7:0] qo, qx);
@@ -636,15 +664,16 @@ module allconst(input clk, output [7:0] q);
 endmodule
 
 // A cut type that is not on the forward allowlist (from opt_retime_mul.ys).
-// $div is a pure function of two operands the same way $mul is; it is left
-// out until something tests it. $mul is fullmul above.
-module divcut(input clk, input [7:0] a, b, output [7:0] q);
-  wire [7:0] ra, rb, y;
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
-  $div #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
-    d0 (.A(ra), .B(rb), .Y(y));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+// Unlike the other entries here this one is a boundary rather than a to-do:
+// the pass retimes word-level IR, before splitcells, so a gate-level cell is
+// not something it expects to meet. The same move on the $and this gate would
+// come from is bitwise above.
+module gatecut(input clk, input a, b, output q);
+  wire ra, rb, y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $_AND_ g0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
 endmodule
 
 // An async load arriving on a net (from opt_retime_init.ys). A constant AD

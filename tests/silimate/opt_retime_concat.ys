@@ -1,0 +1,76 @@
+# Forward moves across $concat and $slice.
+#
+# These two compute nothing, which is what makes them worth a test of their
+# own. A register moving across them changes width without changing any value,
+# so a fold that dropped the operands in the wrong order, or read $slice's
+# OFFSET as something else, would still produce a netlist of the right size
+# and still pass an equivalence check on the second cycle onward. The initial
+# state is where it would show, so both cuts here start from a value whose
+# every nibble is distinct.
+#
+# $slice is also the one cut whose second operand is a parameter rather than a
+# port, so its entry in the pass is {A} alone and CellTypes::eval reads the
+# OFFSET off the cell.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$concat and \$slice"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module wireops(input clk, input [7:0] a, input [3:0] b, input [7:0] c,
+               output [11:0] qc, output [3:0] qs);
+  (* init = 8'ha5 *) wire [7:0] ra;
+  (* init = 4'h3 *)  wire [3:0] rb;
+  (* init = 8'hdb *) wire [7:0] rc;
+  wire [11:0] yc;
+  wire [3:0] ys;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $concat #(.A_WIDTH(8), .B_WIDTH(4)) k0 (.A(ra), .B(rb), .Y(yc));
+  $slice #(.A_WIDTH(8), .Y_WIDTH(4), .OFFSET(2)) s0 (.A(rc), .Y(ys));
+  $dff #(.WIDTH(12), .CLK_POLARITY(1'b1)) fqc (.CLK(clk), .D(yc), .Q(qc));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1))  fqs (.CLK(clk), .D(ys), .Q(qs));
+endmodule
+EOF
+hierarchy -top wireops
+# miter -make_assert compares cycle 0, and two undefined registers are
+# independent free variables that need not agree there, so the observing
+# registers need a defined start as well. Set before the save, so gold and
+# gate get the same one.
+setattr -set init 12'h000 w:qc
+setattr -set init 4'h0 w:qs
+check -assert
+select -assert-count 5 t:$dff
+design -save orig
+opt_retime -flop fa -cut k0 -forward
+opt_retime -flop fc -cut s0 -forward
+check -assert
+# the $concat merges fb and widens its survivor from 8 bits to 12; the $slice
+# is unary and narrows its own from 8 to 4. Five registers become four.
+select -assert-count 4 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 1 c:k0 %x:+[A] w:a %i
+select -assert-count 1 c:k0 %x:+[B] w:b %i
+select -assert-count 1 c:k0 %x:+[Y] w:fa_retimed %i
+select -assert-count 1 c:fa %x:+[Q] w:yc %i
+select -assert-count 1 c:s0 %x:+[A] w:c %i
+select -assert-count 1 c:s0 %x:+[Y] w:fc_retimed %i
+select -assert-count 1 c:fc %x:+[Q] w:ys %i
+# $concat puts A in the low bits, so 8'ha5 under 4'h3 is 12'h3a5. The other
+# order would be 12'ha53, which is what an operand swap would leave here.
+select -assert-count 1 w:yc a:init=12'h3a5 %i
+# 8'hdb is 8'b11011011, and bits [5:2] of it are 4'b0110. The two nibbles an
+# OFFSET of 0 or 4 would have taken are 4'hb and 4'hd, so this value is only
+# reachable from the offset the cell actually carries.
+select -assert-count 1 w:ys a:init=4'h6 %i
+select -assert-count 0 w:ra a:init %i
+select -assert-count 0 w:rc a:init %i
+rename wireops gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop

@@ -11,7 +11,8 @@
 //   -flop fs -cut m0 -forward : the same move entered on S, which widens the
 //                               surviving register from 1 bit to 8.
 //   -flop fa -cut b0 -forward : $mux and $buf mixed in one chain
-// TODO: add a $pmux design; a one-hot select changes the rules.
+// $pmux is the same move with a wider select, and lives in
+// opt_retime_select.ys alongside $bwmux, $bmux and $demux.
 
 module retime_mux (clk, a, b, sel, q);
   input clk;

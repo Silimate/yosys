@@ -45,6 +45,8 @@ moves=(
 	"retime_debug_designs.v|carryout|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|narrow|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|fullmul|-flop fa -cut m0 -forward"
+	"retime_debug_designs.v|divcut|-flop fa -cut d0 -forward"
+	"retime_debug_designs.v|pmuxcut|-flop fa -cut m0 -forward"
 	"retime_debug_designs.v|signedmul|-flop fa -cut m0 -forward"
 	"retime_debug_designs.v|bitwise|-flop fa -cut o0 -forward"
 	"retime_debug_designs.v|bitwise|-flop fc -cut x0 -forward"
@@ -102,7 +104,7 @@ refusals=(
 	"retime_debug_designs.v|selpath|-flop f -cut u0 -backward"
 	"retime_debug_designs.v|andmask|-flop f -cut a0 -backward"
 	"retime_debug_designs.v|allconst|-flop f -cut a0 -backward"
-	"retime_debug_designs.v|divcut|-flop fa -cut d0 -forward"
+	"retime_debug_designs.v|gatecut|-flop fa -cut g0 -forward"
 	"retime_debug_designs.v|aloadnet|-flop fa -cut n0 -forward"
 )
 
