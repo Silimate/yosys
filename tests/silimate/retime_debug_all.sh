@@ -41,6 +41,14 @@ root=${OUT:-/tmp/retime_debug_all}
 # cell spells the value it resets to into its type name, so that fold shows up
 # as a changed box label. Enables do draw, as an EN port that survives on the
 # moved register and leaves with the ones merged into it.
+#
+# Two later groups read differently from the merges above. A backward move
+# across a cone with more than one reader duplicates the cone, so the cell that
+# appears in the after picture is combinational rather than a register and the
+# register count understates what the move cost. And in the clock-gated
+# entries the enable is not a port at all: it reaches the register as a clock
+# net out of an $icg, so what to follow there is which gate each register hangs
+# off rather than which EN it carries.
 moves=(
 	"opt_retime_buf.v|retime_probe|-flop f1 -cut b2 -forward"
 	"opt_retime_buf.v|retime_probe|-flop f1 -cut b3 -forward"
@@ -95,6 +103,16 @@ moves=(
 	"retime_debug_designs.v|unflopped|-flop fq -cut a0 -backward"
 	"retime_debug_designs.v|muxtree|-flop f -cut u2 -backward"
 	"retime_debug_designs.v|muxtree|-flop f -cut u0 -backward"
+	"retime_debug_designs.v|backfanout|-flop fq -cut b0 -backward"
+	"retime_debug_designs.v|sharedcone|-flop f1 -cut a0 -backward"
+	"retime_debug_designs.v|sharedcone|-flop f1 -cut a0 -backward + -flop f2 -cut a0_dup -backward"
+	"retime_debug_designs.v|shareddeep|-flop fq -cut a0 -backward"
+	"retime_debug_designs.v|fanout2|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|fanout3|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|fanoutdeep|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|gated|-flop f1 -cut a0 -backward"
+	"retime_debug_designs.v|gatedin|-flop f1 -cut a0 -backward"
+	"retime_debug_designs.v|gatedfwd|-flop fa -cut a0 -forward"
 )
 
 # Designs the pass refuses, in the same format. These get one picture rather
@@ -116,12 +134,16 @@ refusals=(
 	"opt_retime_buf.v|retime_probe|-flop f1 -cut b0 -backward"
 	"retime_debug_designs.v|signedshift|-flop fq -cut s0 -backward"
 	"retime_debug_designs.v|backwide|-flop fq -cut a0 -backward"
-	"retime_debug_designs.v|backfanout|-flop fq -cut b0 -backward"
 	"retime_debug_designs.v|selpath|-flop f -cut u0 -backward"
 	"retime_debug_designs.v|andmask|-flop f -cut a0 -backward"
 	"retime_debug_designs.v|allconst|-flop f -cut a0 -backward"
 	"retime_debug_designs.v|gatecut|-flop fa -cut g0 -forward"
 	"retime_debug_designs.v|aloadnet|-flop fa -cut n0 -forward"
+	"retime_debug_designs.v|sharedrecon|-flop fq -cut a0 -backward"
+	"retime_debug_designs.v|sharedouttap|-flop f1 -cut a0 -backward"
+	"retime_debug_designs.v|fanoutsr|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|fanouten|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|twogates|-flop fa -cut a0 -forward"
 )
 
 rm -rf "$root"

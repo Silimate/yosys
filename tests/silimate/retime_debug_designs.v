@@ -504,6 +504,147 @@ module muxrst(input clk, rst, en, input [3:0] a, b, input s, output [3:0] q);
     f (.CLK(clk), .EN(en), .SRST(rst), .D(y), .Q(q));
 endmodule
 
+// Backward: the cut Y has another reader (from opt_retime_merge_fanout.ys).
+// The smallest duplication there is, and the one to read first: bt still wants
+// the undelayed value the move is taking away from it, so it gets a copy of
+// b0. This was a refusal until backward moves learned to duplicate, and it is
+// the cheapest one to look at because a $buf copy is as small as a copy gets.
+// sharedcone below is the same picture with an adder being copied instead.
+module backfanout(input clk, input [7:0] a, output [7:0] q, tap);
+  wire [7:0] y;
+  $buf #(.WIDTH(8)) b0 (.A(a), .Y(y));
+  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: two registers capturing one cone (from
+// opt_retime_shared_backward.ys, where it is called board). Moving f1 back
+// leaves the adder computing its value a cycle later, which res2 does not
+// want, so the adder is duplicated and f2 keeps reading an undelayed copy.
+// That copy is the picture to look at: it is a combinational cell, not a
+// register, which is what makes a backward move the expensive direction.
+// 2 registers and one adder become 3 and two.
+module sharedcone(input clk, en1, en2, in1, in2, output res1, res2);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(sum), .Q(res2));
+endmodule
+
+// Backward: duplication running down a chain (from
+// opt_retime_shared_backward.ys). Only the top hop is read off the path, by
+// the tap; the cut is duplicated purely so that duplicate has an undelayed
+// operand to read. Both copies are in the after picture, the lower one
+// feeding the upper one rather than anything the design asked for.
+module shareddeep(input clk, input [7:0] a, b, c, output [7:0] q, tap);
+  wire [7:0] m, y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(b), .Y(m));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(m), .B(c), .Y(y));
+  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// -all-fanouts: sharedcone again, moved in one command (from
+// opt_retime_all_fanouts.ys, where it is called board). The single-move
+// entries above leave f2 behind the duplicate; this one carries on and moves
+// f2 across that duplicate too, without the script having to name a cell the
+// pass invented. Both adders end up after the registers. 2 registers become 4.
+module fanout2(input clk, en1, en2, in1, in2, output res1, res2);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(sum), .Q(res2));
+endmodule
+
+// -all-fanouts with a third reader (from opt_retime_all_fanouts.ys). One cone
+// per register, so the adders grow with the fanout: three readers, three
+// adders, six registers. This is the entry to look at for what the option
+// costs in area.
+module fanout3(input clk, en1, en2, en3, in1, in2, output res1, res2, res3);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(sum), .Q(res2));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f3 (.CLK(clk), .EN(en3), .D(sum), .Q(res3));
+endmodule
+
+// -all-fanouts over a chain (from opt_retime_all_fanouts.ys, where it is
+// called deep). The register that moves second does not read the cut the
+// command named: it reads a copy of the whole chain, under names the pass
+// chose. Both hops are duplicated and f2 crosses the copies.
+module fanoutdeep(input clk, en1, en2, in1, in2, in3, output res1, res2);
+  wire sum, mix;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $xor #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(sum), .B(in3), .Y(mix));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(mix), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(mix), .Q(res2));
+endmodule
+
+// Clock gating, explicit (from opt_retime_clockgate.ys). sharedcone with the
+// enables turned into gates, which is what a netlist with instantiated ICGs,
+// or one that has been through infer_icg or clockgate, looks like: the
+// registers are plain $dff and the enable survives only as which clock net
+// each one is on. The move is the same, and the thing to check in the picture
+// is that the clone hangs off ic1's GCLK rather than off clk or ic2.
+module gated(input clk, en1, en2, input [7:0] in1, in2, output [7:0] res1, res2);
+  wire [7:0] sum;
+  wire g1, g2;
+  $icg ic1 (.CLK(clk), .EN(en1), .SE(1'b0), .GCLK(g1));
+  $icg ic2 (.CLK(clk), .EN(en2), .SE(1'b0), .GCLK(g2));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(g1), .D(sum), .Q(res1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f2 (.CLK(g2), .D(sum), .Q(res2));
+endmodule
+
+// A gate enabled by the cone being retimed (from opt_retime_clockgate.ys).
+// The gate's EN is a reader of the adder off the before-path like any other,
+// so it is served by the duplicate and keeps opening on the cycles it always
+// did. In the picture that is ic1.EN moving from the original adder to the
+// copy, which is the only place this shows: get it wrong and every value in
+// the cone still looks right.
+module gatedin(input clk, input [7:0] in1, in2, output [7:0] res1);
+  wire [7:0] sum;
+  wire nz, g1;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $reduce_or #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0)) r0 (.A(sum), .Y(nz));
+  $icg ic1 (.CLK(clk), .EN(nz), .SE(1'b0), .GCLK(g1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(g1), .D(sum), .Q(res1));
+endmodule
+
+// A forward merge on one gate (from opt_retime_clockgate.ys). Registers on
+// one gated clock update on the same cycles, so they merge exactly as the
+// $dffe pair in enops does, and the gate is left clocking one register where
+// it clocked two. twogates below is the same move when the two registers sit
+// behind separate gate cells.
+module gatedfwd(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  wire g;
+  $icg ic (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(g));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(g), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(g), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(g), .D(s), .Q(q));
+endmodule
+
 // ==========================================================================
 // Designs the pass refuses.
 //
@@ -633,16 +774,6 @@ module selpath(input clk, input s, output [7:0] q);
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
 endmodule
 
-// Backward: the cut Y has another reader (from opt_retime_merge_fanout.ys).
-// Forward can leave a leftover copy for extra readers of Q; backward needs
-// Y to drive only the flop being moved. bt is the extra reader.
-module backfanout(input clk, input [7:0] a, output [7:0] q, tap);
-  wire [7:0] y;
-  $buf #(.WIDTH(8)) b0 (.A(a), .Y(y));
-  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
-endmodule
-
 // Backward: a stored bit the mask clears (from opt_retime_and.ys). Same $and
 // as andc above, but 8'h0f asks for bits 8'hf0 zeros, so no input produces
 // the stored value and there is nothing to leave the flop holding.
@@ -686,4 +817,82 @@ module aloadnet(input clk, aload, input [7:0] a, ad, output [7:0] q);
   $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(y));
   $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
     fq (.CLK(clk), .ALOAD(aload), .AD(8'h00), .D(y), .Q(q));
+endmodule
+
+// Backward: reconvergence inside the chain (from
+// opt_retime_shared_backward.ys). A duplicate reads the duplicate of the hop
+// below it and nothing else on the chain, so a hop reading another hop off
+// the path would need that substitution made on the duplicate's operands too.
+// x0 reads m on both of its inputs, which is that shape drawn as small as it
+// gets. shareddeep above is the chain that does duplicate.
+module sharedrecon(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] m, y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(b), .Y(m));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(m), .B(m), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: the shared net is a module output (from
+// opt_retime_shared_backward.ys). A duplicate serves an extra reader by
+// taking over that reader's input port, and a module output has no port to
+// repoint: sum is the output, and the move wants that same net for the path.
+// sharedcone is this design with the tap being a register instead.
+module sharedouttap(input clk, en1, in1, in2, output res1, output sum);
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+endmodule
+
+// -all-fanouts: a sibling that cannot move (from opt_retime_all_fanouts.ys,
+// where it is called blocked). f1 on its own would go; f2 has a set/reset,
+// which arrives on a net and stores no value the chain could fold. Every move
+// in the batch is asked before any of it is made, so this refuses whole and
+// leaves f1 where it was rather than stranding it half way.
+module fanoutsr(input clk, en1, set2, clr2, in1, in2, output res1, res2);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffsr #(.WIDTH(1), .CLK_POLARITY(1'b1), .SET_POLARITY(1'b1), .CLR_POLARITY(1'b1))
+    f2 (.CLK(clk), .SET(set2), .CLR(clr2), .D(sum), .Q(res2));
+endmodule
+
+// -all-fanouts: a sibling refusing over the cone rather than over itself
+// (from opt_retime_all_fanouts.ys, where it is called tangled). f2 holds on
+// in2, an operand of the adder, so moving f2 back would put a register
+// between in2 and the enable meant to be sampling alongside it. Nothing about
+// f2 read on its own says so, and f1's own move is clear of the cone, so only
+// asking f2's whole move finds it.
+module fanouten(input clk, en1, in1, in2, output res1, res2);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(in2), .D(sum), .Q(res2));
+endmodule
+
+// Two gates built from one enable (from opt_retime_clockgate.ys). fa and fb
+// update on exactly the same cycles, and gatedfwd above is this same merge
+// when they are behind one gate cell. Here they are behind two, and a merge
+// compares control nets: one enable is one net however many registers are on
+// it, but two gates are two clock nets, and the pass has no reason to believe
+// anything about a pair of them. The move the $dffe netlist would have made
+// one pass earlier is the one that is gone, so the way to keep it is to retime
+// before gating.
+module twogates(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  wire g1, g2;
+  $icg ic1 (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(g1));
+  $icg ic2 (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(g2));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(g1), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(g2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(g1), .D(s), .Q(q));
 endmodule

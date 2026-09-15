@@ -81,6 +81,16 @@ moves=(
 	"retime_debug_designs.v|unflopped|-flop fq -cut a0 -backward"
 	"retime_debug_designs.v|muxtree|-flop f -cut u2 -backward"
 	"retime_debug_designs.v|muxtree|-flop f -cut u0 -backward"
+	"retime_debug_designs.v|backfanout|-flop fq -cut b0 -backward"
+	"retime_debug_designs.v|sharedcone|-flop f1 -cut a0 -backward"
+	"retime_debug_designs.v|sharedcone|-flop f1 -cut a0 -backward + -flop f2 -cut a0_dup -backward"
+	"retime_debug_designs.v|shareddeep|-flop fq -cut a0 -backward"
+	"retime_debug_designs.v|fanout2|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|fanout3|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|fanoutdeep|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|gated|-flop f1 -cut a0 -backward"
+	"retime_debug_designs.v|gatedin|-flop f1 -cut a0 -backward"
+	"retime_debug_designs.v|gatedfwd|-flop fa -cut a0 -forward"
 )
 
 # Designs the pass refuses. Keep this list identical to retime_debug_all.sh
@@ -100,12 +110,16 @@ refusals=(
 	"opt_retime_buf.v|retime_probe|-flop f1 -cut b0 -backward"
 	"retime_debug_designs.v|signedshift|-flop fq -cut s0 -backward"
 	"retime_debug_designs.v|backwide|-flop fq -cut a0 -backward"
-	"retime_debug_designs.v|backfanout|-flop fq -cut b0 -backward"
 	"retime_debug_designs.v|selpath|-flop f -cut u0 -backward"
 	"retime_debug_designs.v|andmask|-flop f -cut a0 -backward"
 	"retime_debug_designs.v|allconst|-flop f -cut a0 -backward"
 	"retime_debug_designs.v|gatecut|-flop fa -cut g0 -forward"
 	"retime_debug_designs.v|aloadnet|-flop fa -cut n0 -forward"
+	"retime_debug_designs.v|sharedrecon|-flop fq -cut a0 -backward"
+	"retime_debug_designs.v|sharedouttap|-flop f1 -cut a0 -backward"
+	"retime_debug_designs.v|fanoutsr|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|fanouten|-flop f1 -cut a0 -backward -all-fanouts"
+	"retime_debug_designs.v|twogates|-flop fa -cut a0 -forward"
 )
 
 rm -rf "$root"

@@ -1160,7 +1160,11 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 	}
 }
 
-void apply_backward_move(Module *module, Cell *flop, Cell *cut)
+// dry_run asks the question and skips the answer: every refusal this move can
+// make has been made by the time the first cell is touched, so returning there
+// leaves a legality check with no side effects. -all-fanouts is what wants it,
+// having several moves to make and no way to take the earlier ones back.
+void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = false)
 {
 	if (!flop->is_builtin_ff())
 		refuse("Cell %s is not a built-in flip-flop.\n", log_id(flop));
@@ -1328,6 +1332,10 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 					forbidden.insert(bit);
 	check_controls(ff, sigmap, forbidden);
 
+	// Last refusal is behind us, so this is the line a dry run stops at.
+	if (dry_run)
+		return;
+
 	// The move leaves the chain computing the value one cycle later than it did,
 	// which is what the path wants and what every other reader of a hop does
 	// not. Those readers get a duplicate of the hop that still computes the
@@ -1471,6 +1479,126 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut)
 				log_id(flop_name), GetSize(chain), log_id(cut));
 	if (ndup)
 		log("Duplicated %d chain cell(s) for readers off the before-path.\n", ndup);
+}
+
+// Registers capturing the same net as flop, which is what -all-fanouts widens
+// the move to. Sharing the D net is what makes them the same move rather than
+// merely related ones: the chain back to the cut is fixed by the net, so every
+// sibling crosses the same cells for the same reasons, and the only thing left
+// to differ is what each register does with the value once it has it.
+std::vector<Cell *> capture_siblings(Module *module, SigMap &sigmap, Cell *flop)
+{
+	SigSpec d = sigmap(flop->getPort(ID::D));
+	std::vector<Cell *> out;
+	for (auto cell : module->cells()) {
+		if (cell == flop || !cell->is_builtin_ff())
+			continue;
+		if (!cell->hasPort(ID::D) || !cell->hasPort(ID::Q))
+			continue;
+		if (sigmap(cell->getPort(ID::D)) == d)
+			out.push_back(cell);
+	}
+	return out;
+}
+
+// The cell as far back from this register's D as the cut is from the named
+// flop's. Every move duplicates the chain for the registers that have not gone
+// yet, so a sibling's cut is a copy the pass named itself and there is no name
+// to pass down. What does survive the batch is the shape, since the siblings
+// all started on one net, so the cut is found by counting hops.
+Cell *cut_at_depth(Module *module, Cell *flop, int depth)
+{
+	SigMap sigmap(module);
+	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
+	SigSpec cur = sigmap(flop->getPort(ID::D));
+	Cell *cell = nullptr;
+	for (int i = 0; i < depth; i++) {
+		IdString y_port;
+		cell = unique_full_driver(drivers, sigmap, cur, y_port);
+		if (cell == nullptr || y_port != ID::Y)
+			refuse("The before-path of flop %s is not a unique cell Y at %s.\n",
+					log_id(flop), log_signal(cur));
+		if (i + 1 < depth)
+			cur = sigmap(cell->getPort(
+					backward_path_port(sigmap, drivers, cell, flop)));
+	}
+	return cell;
+}
+
+// One backward move per register capturing the cut's output, instead of the one
+// the command named. The registers differ in their control signals - that is
+// the whole reason they are separate registers - so they cannot be merged into
+// one move, and each gets its own copy of the chain. The area that costs is the
+// point: the alternative is that the shared cell pins all of them in place.
+void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
+{
+	if (!flop->is_builtin_ff() || !flop->hasPort(ID::D))
+		refuse("Cell %s is not a built-in flip-flop.\n", log_id(flop));
+
+	SigMap sigmap(module);
+
+	std::vector<Cell *> targets;
+	targets.push_back(flop);
+	for (auto cell : capture_siblings(module, sigmap, flop))
+		targets.push_back(cell);
+
+	// The moves are applied one after another, so a refusal partway through
+	// would strand the ones already made with no way back to the module the
+	// script handed over. So every move is asked before any of it is made, and
+	// the batch is declined whole on the first no.
+	//
+	// A sibling is asked about the cut the command named rather than about the
+	// copy it will really cross, because the copy does not exist yet. The two
+	// give the same answer: a copy is the same cells wired to the same operands,
+	// and what a sibling could refuse over - its own controls, the values it
+	// stores, where it reads the chain besides on D - it refuses over either
+	// way. The named flop goes first so that a design where it cannot move says
+	// so plainly instead of blaming a sibling.
+	apply_backward_move(module, flop, cut, true);
+	for (auto cell : targets) {
+		if (cell == flop)
+			continue;
+		try {
+			apply_backward_move(module, cell, cut, true);
+		} catch (const MoveRefused &refused) {
+			refuse("-all-fanouts would have to move register %s, which captures "
+					"the same net as flop %s, and cannot: %s",
+					log_id(cell), log_id(flop), refused.reason.c_str());
+		}
+	}
+
+	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
+	std::vector<std::vector<CellPort>> extra;
+	int depth = GetSize(collect_backward_chain(module, sigmap, drivers, flop,
+			cut, extra));
+
+	// Names and nets to report at the end, read now because the registers are
+	// rebuilt rather than edited and the cells these point at will be gone.
+	std::string net = log_signal(sigmap(flop->getPort(ID::D)));
+	IdString cut_name = cut->name;
+	std::vector<IdString> names;
+	for (auto cell : targets)
+		names.push_back(cell->name);
+
+	apply_backward_move(module, flop, cut);
+	for (int i = 1; i < GetSize(targets); i++) {
+		try {
+			apply_backward_move(module, targets[i],
+					cut_at_depth(module, targets[i], depth));
+		} catch (const MoveRefused &refused) {
+			// Past the first move this is not a legality question any more.
+			// There is no untouched module left to answer it with, so a refusal
+			// here is fatal rather than something -if-legal can swallow and
+			// carry on from. The preflight above is what keeps it from
+			// happening; reaching it means the preflight missed something.
+			log_error("-all-fanouts moved %d of %d register(s) and then could "
+					"not move %s: %s", i, GetSize(targets),
+					log_id(names[i]), refused.reason.c_str());
+		}
+	}
+
+	log("Retimed %d register(s) capturing %s backward across %d cell(s) ending "
+			"at %s.\n", GetSize(targets), net.c_str(), depth, log_id(cut_name));
 }
 
 void apply_forward_move(Module *module, Cell *flop, Cell *cut)
@@ -1736,6 +1864,16 @@ std::string try_backward_move(Module *module, Cell *flop, Cell *cut)
 	return "";
 }
 
+std::string try_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
+{
+	try {
+		apply_backward_all_fanouts(module, flop, cut);
+	} catch (const MoveRefused &refused) {
+		return refused.reason;
+	}
+	return "";
+}
+
 struct OptRetimePass : public Pass {
 	OptRetimePass() : Pass("opt_retime", "retime sequential circuits") { }
 
@@ -1745,7 +1883,8 @@ struct OptRetimePass : public Pass {
 		log("\n");
 		log("    opt_retime -flop <cell> -cut <cell> -forward|-backward [selection]\n");
 		log("\n");
-		log("This pass retimes one register across a chain of combinational cells.\n");
+		log("This pass retimes one register across a chain of combinational cells,\n");
+		log("or with -all-fanouts every register capturing the same net.\n");
 		log("\n");
 		log("    -flop <cell>\n");
 		log("        register to move.\n");
@@ -1844,6 +1983,37 @@ struct OptRetimePass : public Pass {
 		log("        whose Y is a module output or feeds the moved flop's own\n");
 		log("        control inputs.\n");
 		log("\n");
+		log("    -all-fanouts\n");
+		log("        make the same backward move for every register capturing the\n");
+		log("        net the named flop captures, not just that one. Off by\n");
+		log("        default. The siblings are found by their D net rather than\n");
+		log("        named, so a shared cell lets go of all of its capture\n");
+		log("        registers at once instead of one command at a time.\n");
+		log("\n");
+		log("        Registers that share a net but not their enable or their\n");
+		log("        reset cannot become one register, so this is a batch of\n");
+		log("        separate moves rather than a single wider one, and each\n");
+		log("        register ends up with its own copy of the chain. That is the\n");
+		log("        same duplication a lone -backward move does for the readers\n");
+		log("        it leaves behind, just carried through to the end: with two\n");
+		log("        capture registers the cut is duplicated once, with three\n");
+		log("        twice. The area is the price of unpinning them, since a\n");
+		log("        shared cell otherwise holds every one of its readers in\n");
+		log("        place.\n");
+		log("\n");
+		log("        The batch is all or nothing. Every move is checked before\n");
+		log("        any of it is made, so one register that cannot move refuses\n");
+		log("        the whole thing rather than stranding the ones already\n");
+		log("        moved, and with -if-legal the module is left as it was. A\n");
+		log("        sibling refuses for any of the reasons a single -backward\n");
+		log("        move refuses, its own controls and stored values included,\n");
+		log("        so a sibling holding on a net the cone reads is a refusal\n");
+		log("        even though the named flop would have moved on its own.\n");
+		log("\n");
+		log("        Use -forward for the other direction; there is no\n");
+		log("        -all-fanouts for it, since a forward move merges registers\n");
+		log("        rather than fanning out to them.\n");
+		log("\n");
 		log("    -if-legal\n");
 		log("        report a refused move instead of aborting, and carry on. A\n");
 		log("        refusal is decided before the design is touched, so the\n");
@@ -1876,6 +2046,7 @@ struct OptRetimePass : public Pass {
 
 		std::string flop, cut_cell;
 		bool forward = false, backward = false, if_legal = false;
+		bool all_fanouts = false;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -1899,6 +2070,10 @@ struct OptRetimePass : public Pass {
 				if_legal = true;
 				continue;
 			}
+			if (args[argidx] == "-all-fanouts") {
+				all_fanouts = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -1911,6 +2086,8 @@ struct OptRetimePass : public Pass {
 			log_cmd_error("Cannot use -forward and -backward together.\n");
 		if (!forward && !backward)
 			log_cmd_error("Missing required -forward or -backward option.\n");
+		if (all_fanouts && !backward)
+			log_cmd_error("-all-fanouts only applies to -backward moves.\n");
 
 		Module *module = nullptr;
 		Cell *flop_cell = nullptr;
@@ -1930,12 +2107,18 @@ struct OptRetimePass : public Pass {
 		if (!cut)
 			log_cmd_error("Cut cell '%s' not found in module %s.\n", cut_cell.c_str(), log_id(module));
 
-		log("Move: module=%s flop=%s direction=%s cut=%s\n",
+		log("Move: module=%s flop=%s direction=%s cut=%s%s\n",
 				log_id(module), log_id(flop_cell),
-				backward ? "backward" : "forward", log_id(cut));
+				backward ? "backward" : "forward", log_id(cut),
+				all_fanouts ? " all-fanouts" : "");
 
-		std::string refused = backward ? try_backward_move(module, flop_cell, cut)
-				: try_forward_move(module, flop_cell, cut);
+		std::string refused;
+		if (all_fanouts)
+			refused = try_backward_all_fanouts(module, flop_cell, cut);
+		else if (backward)
+			refused = try_backward_move(module, flop_cell, cut);
+		else
+			refused = try_forward_move(module, flop_cell, cut);
 
 		// What happened, for a caller that cannot read the log: opt_retime.moved
 		// is the answer and opt_retime.refusal is the reason when it is false.
