@@ -317,7 +317,8 @@ module sliced(input clk, en, input [7:0] a, b, output [7:0] q);
 endmodule
 
 // Signed $sshr with defined inits (from opt_retime_shift.ys). 8'h80 >>> 1 is
-// 8'hc0 signed and 8'h40 unsigned; the "Folded init" line is 8'hc0.
+// 8'hc0 signed and 8'h40 unsigned; the "Folded init" line is 8'hc0. Pulling
+// fq back across s0 is refused: $sshr has no unique inverse.
 module signedshift(input clk, input [7:0] a, input [2:0] amt, output [7:0] q);
   (* init = 8'h80 *) wire [7:0] ra;
   (* init = 3'd1 *) wire [2:0] ramt;
@@ -342,6 +343,139 @@ module signedleft(input clk, input [7:0] a, input [2:0] amt, output [10:0] q);
   $dff #(.WIDTH(11), .CLK_POLARITY(1'b1)) fq   (.CLK(clk), .D(sl),  .Q(q));
 endmodule
 
+// Backward through a mux tree (from opt_retime_mux_backward.ys). Every level
+// has a live select, which is what used to stop the chain after one mux: a
+// clone was only allowed at the cut. With clones at every hop, pulling f back
+// to u0 crosses u2 as well and leaves five registers, the two on u2 sampling
+// s2 and the output of the untouched u1. The select clones both start at 0,
+// picking A, which is the port the path runs through at both hops - invisible
+// in the pictures, an init being a wire attribute, so read the log lines.
+module muxtree(input clk, input [7:0] a, b, c, d, input s0, s1, s2, output [7:0] q);
+  (* init = 8'h5a *) wire [7:0] q;
+  wire [7:0] m0, m1, m2;
+  $mux #(.WIDTH(8)) u0 (.A(a),  .B(b),  .S(s0), .Y(m0));
+  $mux #(.WIDTH(8)) u1 (.A(c),  .B(d),  .S(s1), .Y(m1));
+  $mux #(.WIDTH(8)) u2 (.A(m0), .B(m1), .S(s2), .Y(m2));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(m2), .Q(q));
+endmodule
+
+// Constant operands (from opt_retime_const.ys). Nothing merges: the constant
+// stays wired where it sits, and both registers hop to Y. The incrementer's
+// init becomes 8'd1; the mask leaves zero alone.
+module constops(input clk, input [7:0] a, b, output [7:0] qinc, qmask);
+  wire [7:0] ra, rb, yinc, ymask;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a_inc (.A(ra), .B(8'd1), .Y(yinc));
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a_mask (.A(rb), .B(8'h0f), .Y(ymask));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqi (.CLK(clk), .D(yinc),  .Q(qinc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqm (.CLK(clk), .D(ymask), .Q(qmask));
+endmodule
+
+// $sub, A operand (from opt_retime_sub.ys). Same merge as $add, drawn because
+// swapping the operands would still look like a successful move on an $add.
+module subdes(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $sub #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    s0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+
+// Constant async-load folded through $eq (from opt_retime_reset.ys). fs
+// narrows from 3 bits to 1 and async-loads 0, because 3'b000 == 3'b111 is 0.
+module aldffeq(input clk, rst_n, input [2:0] d, output eq);
+  (* init = 3'h0 *) wire [2:0] q;
+  wire y;
+  $aldff #(.WIDTH(3), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b0))
+    fs (.CLK(clk), .ALOAD(rst_n), .D(d), .AD(3'b000), .Q(q));
+  $eq #(.A_WIDTH(3), .B_WIDTH(3), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    e0 (.A(q), .B(3'b111), .Y(y));
+  $aldff #(.WIDTH(1), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b0))
+    fq (.CLK(clk), .ALOAD(rst_n), .D(y), .AD(1'b0), .Q(eq));
+endmodule
+
+// Backward: $add against a constant (from opt_retime_backward.ys). No clone:
+// f(reg(x), c) is reg(f(x, c)), so the flop just hops onto A. Init 0 folds to
+// 0xff, which is 0 - 1. unflopped below is the same cell with a live other
+// operand, which does clone.
+module addc(input clk, input [7:0] a, output [7:0] q);
+  (* init = 8'h00 *) wire [7:0] q;
+  wire [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(8'd1), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: $not, folding init 0 to 1 (from opt_retime_backward.ys). notpath
+// above is the forward direction of the same cell.
+module invcap(input clk, input [7:0] a, output [7:0] q);
+  (* init = 8'h00 *) wire [7:0] q;
+  wire [7:0] y;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(a), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: $and against a constant (from opt_retime_and.ys). Same meet as
+// addc, but the inverse is not unique: 8'hb0 already sits under the mask, so
+// the flop keeps the value it held. andmask in the refused list is this
+// design with a stored bit the mask clears.
+module andc(input clk, input [7:0] a, output [7:0] q);
+  (* init = 8'hb0 *) wire [7:0] q;
+  wire [7:0] y;
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(8'hf0), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: clone onto a live operand of $and (from opt_retime_and.ys). The
+// clone starts at all ones, the identity of the cut, so the named flop keeps
+// 8'h5a. 1 register becomes 2.
+module andlive(input clk, input [7:0] a, b, output [7:0] q);
+  (* init = 8'h5a *) wire [7:0] q;
+  wire [7:0] y;
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(b), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: $mux, path on A (from opt_retime_mux_backward.ys). Three
+// registers: the flop on A, a WIDTH clone on B, and a 1-bit select clone that
+// starts at 0 so the mux is A on cycle 0. muxb is the same cell entered on B,
+// so that select clone starts at 1 instead.
+module muxa(input clk, input [7:0] a, b, input s, output [7:0] q);
+  (* init = 8'h5a *) wire [7:0] q;
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(a), .B(b), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: $mux, path on B, A constant (from opt_retime_mux_backward.ys).
+// Only the select is cloned, and it starts at 1. 1 register becomes 2, one of
+// them a single bit.
+module muxb(input clk, input [7:0] b, input s, output [7:0] q);
+  (* init = 8'h5a *) wire [7:0] q;
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(8'hc3), .B(b), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: $mux carrying an enable and a sync reset (from
+// opt_retime_mux_backward.ys). The clone inherits both, and the select clone
+// starts and resets at 0 so a reset cycle still hands the mux the port the
+// flop is holding.
+module muxrst(input clk, rst, en, input [3:0] a, b, input s, output [3:0] q);
+  (* init = 4'h3 *) wire [3:0] q;
+  wire [3:0] y;
+  $mux #(.WIDTH(4)) u0 (.A(a), .B(b), .S(s), .Y(y));
+  $sdffce #(.WIDTH(4), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1),
+            .SRST_POLARITY(1'b1), .SRST_VALUE(4'ha))
+    f (.CLK(clk), .EN(en), .SRST(rst), .D(y), .Q(q));
+endmodule
+
 // ==========================================================================
 // Designs the pass refuses.
 //
@@ -352,8 +486,9 @@ endmodule
 // ==========================================================================
 
 // An operand that is not registered at all (from opt_retime_add.ys). b arrives
-// combinationally, so a forward move of fa across a0 has nothing to merge on B
-// and a backward move of fq across a0 would have to clone a register onto B.
+// combinationally, so a forward move of fa across a0 has nothing to merge on B.
+// A backward move of fq across a0 is the other direction: that clones fq onto
+// A (stacking after fa) and slides fq onto B, proved in opt_retime_backward.ys.
 module unflopped(input clk, input [7:0] a, b, output [7:0] q);
   wire [7:0] ra, s;
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
@@ -446,4 +581,80 @@ module fine(input clk, input a, b, output [1:0] q);
   $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(2), .A_SIGNED(0), .B_SIGNED(0))
     a0 (.A(ra), .B(rb), .Y(s));
   $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+
+// Backward: a width change (from opt_retime_backward.ys). The $add keeps its
+// carry, so Y is 9 bits and the live operand is 8. Forward across this shape
+// resizes (carryout above); backward cannot invert it yet.
+module backwide(input clk, input [7:0] a, output [8:0] q);
+  wire [8:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(9), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(8'd1), .Y(y));
+  $dff #(.WIDTH(9), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: the path would land on a $mux select (from
+// opt_retime_mux_backward.ys). Both data ports are constant, so the select is
+// the only live input left to slide onto - and it is the one operand that
+// cannot be the path, being the clone that pays for cycle 0. With the select
+// gone, the clones on A and B would each have to start at the stored value
+// rather than at a fixed identity.
+module selpath(input clk, input s, output [7:0] q);
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(8'haa), .B(8'h55), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: the cut Y has another reader (from opt_retime_merge_fanout.ys).
+// Forward can leave a leftover copy for extra readers of Q; backward needs
+// Y to drive only the flop being moved. bt is the extra reader.
+module backfanout(input clk, input [7:0] a, output [7:0] q, tap);
+  wire [7:0] y;
+  $buf #(.WIDTH(8)) b0 (.A(a), .Y(y));
+  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: a stored bit the mask clears (from opt_retime_and.ys). Same $and
+// as andc above, but 8'h0f asks for bits 8'hf0 zeros, so no input produces
+// the stored value and there is nothing to leave the flop holding.
+module andmask(input clk, input [7:0] a, output [7:0] q);
+  (* init = 8'h0f *) wire [7:0] q;
+  wire [7:0] y;
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(8'hf0), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: every data input is constant (from opt_retime_const.ys). There is
+// no live port to slide onto, constants needing no register.
+module allconst(input clk, output [7:0] q);
+  wire [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(8'd1), .B(8'd2), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// A cut type that is not on the forward allowlist (from opt_retime_mul.ys).
+// $div is a pure function of two operands the same way $mul is; it is left
+// out until something tests it. $mul is fullmul above.
+module divcut(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $div #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    d0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// An async load arriving on a net (from opt_retime_init.ys). A constant AD
+// folds, which is aldffeq above; a net has nothing to evaluate, so the move
+// cannot push the load through n0.
+module aloadnet(input clk, aload, input [7:0] a, ad, output [7:0] q);
+  wire [7:0] ra, y;
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
+    fa (.CLK(clk), .ALOAD(aload), .AD(ad), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(y));
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
+    fq (.CLK(clk), .ALOAD(aload), .AD(8'h00), .D(y), .Q(q));
 endmodule

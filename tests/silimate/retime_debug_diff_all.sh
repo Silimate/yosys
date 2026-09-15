@@ -41,6 +41,7 @@ moves=(
 	"opt_retime_cmp.v|retime_cmp|-flop fc -cut r_or -forward"
 	"opt_retime_cmp.v|retime_cmp|-flop fa -cut c_eq -forward"
 	"opt_retime_cmp.v|retime_cmp|-flop fc -cut r_or -forward + -flop fa -cut g0 -forward"
+	"opt_retime_cmp.v|retime_cmp|-flop fq -cut g0 -backward"
 	"retime_debug_designs.v|carryout|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|narrow|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|fullmul|-flop fa -cut m0 -forward"
@@ -65,6 +66,19 @@ moves=(
 	"retime_debug_designs.v|sliced|-flop f0 -cut a0 -forward"
 	"retime_debug_designs.v|signedshift|-flop fa -cut s0 -forward"
 	"retime_debug_designs.v|signedleft|-flop fa -cut s0 -forward"
+	"retime_debug_designs.v|constops|-flop fa -cut a_inc -forward + -flop fb -cut a_mask -forward"
+	"retime_debug_designs.v|subdes|-flop fa -cut s0 -forward"
+	"retime_debug_designs.v|aldffeq|-flop fs -cut e0 -forward"
+	"retime_debug_designs.v|addc|-flop f -cut a0 -backward"
+	"retime_debug_designs.v|invcap|-flop f -cut n0 -backward"
+	"retime_debug_designs.v|andc|-flop f -cut a0 -backward"
+	"retime_debug_designs.v|andlive|-flop f -cut a0 -backward"
+	"retime_debug_designs.v|muxa|-flop f -cut u0 -backward"
+	"retime_debug_designs.v|muxb|-flop f -cut u0 -backward"
+	"retime_debug_designs.v|muxrst|-flop f -cut u0 -backward"
+	"retime_debug_designs.v|unflopped|-flop fq -cut a0 -backward"
+	"retime_debug_designs.v|muxtree|-flop f -cut u2 -backward"
+	"retime_debug_designs.v|muxtree|-flop f -cut u0 -backward"
 )
 
 # Designs the pass refuses. Keep this list identical to retime_debug_all.sh
@@ -75,13 +89,21 @@ moves=(
 # skips index.html) if a listed move starts succeeding, so move it up.
 refusals=(
 	"retime_debug_designs.v|unflopped|-flop fa -cut a0 -forward"
-	"retime_debug_designs.v|unflopped|-flop fq -cut a0 -backward"
 	"retime_debug_designs.v|liveselect|-flop fa -cut m0 -forward"
 	"retime_debug_designs.v|enmix|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|rstmix|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|mixinit|-flop fa -cut a0 -forward"
 	"retime_debug_designs.v|fine|-flop fa -cut a0 -forward"
 	"opt_retime_acc.v|retime_acc|-flop f_acc -cut a_acc -forward"
+	"opt_retime_buf.v|retime_probe|-flop f1 -cut b0 -backward"
+	"retime_debug_designs.v|signedshift|-flop fq -cut s0 -backward"
+	"retime_debug_designs.v|backwide|-flop fq -cut a0 -backward"
+	"retime_debug_designs.v|backfanout|-flop fq -cut b0 -backward"
+	"retime_debug_designs.v|selpath|-flop f -cut u0 -backward"
+	"retime_debug_designs.v|andmask|-flop f -cut a0 -backward"
+	"retime_debug_designs.v|allconst|-flop f -cut a0 -backward"
+	"retime_debug_designs.v|divcut|-flop fa -cut d0 -forward"
+	"retime_debug_designs.v|aloadnet|-flop fa -cut n0 -forward"
 )
 
 rm -rf "$root"

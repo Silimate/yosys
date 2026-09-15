@@ -149,3 +149,24 @@ proc; opt
 sat -seq 8 -prove-asserts -verify
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to come last.
+# A constant AD folds (opt_retime_reset.ys aldffeq). A net has nothing to
+# evaluate, so the load cannot be pushed through the $not.
+log -header "Refused: async load from a net"
+design -reset
+read_verilog -icells <<EOF
+module aloadnet(input clk, aload, input [7:0] a, ad, output [7:0] q);
+  wire [7:0] ra, y;
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
+    fa (.CLK(clk), .ALOAD(aload), .AD(ad), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(y));
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
+    fq (.CLK(clk), .ALOAD(aload), .AD(8'h00), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top aloadnet
+check -assert
+logger -expect error "it has an async load from a net" 1
+opt_retime -flop fa -cut n0 -forward
