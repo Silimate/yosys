@@ -12,7 +12,7 @@
 #   dupa/dupb   dup/1 twice      qa/qb         dup                          one bound, one conflict
 #   uw_ff       uw/2             {u1, u0}      -                            unwired*2
 #   st_ff       st/8             st_q          st.a [3:0], st.b [3:0]       bound*8, split over both
-#   arr_ff      arr[1]/4         arr_q         $scope arr: [0], [1] [3:0]   bound*4, as arr[1]
+#   arr_ff      arr[1]/4         arr_q         $scope arr: [0], [1] [3:0]   bound*4, as arr.[1]
 #   hw_cnt/thr  hw_gen/12 (a layout that took the generate block for a struct)
 #                                hw_gen.cnt/thr $scope hw_gen: cnt, thr, dbg bound*4 / bound*8 via the Q net
 
@@ -191,7 +191,9 @@ select -assert-count 1 c:uw_ff a:rtl_bind_status=unwired*2 %i
 select -assert-count 1 c:st_ff a:rtl_bind_status=bound*8 %i
 select -assert-count 2 w:st.a w:st.b %u
 select -assert-count 1 c:arr_ff a:rtl_bind_status=bound*4 %i
-select -assert-count 1 w:arr?1? a:sim_src=tb.dut.arr.?1? %i
+# The renamed wire keeps the dumped spelling, which sim resolves from the instance's own scope
+select -assert-count 1 w:arr.?1?
+select -assert-none a:sim_src
 select -assert-count 1 c:hw_cnt a:rtl_bind_status=bound*4 %i
 select -assert-count 1 c:hw_thr a:rtl_bind_status=bound*8 %i
 select -assert-count 15 t:$dff a:rtl_bind_status %i

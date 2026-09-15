@@ -34,7 +34,8 @@ logger -expect log "Bound 16 flop\(s\); unstamped 0, object absent 0, bit unplac
 reg_rename -waveform reg_rename_genblk_scope.vcd -scope tb.top_i0
 logger -check-expected
 select -assert-count 12 shift_pipe/t:$aldff shift_pipe/a:rtl_bind_status=bound %i
-select -assert-count 1 shift_pipe/w:data_pipes_reg?2? shift_pipe/a:sim_src=tb.top_i0.u_pipe.data_pipes_reg.?2? %i
+select -assert-count 3 shift_pipe/w:data_pipes_reg.?*?
+select -assert-none a:sim_src
 log -pop
 
 log -header "Elements missing from the dump are absent, with one warning naming what it does hold"

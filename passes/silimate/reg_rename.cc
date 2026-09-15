@@ -30,11 +30,10 @@ PRIVATE_NAMESPACE_BEGIN
 
 // One dumped signal belonging to an RTL object.
 struct DumpLeaf {
-	std::string name; // scope-relative name, as the renamed wire is called
+	std::string name; // scope-relative name as dumped, which the renamed wire takes
 	std::string rel;
 	int width = 0;
 	int offset = 0;
-	std::string src; // full dump path when it is not spelled as scope + "." + name
 };
 
 // What reg_rename made of one Q bit, stamped on every sequential cell it visits as the
@@ -49,7 +48,8 @@ struct DumpLeaf {
 // Cells outside the hierarchy under the scope carry no stamp. When a module is instantiated
 // more than once, a bit is `bound` only if every instance bound it.
 enum BindKind { KIND_BOUND, KIND_UNSTAMPED, KIND_ABSENT, KIND_UNPLACED, KIND_CONFLICT, KIND_UNWIRED, KIND_COUNT };
-static const char *const kind_names[KIND_COUNT] = {"bound", "unstamped", "absent", "unplaced", "conflict", "unwired"};
+static const char *const *const kind_names = RTL_BIND_STATUS_WORDS; // indexed by BindKind
+static_assert(sizeof(RTL_BIND_STATUS_WORDS) / sizeof(RTL_BIND_STATUS_WORDS[0]) == KIND_COUNT);
 
 // One summary warning: every bit of one failure kind on one object group in one scope
 struct Unbound {
@@ -539,7 +539,6 @@ struct RegRenameInstance {
 				std::string dump_path;
 				bool placed = obj_it != objects.end() &&
 						resolve(obj_it->second, obj_width, obj_bit, leaf, leaf_bit);
-				dump_path = placed ? leaf.src : "";
 
 				// A flattened interface pin is dumped under the parent's actual, so it is not
 				// in this scope's object map. bind_interface_ports already put that path on the
@@ -548,7 +547,7 @@ struct RegRenameInstance {
 				if (pin && pin->has_attribute(ID(sim_src)) && GetSize(pin) == obj_width &&
 						obj_bit >= 0 && obj_bit < obj_width) {
 					dump_path = pin->get_string_attribute(ID(sim_src));
-					leaf = {obj, "", GetSize(pin), pin->start_offset, ""};
+					leaf = {obj, "", GetSize(pin), pin->start_offset};
 					leaf_bit = obj_bit;
 					placed = true;
 				}
@@ -560,7 +559,6 @@ struct RegRenameInstance {
 					auto net_it = objects.find(vcd_scope + "." + RTLIL::unescape_id(old_wire->name));
 					placed = net_it != objects.end() &&
 							resolve(net_it->second, GetSize(old_wire), qbits.offset + start, leaf, leaf_bit);
-					dump_path = placed ? leaf.src : "";
 					if (placed && debug)
 						log("Placing %s[%d] of cell %s by its Q net as %s, not by its RTL bind %s[%d]\n",
 								log_id(old_wire), qbits.offset + start, log_id(cell->name),
@@ -724,7 +722,7 @@ struct RegRenameInstance {
 				int leaf_bit = 0;
 				if (!resolve(obj_it->second, total, high, leaf, leaf_bit))
 					continue;
-				std::string dump_path = leaf.src.empty() ? leaf.name : leaf.src;
+				std::string dump_path = leaf.name;
 				if (dump_path.compare(0, vcd_scope.size(), vcd_scope) != 0)
 					dump_path = vcd_scope + "." + dump_path;
 				if (!fst.getHandle(dump_path))
@@ -776,15 +774,14 @@ static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 		if (!seen.insert(full).second)
 			continue;
 
-		// An array dumped as a scope holding its elements (`$scope data_pipes_reg` over
-		// `$var [1]`) names element `data_pipes_reg[1]`; the renamed wire takes that name
-		// and keeps the dump path for sim.
 		DumpLeaf leaf;
+		leaf.name = rel;
+		// An array dumped as a scope holding its elements (`$scope data_pipes_reg` over
+		// `$var [1]`) files element `data_pipes_reg[1]` under that object, while the renamed
+		// wire keeps the dumped spelling `data_pipes_reg.[1]`, which sim finds from any
+		// instance's own scope.
 		for (size_t pos; (pos = rel.find(".[")) != std::string::npos;)
 			rel.erase(pos, 1);
-		if (rel != full.substr(scope.empty() ? 0 : scope.size() + 1))
-			leaf.src = full;
-		leaf.name = rel;
 		leaf.width = var.width;
 		leaf.offset = offset;
 		if (debug)

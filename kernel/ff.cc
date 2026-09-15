@@ -400,7 +400,9 @@ std::vector<std::string> YOSYS_NAMESPACE_PREFIX rtl_bind_status_expand(const std
 	for (std::string token; tokens >> token;) {
 		size_t star = token.find('*');
 		std::string status = token.substr(0, star), count = star == std::string::npos ? "1" : token.substr(star + 1);
-		if (status.empty() || count.empty() || count.size() > 7 || count.find_first_not_of("0123456789") != std::string::npos)
+		bool known = std::any_of(std::begin(RTL_BIND_STATUS_WORDS), std::end(RTL_BIND_STATUS_WORDS),
+				[&](const char *word) { return status == word; });
+		if (!known || count.empty() || count.size() > 7 || count.find_first_not_of("0123456789") != std::string::npos)
 			return {}; // malformed: drop the whole attribute
 		// an empty run, or one longer than any cell, is malformed too and must not allocate its length
 		int n = atoi(count.c_str());

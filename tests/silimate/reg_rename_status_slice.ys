@@ -1,7 +1,7 @@
 # `rtl_bind_status` follows its cell through the passes that slice a sequential cell, and
 # merges across the instances of a module.
 
-log -header "splitcells slices rtl_bind_status per Q bit, and drops one of the wrong length"
+log -header "splitcells slices rtl_bind_status per Q bit, and drops a malformed one"
 log -push
 design -reset
 read_rtlil <<EOT
@@ -10,6 +10,7 @@ module \top
   wire width 4 input 2 \d
   wire width 4 output 3 \q
   wire width 2 output 4 \p
+  wire width 2 output 5 \o
   attribute \rtl_bind "x/4[0:3]"
   attribute \rtl_bind_status "bound*2 absent unplaced"
   cell $dff \ok
@@ -27,10 +28,18 @@ module \top
     connect \D \d [1:0]
     connect \Q \p
   end
+  attribute \rtl_bind_status "bound typo"
+  cell $dff \unknown
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 2
+    connect \CLK \clk
+    connect \D \d [3:2]
+    connect \Q \o
+  end
 end
 EOT
 splitcells -blast t:$dff
-select -assert-count 6 t:$dff
+select -assert-count 8 t:$dff
 select -assert-count 2 t:$dff a:rtl_bind_status=bound %i
 select -assert-count 1 t:$dff a:rtl_bind_status=absent %i
 select -assert-count 1 t:$dff a:rtl_bind_status=unplaced %i
@@ -74,4 +83,45 @@ logger -expect log "Bound 2 of 4 Q bit\(s\); unstamped 0, absent 2, unplaced 0, 
 reg_rename -waveform reg_rename_status_instances.vcd -scope tb.dut
 logger -check-expected
 select -assert-count 1 leaf/r_reg a:rtl_bind_status=absent*2 %i
+log -pop
+
+log -header "An array dumped as a scope binds every instance through its own scope"
+log -push
+design -reset
+read_rtlil <<EOT
+module \leaf
+  wire input 1 \clk
+  wire width 2 input 2 \d
+  wire width 2 \mq
+  attribute \rtl_bind "mem[1]/2[0:1]"
+  cell $dff \m_reg
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 2
+    connect \CLK \clk
+    connect \D \d
+    connect \Q \mq
+  end
+end
+module \top
+  wire input 1 \clk
+  wire width 2 input 2 \d
+  cell \leaf \u0
+    connect \clk \clk
+    connect \d \d
+  end
+  cell \leaf \u1
+    connect \clk \clk
+    connect \d \d
+  end
+end
+EOT
+hierarchy -top top
+logger -expect log "Bound 2 flop\(s\); unstamped 0, object absent 0, bit unplaced 0" 1
+reg_rename -waveform reg_rename_status_array_scope.vcd -scope tb.dut
+logger -check-expected
+select -assert-count 1 leaf/m_reg a:rtl_bind_status=bound*2 %i
+# The wire keeps the dumped spelling rather than an absolute path that would tie both
+# instances to one of them
+select -assert-count 1 leaf/w:mem.?1?
+select -assert-none a:sim_src
 log -pop
