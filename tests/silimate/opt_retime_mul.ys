@@ -1,10 +1,17 @@
-# Forward moves across $mul.
+# Moves across $mul.
 #
-# $mul is the same merge as $add: two data inputs, a pure function, and Y
-# can be wider than either operand. What is worth its own test is signedness.
-# Unsigned 4'hf * 4'he is 8'hd2; signed they are -1 and -2 and the product
-# is 8'h02. A fold that ignored A_SIGNED/B_SIGNED would still look like a
-# successful move, so the signed section asserts the init value directly.
+# Forward, $mul is the same merge as $add: two data inputs, a pure function,
+# and Y can be wider than either operand. What is worth its own test is
+# signedness. Unsigned 4'hf * 4'he is 8'hd2; signed they are -1 and -2 and
+# the product is 8'h02. A fold that ignored A_SIGNED/B_SIGNED would still
+# look like a successful move, so the signed section asserts the init value
+# directly.
+#
+# Backward is the $and case with arithmetic instead of a mask. An odd
+# constant has a unique inverse. An even one has several preimages or none,
+# and the move only needs one: it leaves the flop holding a value the $mul
+# turns back into the old one on the first cycle. A live other operand gets
+# a clone that starts at 1, the identity of the cut.
 
 # ---------------------------------------------------------------------------
 log -header "Forward: unsigned \$mul, truncated product"
@@ -124,6 +131,161 @@ proc; opt
 sat -seq 8 -prove-asserts -verify
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+# 3 * 171 = 513 = 1 (mod 256), so init 1 folds to 8'hab.
+log -header "Backward: \$mul against an odd constant"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module mulc(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(8'd3), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top mulc
+setattr -set init 8'h01 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut m0 -backward
+check -assert
+select -assert-count 1 t:$dff
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:m0 %x:+[Y] w:q %i
+select -assert-count 1 w:y a:init=8'hab %i
+rename mulc gate
+design -import orig -as gold
+setattr -set init 8'h01 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# 2 has no inverse, but 8'h0a is in the image: 5 * 2 = 10. The high bit of
+# the preimage is free; the pass leaves it 0.
+log -header "Backward: \$mul against an even constant, init in the image"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module muleven(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(8'd2), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top muleven
+setattr -set init 8'h0a w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut m0 -backward
+check -assert
+select -assert-count 1 t:$dff
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:m0 %x:+[Y] w:q %i
+select -assert-count 1 w:y a:init=8'h05 %i
+rename muleven gate
+design -import orig -as gold
+setattr -set init 8'h0a gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# 4'hf as a signed 4-bit other operand is -1, so init 1 folds to 8'hff.
+# Zero-extended it would be 15, and 1 * inv(15) is 8'hef, which is the
+# assertion that would fail if the inverse ignored B_SIGNED.
+log -header "Backward: signed \$mul, folding 1 / -1 to -1"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module mulsigned(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(4), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(1))
+    m0 (.A(a), .B(4'hf), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top mulsigned
+setattr -set init 8'h01 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut m0 -backward
+check -assert
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:m0 %x:+[Y] w:q %i
+select -assert-count 1 w:y a:init=8'hff %i
+rename mulsigned gate
+design -import orig -as gold
+setattr -set init 8'h01 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: clone onto a live operand of \$mul, starting at 1"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module mullive(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(b), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top mullive
+setattr -set init 8'h5a w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut m0 -backward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:f_B %x:+[D] w:b %i
+select -assert-count 1 c:m0 %x:+[Y] w:q %i
+select -assert-count 1 w:y a:init=8'h5a %i
+select -assert-count 1 w:f_B_q a:init=8'h01 %i
+rename mullive gate
+design -import orig -as gold
+setattr -set init 8'h5a gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# 8'h0b is odd, so no input times 2 produces it and there is nothing to leave
+# the flop holding.
+log -header "Refused: an odd stored value has no preimage under * 2"
+design -reset
+read_verilog -icells <<EOF
+module mulevenodd(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(8'd2), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top mulevenodd
+setattr -set init 8'h0b w:q
+check -assert
+opt_retime -flop f -cut m0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cell m0 has no input on A that produces 8'00001011, so a backward move has no stored value to leave behind."
 
 # ---------------------------------------------------------------------------
 # $div used to sit here as a type left out of the allowlist; it is a forward

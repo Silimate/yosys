@@ -29,6 +29,9 @@
 //   opt_retime_midpath.ys a tap on an intermediate Y: stop at that hop,
 //                         or refuse a cut past it
 //   opt_retime_mul.ys     $mul, the same merge as $add, plus signed folding
+//                         and backward across an odd constant, an even one
+//                         whose stored value is in the image, or a live
+//                         operand cloned at 1
 //   opt_retime_backward.ys  capture flop onto a unique invertible chain whose
 //                         other operands are constant ($buf/$not/$xor/$add/$sub)
 //   opt_retime_and.ys     $and and $or backward, the cuts whose inverse is

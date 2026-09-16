@@ -5,7 +5,7 @@
 # cloning, and is refused (opt_retime_buf.ys).
 #
 # Every cut here has one preimage per value. The cuts that have several, or
-# none, are in opt_retime_and.ys.
+# none, are in opt_retime_and.ys. Backward $mul is in opt_retime_mul.ys.
 
 # ---------------------------------------------------------------------------
 log -header "Backward: two \$buf from a port"

@@ -897,8 +897,9 @@ void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbidden)
 // Types a backward move can invert: some x with f(x, others) equal to the value
 // the flop stores. The preimage need not be unique, only exist, since the move
 // only has to reproduce that value on the first cycle, so $and and $or count
-// even though they lose information. $eq and $reduce_* stay out because they
-// also resize the flop, $mul because an even constant has no inverse.
+// even though they lose information, and $mul counts even though an even
+// constant has no inverse. $eq and $reduce_* stay out because they also
+// resize the flop.
 //
 // $mux is here because nothing about the identity reg(f(x)) = f(reg(x)) cares
 // how many operands f has: reg(S ? B : A) is (reg S) ? (reg B) : (reg A), with
@@ -913,7 +914,7 @@ void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbidden)
 bool is_invertible_backward(Cell *cell)
 {
 	return cell->type.in(ID($buf), ID($_BUF_), ID($not), ID($add), ID($sub),
-			ID($xor), ID($xnor), ID($and), ID($or), ID($mux));
+			ID($mul), ID($xor), ID($xnor), ID($and), ID($or), ID($mux));
 }
 
 bool sig_all_wires(const SigSpec &sig)
@@ -1033,9 +1034,41 @@ Const clone_start(Cell *cell, IdString path_port, IdString clone_port, int width
 			return Const(path_port == ID::A ? State::S0 : State::S1, width);
 		return Const(State::Sx, width);
 	}
-	// x & 1s and ~(x ^ 1s) are both x; the rest of the types are identity at 0.
+	// x & 1s and ~(x ^ 1s) are both x; $mul is identity at 1; the rest are
+	// identity at 0.
+	if (cell->type == ID($mul))
+		return Const(1, width);
 	bool ones = cell->type.in(ID($and), ID($xnor));
 	return Const(ones ? State::S1 : State::S0, width);
+}
+
+// x * other = y in the low `len` bits. other is extended the way $mul would,
+// then inverted in Z/2^len Z. An odd other has one preimage; an even one has
+// several, or none. Any preimage will do, and a y that is out of reach is
+// left for invert_step's forward check to refuse.
+Const mul_preimage(const Const &y, const Const &other, bool other_signed, int len)
+{
+	Const c = const_pos(other, Const(), other_signed, false, len);
+	int tz = 0;
+	while (tz < len && c[tz] == State::S0)
+		tz++;
+	if (tz == len)
+		return Const(State::S0, len);
+	for (int i = 0; i < tz; i++)
+		if (y[i] != State::S0)
+			return y;
+
+	int n = len - tz;
+	Const amt(tz, 32);
+	Const c_odd = const_shr(c, amt, false, false, n);
+	Const y_shr = const_shr(y, amt, false, false, n);
+	// Hensel: start at 1 and double the number of correct bits each step.
+	Const inv(1, n);
+	Const two(2, n);
+	for (int ok = 1; ok < n; ok *= 2)
+		inv = const_mul(inv, const_sub(two, const_mul(c_odd, inv, false, false, n),
+				false, false, n), false, false, n);
+	return const_pos(const_mul(y_shr, inv, false, false, n), Const(), false, false, len);
 }
 
 // Solve f(..., x, ...) = y for the path operand x. y is the stored value on the
@@ -1047,6 +1080,9 @@ Const clone_start(Cell *cell, IdString path_port, IdString clone_port, int width
 // pins are already y's own, and the rest pass straight through. $mux answers
 // the same way, for the same reason turned inside out: its select is pinned to
 // pick the path port, so the path port is the output and y is its own preimage.
+// $mul answers with y times the modular inverse of the other operand; an even
+// other has several preimages or none, and the forward check refuses a y that
+// is out of reach.
 Const invert_step(Cell *cell, IdString path_port, Const y,
 		const dict<IdString, Const> &others)
 {
@@ -1080,6 +1116,8 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 		x = const_add(y, other, sa, sb, len);
 	else if (cell->type == ID($sub) && path_port == ID::B)
 		x = const_sub(other, y, sa, sb, len);
+	else if (cell->type == ID($mul))
+		x = mul_preimage(y, other, path_port == ID::A ? sb : sa, len);
 	else if (cell->type.in(ID($and), ID($or), ID($mux)))
 		x = y;
 	else
@@ -1854,12 +1892,12 @@ struct OptRetimePass : public Pass {
 		log("\n");
 		log("    -backward\n");
 		log("        move the register upstream onto the path input of -cut.\n");
-		log("        Invertible cuts: $buf, $not, $xor, $xnor, $add, $sub, $and,\n");
-		log("        $or, $mux. Other live data inputs get a clone of the flop.\n");
+		log("        Invertible cuts: $buf, $not, $xor, $xnor, $add, $sub, $mul,\n");
+		log("        $and, $or, $mux. Other live data inputs get a clone of the flop.\n");
 		log("        The moved flop feeds the cut, so its init has to be a\n");
 		log("        cut-input that yields the old Q. Types with no such input\n");
-		log("        ($mul of an even constant), or that also change width\n");
-		log("        ($eq, $reduce_*), cannot.\n");
+		log("        ($mul of an even constant by an odd stored value), or that\n");
+		log("        also change width ($eq, $reduce_*), cannot.\n");
 		log("\n");
 		log("    -all-fanouts\n");
 		log("        with -backward, move every register capturing the same net.\n");

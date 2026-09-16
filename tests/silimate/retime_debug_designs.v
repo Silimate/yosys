@@ -470,6 +470,37 @@ module andlive(input clk, input [7:0] a, b, output [7:0] q);
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
 endmodule
 
+// Backward: $mul against an odd constant (from opt_retime_mul.ys). 3 has a
+// unique inverse, and 3 * 171 = 1 (mod 256), so init 1 folds to 8'hab.
+module mulc(input clk, input [7:0] a, output [7:0] q);
+  (* init = 8'h01 *) wire [7:0] q;
+  wire [7:0] y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(8'd3), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: $mul against an even constant (from opt_retime_mul.ys). 2 has
+// no inverse, but 8'h0a is in the image, so the flop starts at 5. mulevenodd
+// in the refused list is this design with an odd stored value.
+module muleven(input clk, input [7:0] a, output [7:0] q);
+  (* init = 8'h0a *) wire [7:0] q;
+  wire [7:0] y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(8'd2), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: clone onto a live operand of $mul (from opt_retime_mul.ys). The
+// clone starts at 1, the identity of the cut, so the named flop keeps 8'h5a.
+module mullive(input clk, input [7:0] a, b, output [7:0] q);
+  (* init = 8'h5a *) wire [7:0] q;
+  wire [7:0] y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(b), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
 // Backward: $mux, path on A (from opt_retime_mux_backward.ys). Three
 // registers: the flop on A, a WIDTH clone on B, and a 1-bit select clone that
 // starts at 0 so the mux is A on cycle 0. muxb is the same cell entered on B,
@@ -808,6 +839,16 @@ module andmask(input clk, input [7:0] a, output [7:0] q);
   wire [7:0] y;
   $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
     a0 (.A(a), .B(8'hf0), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Backward: an odd stored value under * 2 (from opt_retime_mul.ys). Same
+// $mul as muleven above, but 8'h0b is odd, so no input produces it.
+module mulevenodd(input clk, input [7:0] a, output [7:0] q);
+  (* init = 8'h0b *) wire [7:0] q;
+  wire [7:0] y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(8'd2), .Y(y));
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
 endmodule
 
