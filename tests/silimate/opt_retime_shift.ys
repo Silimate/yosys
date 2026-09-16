@@ -1,5 +1,5 @@
 # Design test for opt_retime_shift.v: $shl/$shr/$sshl/$sshr as cuts, plus
-# $shift and $shiftx. Forward moves only.
+# $shift and $shiftx. Forward moves; backward is refused (no inverse).
 #
 # No new rule here. reg(A) >> reg(B) equals reg(A >> B) when both are
 # registered, so the amount is a data input that merges like a $mux select,

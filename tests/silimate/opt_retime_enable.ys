@@ -4,8 +4,9 @@
 # updates, and holding commutes with a pure function: if the enable is low the
 # output keeps what it had, and f of an unchanged input is an unchanged f. So
 # the enable travels with the register and needs no folding. That is what
-# separates it from a reset or an init value, which are values the move would
-# have to recompute on the far side of the cut and so are still refused.
+# separates it from a reset or an init value, which are values the move has
+# to recompute on the far side of the cut: those are folded instead, in
+# opt_retime_reset.ys and opt_retime_init.ys.
 #
 # The catch is that everything a move merges must share one enable. If one
 # input held while another updated, the cut would see a mix of old and new

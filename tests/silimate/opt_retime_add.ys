@@ -1,10 +1,10 @@
-# Design test for opt_retime_add.v. Forward moves only for now.
+# Forward moves across $add / $sub on opt_retime_add.v.
 #
 # A forward move across an $add merges the registers on both operands into the
 # single register it leaves on the output, so each move here drops one flop.
 # Register reuse means the wire names end up misleading: the wire that used to
 # carry a register output now carries the sum. That matches what the pass
-# already does for $buf chains.
+# already does for $buf chains. Backward $add is in opt_retime_backward.ys.
 
 # ---------------------------------------------------------------------------
 log -header "Forward: push fa across a0, merging fb away"
@@ -92,13 +92,9 @@ log -pop
 
 # ---------------------------------------------------------------------------
 # logger -expect error exits yosys successfully, so this has to be the last
-# section in the file. The other merge rules get their own files, since only
-# one expected error fits per run.
-#
-# TODO: the pass still refuses to merge registers on different clocks, and ones
-# with a set/reset or an async load from a net, whose values cannot be folded.
-# Enables, resets, constant async loads and init values are handled: see
-# opt_retime_enable.ys, opt_retime_reset.ys and opt_retime_init.ys.
+# section in the file. Other merge refusals live elsewhere: different clocks
+# in opt_retime_clockgate.ys, set/reset in opt_retime_all_fanouts.ys, an
+# async load from a net in opt_retime_init.ys.
 log -header "Refused: a forward move needs every operand registered"
 log -push
 design -reset

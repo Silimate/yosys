@@ -1,4 +1,4 @@
-# Design test for opt_retime_acc.v. Forward moves only for now.
+# Design test for opt_retime_acc.v.
 #
 # $add cuts are supported, and a register with extra readers is copied for
 # feed-forward fanout, but a register in a loop is a different case: the

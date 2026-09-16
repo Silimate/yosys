@@ -11,11 +11,10 @@
 // f_acc has a synchronous reset on purpose: moving it across a_acc changes the
 // value the accumulator resets to, so SRST_VALUE has to be adjusted. The pass
 // folds reset values now (opt_retime_reset.ys), so what still blocks these
-// moves is the loop, not the reset.
-// Forward moves it should cover once the pass grows past buffers:
-//   -flop f_acc -cut a_acc -forward : legal only if it stays inside the loop
-//   -flop f_cnt -cut a_cnt -forward : same shape with a constant operand
-//   -flop f_acc -cut b_acc -forward : wraps the loop, must not lose the reset
+// moves is the loop, not the reset (opt_retime_acc.ys):
+//   -flop f_acc -cut a_acc -forward
+//   -flop f_cnt -cut a_cnt -forward
+//   -flop f_acc -cut b_acc -forward
 
 module retime_acc (clk, rst, x, acc_o, cnt_o);
   input clk, rst;

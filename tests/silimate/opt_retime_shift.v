@@ -1,5 +1,5 @@
 // Shifters: fanout and width growth.
-//   fd -> rd, read by both shifters (unique_reader() rejects this today)
+//   fd -> rd, read by both shifters (a leftover copy keeps the other one)
 //   famt -> ramt, a shift-amount bus that merges like any other data input
 //   s_var  ($shr) keeps the width
 //   s_const ($shl) grows 8 bits to 11, so a moved flop changes width
