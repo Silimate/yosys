@@ -21,7 +21,8 @@
 #include "kernel/sigtools.h"
 #include "kernel/celltypes.h"
 #include <cmath>
-#include <functional>
+#include <memory>
+#include <utility>
 #include <vector>
 
 USING_YOSYS_NAMESPACE
@@ -34,106 +35,169 @@ PRIVATE_NAMESPACE_BEGIN
 // late select on a wide ripple carry) leaves them alone.
 static const IdString kAttrCarrySelect = ID(carry_select);
 
-// How late a module's own input ports arrive, and how deep it is from those
-// inputs to each output port. Keyed by module, then by port bit.
-typedef dict<Module *, dict<SigBit, double>> HierArrival;
+// Absolute arrival of a bit, resolved across module boundaries on demand.
+//
+// The pass ranks operands with a module-local walk, and that walk credits any
+// bit it has no driver for with arrival 0 -- a constant, but also an input port
+// or a child instance output, since an instance is an unknown cell type and so
+// already ends a path. A late operand reaching an adder through a port is
+// therefore indistinguishable from a register output.
+//
+// Answers are memoized per (module, bit) rather than summarized per module: a
+// summary has to charge every output the latest of *all* the module's inputs,
+// which inflates outputs the late input cannot even reach, and over-estimating
+// the narrow operand is exactly what authorizes an unprofitable rewrite. Asking
+// at the moment a site is ranked also means there is no precomputed state for a
+// rewrite elsewhere to leave stale.
+struct HierArrivalQuery {
+	Design *design;
 
-// Arrival walk that can see past the module boundary, given what the caller
-// already worked out about the ports and the child instances below it.
-struct HierTiming : FracDelayTiming {
-	// Absolute arrival of this module's input port bits, empty for the top.
-	const dict<SigBit, double> *port_arrival;
-	// Arrival of bits a child instance drives; filled by the fixpoint below.
-	dict<SigBit, double> inst_arrival;
+	// Per-module walk, built on first use. Each owns its own sigmap and driver
+	// map, and reaches back here for the bits it has no driver for.
+	dict<Module *, FracDelayTiming *> timing;
+	// Who instantiates a module, and through which cell. Structural, so a
+	// conversion (which only adds $add/$mux cells) cannot invalidate it.
+	dict<Module *, std::vector<std::pair<Module *, Cell *>>> parents;
 
-	HierTiming(Module *m, const dict<SigBit, double> *port_arrival)
-		: FracDelayTiming(m), port_arrival(port_arrival)
+	dict<Module *, dict<SigBit, double>> memo;
+	// Recursion guard. A hierarchy or combinational cycle charges its back edge
+	// 0, which under-estimates and so loses rewrites rather than inventing them.
+	dict<Module *, pool<SigBit>> active;
+
+	HierArrivalQuery(Design *design) : design(design)
 	{
-		build_connectivity();
+		for (auto module : design->modules())
+			for (auto cell : module->cells())
+				if (Module *child = design->module(cell->type))
+					parents[child].push_back(std::make_pair(module, cell));
 	}
 
-	// A child instance is an unknown cell type, so the base walk already stops
-	// at it; both it and an input port therefore arrive here.
-	double start_arrival(SigBit bit) override
+	~HierArrivalQuery()
 	{
-		auto inst = inst_arrival.find(bit);
-		if (inst != inst_arrival.end())
-			return inst->second;
-		if (port_arrival != nullptr && bit.wire != nullptr && bit.wire->port_input) {
-			auto port = port_arrival->find(bit);
-			if (port != port_arrival->end())
-				return port->second;
+		for (auto &entry : timing)
+			delete entry.second;
+	}
+
+	// Conversions change the depth of the module they land in, so anything
+	// answered by reading through that module has to be asked again.
+	void invalidate()
+	{
+		for (auto &entry : timing)
+			delete entry.second;
+		timing.clear();
+		memo.clear();
+	}
+
+	FracDelayTiming *walk(Module *module);
+
+	double arrival(Module *module, SigBit bit)
+	{
+		FracDelayTiming *t = walk(module);
+		bit = t->sigmap(bit);
+
+		auto hit = memo.find(module);
+		if (hit != memo.end()) {
+			auto bit_hit = hit->second.find(bit);
+			if (bit_hit != hit->second.end())
+				return bit_hit->second;
 		}
-		return 0;
+		if (active[module].count(bit))
+			return 0;
+
+		active[module].insert(bit);
+		// driver_of() already returns null for ports, constants, registers and
+		// instances, so a non-null driver is in-module logic this walk can cost.
+		RTLIL::Cell *drv = t->driver_of(bit);
+		double result = drv != nullptr ? t->arrival_of(drv) : boundary_arrival(module, bit);
+		active[module].erase(bit);
+
+		memo[module][bit] = result;
+		return result;
 	}
 
-	// Charge every bit a child instance drives the depth from that child's own
-	// inputs to the matching output port, on top of the latest input reaching
-	// the instance. Instances can chain (a carry out of one slice feeding the
-	// next), so iterate to a fixpoint; arrivals only ever rise, and the bound
-	// keeps a pathological chain from costing more than it can win.
-	void resolve_instances(Design *design, const HierArrival &internal, int max_rounds)
+	// A bit the module's own walk cannot cost: a child instance drives it, it is
+	// an input port, or it is a constant or register output.
+	double boundary_arrival(Module *module, SigBit bit)
 	{
-		for (int round = 0; round < max_rounds; round++) {
-			bool changed = false;
-			// Collect the whole round before applying it. Updating in place
-			// would leave arrivals memoized against a half-updated map, so the
-			// result depended on cell order rather than on the netlist.
-			dict<SigBit, double> pending;
-			reset_timing();
-			for (auto cell : module->cells()) {
-				Module *child = design->module(cell->type);
-				if (child == nullptr)
-					continue;
-				auto depth = internal.find(child);
-				if (depth == internal.end())
-					continue;
+		FracDelayTiming *t = walk(module);
 
-				// Latest input reaching the instance, composed with the child's
-				// own input-to-output depth. Per-output rather than per-cell, so
-				// a shallow output is not charged a deep sibling's depth.
-				double in_arrival = 0;
-				for (auto &conn : cell->connections())
-					if (cell->input(conn.first))
-						in_arrival = std::max(in_arrival, arrival(conn.second));
-
+		// Instance output: charge what is actually inside the child, by asking
+		// for the matching output port bit in the child's own coordinates.
+		auto drv = t->driver_map.find(bit);
+		if (drv != t->driver_map.end()) {
+			Cell *cell = drv->second;
+			Module *child = design->module(cell->type);
+			if (child != nullptr) {
 				for (auto &conn : cell->connections()) {
 					if (!cell->output(conn.first))
 						continue;
 					Wire *child_port = child->wire(conn.first);
 					if (child_port == nullptr)
 						continue;
+					SigSpec parent_bits = t->sigmap(conn.second);
 					SigSpec child_bits = SigSpec(child_port);
-					SigSpec parent_bits = sigmap(conn.second);
-					for (int i = 0; i < GetSize(parent_bits); i++) {
-						if (i >= GetSize(child_bits) || parent_bits[i].wire == nullptr)
-							continue;
-						double value = in_arrival + depth->second.at(child_bits[i], 0.0);
-						if (value > std::max(inst_arrival.at(parent_bits[i], 0.0),
-						                     pending.at(parent_bits[i], 0.0)) + 1e-9) {
-							pending[parent_bits[i]] = value;
-							changed = true;
-						}
-					}
+					for (int i = 0; i < GetSize(parent_bits) && i < GetSize(child_bits); i++)
+						if (parent_bits[i] == bit)
+							return arrival(child, child_bits[i]);
 				}
 			}
-			for (auto &update : pending)
-				inst_arrival[update.first] = update.second;
-			if (!changed)
-				break;
+			return 0; // register output or a cell type nothing can see through
 		}
-		reset_timing();
+
+		if (bit.wire == nullptr || !bit.wire->port_input)
+			return 0; // constant, or an undriven internal wire
+
+		// Input port: the earliest arrival any instantiation gives it, so a
+		// module is never rewritten on the strength of one favourable parent.
+		// A parent that leaves the port unconnected or short supplies 0.
+		auto instantiations = parents.find(module);
+		if (instantiations == parents.end() || instantiations->second.empty())
+			return 0; // top, or otherwise uninstantiated
+		double earliest = -1.0;
+		for (auto &parent : instantiations->second) {
+			double here = 0;
+			if (parent.second->hasPort(bit.wire->name)) {
+				SigSpec conn = walk(parent.first)->sigmap(
+					parent.second->getPort(bit.wire->name));
+				if (bit.offset < GetSize(conn))
+					here = arrival(parent.first, conn[bit.offset]);
+			}
+			earliest = earliest < 0 ? here : std::min(earliest, here);
+		}
+		return earliest < 0 ? 0 : earliest;
 	}
 };
+
+// Walk that defers its boundary bits to the query that owns it.
+struct QueryTiming : FracDelayTiming {
+	HierArrivalQuery *query;
+	Module *owner;
+
+	QueryTiming(Module *module, HierArrivalQuery *query)
+		: FracDelayTiming(module), query(query), owner(module)
+	{
+		build_connectivity();
+	}
+
+	double start_arrival(SigBit bit) override { return query->boundary_arrival(owner, bit); }
+};
+
+FracDelayTiming *HierArrivalQuery::walk(Module *module)
+{
+	auto hit = timing.find(module);
+	if (hit != timing.end())
+		return hit->second;
+	FracDelayTiming *t = new QueryTiming(module, this);
+	timing[module] = t;
+	return t;
+}
 
 struct OptCarrySelectWorker : FracDelayTiming {
 	int max_narrow;
 	int min_wide;
 	double margin;
-	// Input port arrivals handed down from the parent, null when not in
-	// hierarchical mode (every port then reads as arriving at 0, as before).
-	const dict<SigBit, double> *port_arrival = nullptr;
-	const dict<SigBit, double> *inst_arrival = nullptr;
+	// Set only under -hier-arrival; null leaves every boundary bit at 0, as before.
+	HierArrivalQuery *hier = nullptr;
 
 	int converted = 0;
 
@@ -148,21 +212,10 @@ struct OptCarrySelectWorker : FracDelayTiming {
 							driver_map[bit] = cell;
 	}
 
-	// Same seeding as HierTiming, so the rewrite decision and the analysis that
-	// produced the port arrivals agree on what "late" means.
+	// Ports and child instance outputs, asked for as the ranking needs them.
 	double start_arrival(SigBit bit) override
 	{
-		if (inst_arrival != nullptr) {
-			auto inst = inst_arrival->find(bit);
-			if (inst != inst_arrival->end())
-				return inst->second;
-		}
-		if (port_arrival != nullptr && bit.wire != nullptr && bit.wire->port_input) {
-			auto port = port_arrival->find(bit);
-			if (port != port_arrival->end())
-				return port->second;
-		}
-		return 0;
+		return hier == nullptr ? 0 : hier->boundary_arrival(module, bit);
 	}
 
 	// Decision record so we never iterate over a mutating cell list.
@@ -288,123 +341,6 @@ struct OptCarrySelectWorker : FracDelayTiming {
 	}
 };
 
-// Modules with children before their parents, so a bottom-up walk can rely on
-// every child already being measured. An instantiation cycle admits no such
-// order and is broken arbitrarily: one module in it is measured before its
-// child and reads that child's depth as 0, which under-estimates arrival and so
-// loses rewrites rather than taking wrong ones.
-static std::vector<Module *> modules_bottom_up(Design *design)
-{
-	// Built complete up front, and read through a copy below: recursing while a
-	// range-for walks children[module] would rehash the dict under the loop.
-	dict<Module *, std::vector<Module *>> children;
-	for (auto module : design->modules()) {
-		auto &kids = children[module];
-		pool<Module *> seen;
-		for (auto cell : module->cells())
-			if (Module *child = design->module(cell->type))
-				if (child != module && seen.insert(child).second)
-					kids.push_back(child);
-	}
-
-	std::vector<Module *> order;
-	pool<Module *> done, active;
-	std::function<void(Module *)> visit = [&](Module *module) {
-		if (done.count(module) || active.count(module))
-			return;
-		active.insert(module);
-		std::vector<Module *> kids = children.at(module);
-		for (auto child : kids)
-			visit(child);
-		active.erase(module);
-		done.insert(module);
-		order.push_back(module);
-	};
-	for (auto module : design->modules())
-		visit(module);
-	return order;
-}
-
-// Depth from each module's input ports to each of its output ports, measured
-// bottom-up so an instance is charged what is actually inside it. This is the
-// half a per-module walk cannot know: without it, a carry out of one slice
-// feeding the next reads as arriving the instant the clock edge does.
-static HierArrival measure_internal_depth(Design *design,
-                                          const std::vector<Module *> &bottom_up, int max_rounds)
-{
-	HierArrival internal;
-	for (auto module : bottom_up) {
-		HierTiming timing(module, /*port_arrival=*/nullptr);
-		timing.resolve_instances(design, internal, max_rounds);
-		auto &depth = internal[module];
-		for (auto wire : module->wires()) {
-			if (!wire->port_output)
-				continue;
-			for (auto bit : SigSpec(wire))
-				depth[bit] = timing.arrival_bit(bit);
-		}
-	}
-	return internal;
-}
-
-// Absolute arrival of every module's input ports, pushed down from the parents.
-// A module instantiated more than once keeps the *earliest* arrival each port
-// ever sees, so a rewrite that only pays when the operand is late is never
-// taken on the strength of one favourable instantiation.
-static HierArrival seed_port_arrival(Design *design, const std::vector<Module *> &bottom_up,
-                                     const HierArrival &internal, int max_rounds)
-{
-	HierArrival seeded;
-	pool<Module *> instantiated;
-	for (auto it = bottom_up.rbegin(); it != bottom_up.rend(); ++it) {
-		Module *module = *it;
-		// Held by value: the loop below inserts this module's children into
-		// `seeded`, which would rehash and dangle a pointer into it.
-		dict<SigBit, double> own_ports = seeded.at(module, dict<SigBit, double>());
-		HierTiming timing(module, &own_ports);
-		timing.resolve_instances(design, internal, max_rounds);
-
-		for (auto cell : module->cells()) {
-			Module *child = design->module(cell->type);
-			if (child == nullptr)
-				continue;
-
-			// What this one instantiation implies for every child input port
-			// bit. Bits it leaves unconnected arrive at 0 and have to be
-			// carried as 0 rather than skipped, or a port that is late in one
-			// instance and absent in another would keep the late value.
-			dict<SigBit, double> this_inst;
-			for (auto wire : child->wires())
-				if (wire->port_input)
-					for (auto bit : SigSpec(wire))
-						this_inst[bit] = 0.0;
-			for (auto &conn : cell->connections()) {
-				if (!cell->input(conn.first))
-					continue;
-				Wire *child_port = child->wire(conn.first);
-				if (child_port == nullptr)
-					continue;
-				SigSpec child_bits = SigSpec(child_port);
-				SigSpec parent_bits = timing.sigmap(conn.second);
-				for (int i = 0; i < GetSize(parent_bits) && i < GetSize(child_bits); i++)
-					this_inst[child_bits[i]] = timing.arrival_bit(parent_bits[i]);
-			}
-
-			// The first instantiation sets the arrival and later ones can only
-			// lower it, so a rewrite that only pays when the operand is late is
-			// never taken on the strength of one favourable instantiation.
-			bool first = instantiated.insert(child).second;
-			dict<SigBit, double> child_ports = seeded.at(child, dict<SigBit, double>());
-			for (auto &entry : this_inst)
-				child_ports[entry.first] = first
-					? entry.second
-					: std::min(child_ports.at(entry.first, 0.0), entry.second);
-			seeded[child] = child_ports;
-		}
-	}
-	return seeded;
-}
-
 struct OptCarrySelectPass : public Pass {
 	OptCarrySelectPass() : Pass("opt_carry_select",
 		"decompose wide-early + narrow-late adders into carry-select form") {}
@@ -436,18 +372,17 @@ struct OptCarrySelectPass : public Pass {
 		log("        require narrow_arrival > wide_arrival + F (default 0.0).\n");
 		log("\n");
 		log("    -hier-arrival\n");
-		log("        seed each module's input port arrivals from its parent instead of\n");
-		log("        charging every port zero. Without this a late operand that reaches\n");
-		log("        the adder through a port -- the carry between two slices of a wide\n");
-		log("        counter, say -- is indistinguishable from a register output, and no\n");
-		log("        such adder is ever rewritten. Costs a few extra arrival walks per\n");
-		log("        module, over the whole design rather than the selection. Off by\n");
-		log("        default.\n");
-		log("\n");
-		log("    -hier-rounds N\n");
-		log("        cap the instance-chain fixpoint at N rounds (default 8). A chain\n");
-		log("        deeper than N keeps under-estimated arrivals, so it loses rewrites\n");
-		log("        rather than gaining wrong ones.\n");
+		log("        resolve operand arrivals across module boundaries instead of\n");
+		log("        charging every input port and instance output zero. Without this a\n");
+		log("        late operand that reaches the adder through a port -- the carry\n");
+		log("        between two slices of a wide counter, say -- is indistinguishable\n");
+		log("        from a register output, and no such adder is ever rewritten.\n");
+		log("        Arrivals are resolved on demand for the operands of candidate\n");
+		log("        adders, so the cost follows those cones rather than the design. A\n");
+		log("        module instantiated more than once takes the earliest arrival any\n");
+		log("        instantiation gives a port, and a hierarchy cycle charges its back\n");
+		log("        edge zero, so both cases lose rewrites rather than invent them.\n");
+		log("        Off by default.\n");
 		log("\n");
 	}
 
@@ -458,7 +393,6 @@ struct OptCarrySelectPass : public Pass {
 		int min_wide = 8;
 		double margin = 0.0;
 		bool hier_arrival = false;
-		int hier_rounds = 8;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -478,40 +412,26 @@ struct OptCarrySelectPass : public Pass {
 				hier_arrival = true;
 				continue;
 			}
-			if (args[argidx] == "-hier-rounds" && argidx + 1 < args.size()) {
-				hier_rounds = atoi(args[++argidx].c_str());
-				continue;
-			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
-		// Both halves of the hierarchy walk run over the whole design, not the
-		// selection: a port's arrival is a property of its parent, which may
-		// well be outside the selection being rewritten.
-		HierArrival internal, seeded;
-		if (hier_arrival) {
-			std::vector<Module *> bottom_up = modules_bottom_up(design);
-			internal = measure_internal_depth(design, bottom_up, hier_rounds);
-			seeded = seed_port_arrival(design, bottom_up, internal, hier_rounds);
-		}
+		// Spans the whole design, not the selection: a port's arrival is a
+		// property of its parent, which may well sit outside the selection.
+		std::unique_ptr<HierArrivalQuery> hier;
+		if (hier_arrival)
+			hier.reset(new HierArrivalQuery(design));
 
 		int total = 0;
 		for (auto module : design->selected_modules()) {
 			OptCarrySelectWorker worker(module, max_narrow, min_wide, margin);
-			dict<SigBit, double> instances;
-			if (hier_arrival) {
-				// Recover the same instance arrivals the seeding pass saw, so a
-				// late operand produced inside this module by a child instance
-				// is ranked the way the analysis ranked it.
-				HierTiming timing(module, seeded.count(module) ? &seeded.at(module) : nullptr);
-				timing.resolve_instances(design, internal, hier_rounds);
-				instances = timing.inst_arrival;
-				worker.port_arrival = seeded.count(module) ? &seeded.at(module) : nullptr;
-				worker.inst_arrival = &instances;
-			}
+			worker.hier = hier.get();
 			worker.run();
 			total += worker.converted;
+			// This module's depth just changed, so drop anything the query
+			// answered by reading through it.
+			if (worker.converted != 0 && hier)
+				hier->invalidate();
 		}
 		log("Converted %d adder(s) to carry-select form.\n", total);
 	}
