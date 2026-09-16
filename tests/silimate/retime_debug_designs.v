@@ -645,6 +645,32 @@ module gatedfwd(input clk, en, input [7:0] a, b, output [7:0] q);
   $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(g), .D(s), .Q(q));
 endmodule
 
+// Forward mid-path fanout (from opt_retime_midpath.ys). Two $not hops, tap on
+// the cut. Extra readers of cut Y become the moved flop's Q, so the two-hop
+// move is legal. midtap below is the same chain with the tap one hop earlier.
+module midcut(input clk, input [7:0] a, output [7:0] q, tap);
+  (* init = 8'h00 *) wire [7:0] ra;
+  wire [7:0] t, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(t));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n2 (.A(t),  .Y(y));
+  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
+// Same chain, n1.Y is also a module output. -cut n1 is the legal
+// stop-at-fanout move; -cut n2 is the refusal below, because rewriting n1
+// would change the output's timing. A $buf tap on that net is a different
+// refusal (two hops, "cut is not on the after-path").
+module midtap(input clk, input [7:0] a, output [7:0] q, tap);
+  (* init = 8'h00 *) wire [7:0] ra;
+  wire [7:0] y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(tap));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n2 (.A(tap), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+
 // ==========================================================================
 // Designs the pass refuses.
 //

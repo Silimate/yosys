@@ -144,5 +144,6 @@ module bitslice_combo(input clk, input [1:0] a, b, output [1:0] q);
 endmodule
 EOF
 hierarchy -top bitslice_combo
-logger -expect error "Input B of cell a0 is not driven by a flop" 1
 opt_retime -flop fa0 -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input B of cell a0 is not driven by a flop or a constant, so flop fa0 cannot move forward across it."

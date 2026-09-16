@@ -173,8 +173,8 @@ log -pop
 # The moves are applied one after another, so a sibling that cannot move would
 # strand the ones already moved. Every move is asked before any of it is made -
 # a sibling against the cut the command named, standing in for the copy it will
-# really cross - so the batch is declined whole and under -if-legal the module
-# is left exactly as it was.
+# really cross - so the batch is declined whole and the module is left
+# exactly as it was.
 log -header "A sibling that cannot move refuses the batch before it starts"
 log -push
 design -reset
@@ -193,7 +193,7 @@ hierarchy -top blocked
 check -assert
 # A set/reset arrives on a net and stores no value the chain could fold, so f2
 # has nothing to move with.
-opt_retime -flop f1 -cut a0 -backward -all-fanouts -if-legal
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
 check -assert
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "-all-fanouts would have to move register f2, which captures the same net as flop f1, and cannot: Flop f2 cannot move across cell a0 because it has a set/reset, which the move would have to push through the cell."
@@ -237,7 +237,7 @@ endmodule
 EOF
 hierarchy -top tangled
 check -assert
-opt_retime -flop f1 -cut a0 -backward -all-fanouts -if-legal
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
 check -assert
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "-all-fanouts would have to move register f2, which captures the same net as flop f1, and cannot: Flop f2 control EN uses a data wire being retimed."

@@ -113,6 +113,8 @@ moves=(
 	"retime_debug_designs.v|gated|-flop f1 -cut a0 -backward"
 	"retime_debug_designs.v|gatedin|-flop f1 -cut a0 -backward"
 	"retime_debug_designs.v|gatedfwd|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|midcut|-flop fa -cut n2 -forward"
+	"retime_debug_designs.v|midtap|-flop fa -cut n1 -forward"
 )
 
 # Designs the pass refuses, in the same format. These get one picture rather
@@ -144,6 +146,7 @@ refusals=(
 	"retime_debug_designs.v|fanoutsr|-flop f1 -cut a0 -backward -all-fanouts"
 	"retime_debug_designs.v|fanouten|-flop f1 -cut a0 -backward -all-fanouts"
 	"retime_debug_designs.v|twogates|-flop fa -cut a0 -forward"
+	"retime_debug_designs.v|midtap|-flop fa -cut n2 -forward"
 )
 
 rm -rf "$root"

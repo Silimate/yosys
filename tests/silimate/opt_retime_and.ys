@@ -138,7 +138,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
 # 8'h0f asks for bits 8'hf0 clears, so no input to the $and produces it and
 # there is nothing to leave the flop holding.
 log -header "Refused: a stored bit the mask clears has no preimage"
@@ -154,5 +153,6 @@ EOF
 hierarchy -top andmask
 setattr -set init 8'h0f w:q
 check -assert
-logger -expect error "Cell a0 has no input on A that produces" 1
 opt_retime -flop f -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cell a0 has no input on A that produces 8'00001111, so a backward move has no stored value to leave behind."

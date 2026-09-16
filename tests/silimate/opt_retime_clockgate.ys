@@ -395,7 +395,7 @@ check -assert
 select -assert-count 1 c:ic1 %x:+[EN] w:en %i
 select -assert-count 1 c:ic2 %x:+[EN] w:en %i
 select -assert-count 0 c:fa %x:+[CLK] c:fb %x:+[CLK] %i
-opt_retime -flop fa -cut a0 -forward -if-legal
+opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different clock net than flop fa."
 # refused before anything was touched, as every refusal is
@@ -422,7 +422,7 @@ endmodule
 EOF
 hierarchy -top ungated
 check -assert
-opt_retime -flop fa -cut a0 -forward -if-legal
+opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved true
 check -assert
 select -assert-count 2 t:$dffe
@@ -450,7 +450,7 @@ endmodule
 EOF
 hierarchy -top twoenables
 check -assert
-opt_retime -flop fa -cut a0 -forward -if-legal
+opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different clock net than flop fa."
 select -assert-count 3 t:$dff

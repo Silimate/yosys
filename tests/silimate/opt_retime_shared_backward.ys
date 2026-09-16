@@ -226,9 +226,8 @@ log -pop
 # A duplicate reads the duplicate of the hop below it and nothing else on the
 # chain, so a hop that reads another hop off the path would need that same
 # substitution made on the duplicate's own operands. Refused rather than wired
-# to the delayed copy by mistake. -if-legal keeps the script alive so the
-# design can be checked for being untouched, and so the module-output refusal
-# below still gets the file's one expected error.
+# to the delayed copy by mistake. A refusal leaves the design untouched, so
+# the module-output refusal below can still run in the same script.
 log -header "Refused: reconvergence inside the chain"
 log -push
 design -reset
@@ -244,8 +243,10 @@ endmodule
 EOF
 hierarchy -top recon
 check -assert
-opt_retime -flop fq -cut a0 -backward -if-legal
+opt_retime -flop fq -cut a0 -backward
 check -assert
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cell x0 is on the before-path of flop fq and also reads Y of a0 off it, which opt_retime cannot duplicate yet."
 # nothing duplicated, nothing cloned, nothing rewired
 select -assert-count 1 t:$add
 select -assert-count 1 t:$xor
@@ -257,7 +258,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
 # A duplicate serves extra readers by taking over their input port. A module
 # output has no port to repoint: the cone's Y net is the output, and the move
 # needs that same net for the path.
@@ -273,5 +273,6 @@ endmodule
 EOF
 hierarchy -top outtap
 check -assert
-logger -expect error "Y of cell a0 is a module output as well as the before-path" 1
 opt_retime -flop f1 -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Y of cell a0 is a module output as well as the before-path of flop f1, so there is no net to hand the duplicate that would keep driving it."

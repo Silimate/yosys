@@ -26,6 +26,8 @@
 //   opt_retime_merge_fanout.ys  a register on a merged operand that something
 //                         else reads, so it stays behind and only the cut is
 //                         rewired to its D
+//   opt_retime_midpath.ys a tap on an intermediate Y: stop at that hop,
+//                         or refuse a cut past it
 //   opt_retime_mul.ys     $mul, the same merge as $add, plus signed folding
 //   opt_retime_backward.ys  capture flop onto a unique invertible chain whose
 //                         other operands are constant ($buf/$not/$xor/$add/$sub)

@@ -1,0 +1,107 @@
+# Forward mid-path fanout: a tap on a hop between the flop and the cut.
+#
+# Extra readers of flop Q are a leftover copy, and extra readers of the cut Y
+# become the moved flop's Q. A tap on an intermediate Y is neither. Rewriting
+# that hop from Q to D would hand the tap the value a cycle early, so a cut
+# past the tap is refused. The legal move is to stop at the tapped hop.
+#
+# A second combinational cell that consumes the whole intermediate Y is
+# already an ambiguous after-path (next_on_path sees two hops). What this
+# file pins is a reader that is not a hop: a module output, here. midcut is
+# the other side of the same chain: the tap sits on the cut, so a two-hop
+# move is still legal.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: tap on the cut Y, two hops, the tap becomes the new Q"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module midcut(input clk, input [7:0] a, output [7:0] q, tap);
+  (* init = 8'h00 *) wire [7:0] ra;
+  wire [7:0] t, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(t));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n2 (.A(t),  .Y(y));
+  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top midcut
+setattr -set init 8'h00 w:q
+check -assert
+select -assert-count 2 w:y %co c:* %i
+design -save orig
+opt_retime -flop fa -cut n2 -forward
+check -assert
+# n1 and n2 now sit in front of fa; the tap reads the new Q
+select -assert-count 2 t:$dff
+select -assert-count 1 c:n1 %x:+[A] w:a %i
+select -assert-count 1 c:n2 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+select -assert-count 1 c:bt %x:+[A] w:y %i
+rename midcut gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: n1.Y is also an output, so the cut has to be n1"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module midtap(input clk, input [7:0] a, output [7:0] q, tap);
+  (* init = 8'h00 *) wire [7:0] ra;
+  wire [7:0] y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(tap));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n2 (.A(tap), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top midtap
+setattr -set init 8'h00 w:q
+check -assert
+design -save orig
+opt_retime -flop fa -cut n1 -forward
+check -assert
+# n1 then fa; the output tap is now Q. n2 is untouched.
+select -assert-count 2 t:$dff
+select -assert-count 1 c:n1 %x:+[A] w:a %i
+select -assert-count 1 c:n1 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:tap %i
+select -assert-count 1 c:n2 %x:+[A] w:tap %i
+select -assert-count 1 w:tap a:init=8'hff %i
+rename midtap gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# n2 is still the unique next hop — a module output is not a hop — so this
+# is the case next_on_path would have allowed.
+log -header "Refused: a cut past the output tap would rewrite n1 under it"
+design -reset
+read_verilog -icells <<EOF
+module midtap(input clk, input [7:0] a, output [7:0] q, tap);
+  wire [7:0] ra, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(tap));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n2 (.A(tap), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top midtap
+check -assert
+opt_retime -flop fa -cut n2 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Y of cell n1 is read off the after-path of flop fa, so a forward move past it would change those readers."

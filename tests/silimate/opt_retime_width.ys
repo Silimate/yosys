@@ -105,8 +105,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to be last.
-#
 # Resizing rewrites the WIDTH parameter of the register being moved, which a
 # single-bit cell does not have. A 1-bit $add that keeps its carry is the
 # smallest way to ask for that.
@@ -130,5 +128,8 @@ endmodule
 EOF
 hierarchy -top fine
 check -assert
-logger -expect error "Flop fa is a single-bit cell and cannot widen to 2 bits" 1
 opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fa is a single-bit cell and cannot widen to 2 bits."
+design -reset
+log -pop

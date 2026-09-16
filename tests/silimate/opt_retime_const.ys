@@ -144,7 +144,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so it has to come last.
 # Both operands constant: a backward move has no live port to slide onto.
 log -header "Refused: backward across a cell whose every input is constant"
 design -reset
@@ -158,5 +157,6 @@ endmodule
 EOF
 hierarchy -top allconst
 check -assert
-logger -expect error "Every data input of cell a0 is constant" 1
 opt_retime -flop f -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Every data input of cell a0 is constant, so flop f has nothing to slide onto."

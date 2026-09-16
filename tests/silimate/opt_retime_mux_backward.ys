@@ -170,7 +170,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
 # With both data ports constant there is no data port left to slide onto, and
 # the select is not a substitute: it is the operand whose clone pays for cycle
 # 0, so there would be no fixed starting value left to give the other two.
@@ -185,5 +184,6 @@ endmodule
 EOF
 hierarchy -top selpath
 check -assert
-logger -expect error "would have to slide onto the select" 1
 opt_retime -flop f -cut u0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Both data inputs of u0 are constant or already registered, so flop f would have to slide onto the select, which opt_retime does not do yet."

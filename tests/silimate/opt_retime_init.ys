@@ -151,7 +151,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
 # A constant AD folds (opt_retime_reset.ys aldffeq). A net has nothing to
 # evaluate, so the load cannot be pushed through the $not.
 log -header "Refused: async load from a net"
@@ -168,5 +167,6 @@ endmodule
 EOF
 hierarchy -top aloadnet
 check -assert
-logger -expect error "it has an async load from a net" 1
 opt_retime -flop fa -cut n0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fa cannot move across cell n0 because it has an async load from a net, which the move would have to push through the cell."

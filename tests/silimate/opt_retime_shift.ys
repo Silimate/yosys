@@ -270,7 +270,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
 # $sshl/$sshr are forward cuts; they have no unique inverse, so a backward
 # move stops on the type.
 log -header "Refused: backward does not invert \$sshr"
@@ -288,5 +287,6 @@ endmodule
 EOF
 hierarchy -top signedshift
 check -assert
-logger -expect error "which opt_retime cannot move backward across yet" 1
 opt_retime -flop fq -cut s0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cut cell s0 has type $sshr, which opt_retime cannot move backward across yet."

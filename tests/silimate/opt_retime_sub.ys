@@ -121,8 +121,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to be last.
-#
 # Moving fc on its own is not a legal retiming: the other input of a1 comes
 # from b0, a $buf, and the register on that path sits further upstream at fa.
 log -header "Refused: fc alone cannot cross a1"
@@ -130,5 +128,8 @@ log -push
 design -reset
 read_verilog -icells opt_retime_add.v
 hierarchy -top retime_add
-logger -expect error "Input A of cell a1 is not driven by a flop" 1
 opt_retime -flop fc -cut a1 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input A of cell a1 is not driven by a flop or a constant, so flop fc cannot move forward across it."
+design -reset
+log -pop

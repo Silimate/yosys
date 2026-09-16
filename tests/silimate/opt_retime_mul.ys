@@ -126,7 +126,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
 # $div used to sit here as a type left out of the allowlist; it is a forward
 # cut now, proved in opt_retime_arith.ys. What is still refused is a gate-level
 # cut, and that one is a boundary rather than a to-do: this pass retimes
@@ -146,5 +145,6 @@ endmodule
 EOF
 hierarchy -top gatecut
 check -assert
-logger -expect error "which opt_retime cannot move across yet" 1
 opt_retime -flop fa -cut g0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cut cell g0 has type $_AND_, which opt_retime cannot move across yet."

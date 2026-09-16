@@ -91,9 +91,8 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to be the last
-# section in the file. Other merge refusals live elsewhere: different clocks
-# in opt_retime_clockgate.ys, set/reset in opt_retime_all_fanouts.ys, an
+# Other merge refusals live elsewhere: different clocks in
+# opt_retime_clockgate.ys, set/reset in opt_retime_all_fanouts.ys, an
 # async load from a net in opt_retime_init.ys.
 log -header "Refused: a forward move needs every operand registered"
 log -push
@@ -108,5 +107,8 @@ module unflopped(input clk, input [7:0] a, b, output [7:0] q);
 endmodule
 EOF
 hierarchy -top unflopped
-logger -expect error "Input B of cell a0 is not driven by a flop" 1
 opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input B of cell a0 is not driven by a flop or a constant, so flop fa cannot move forward across it."
+design -reset
+log -pop

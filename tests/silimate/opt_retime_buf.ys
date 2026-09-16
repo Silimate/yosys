@@ -73,10 +73,10 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
 log -header "Refused: backward does not stack a second flop on q0"
 design -reset
 read_verilog -icells opt_retime_buf.v
 hierarchy -top retime_probe
-logger -expect error "already registered" 1
 opt_retime -flop f1 -cut b0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input A of cell b0 is already registered, so flop f1 cannot move backward onto it: that would stack a second register on the same net."

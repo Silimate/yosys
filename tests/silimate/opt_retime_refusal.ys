@@ -1,11 +1,7 @@
-# Design test for -if-legal: a refused move reports and carries on.
+# Design test for a refused move: it reports and carries on.
 #
-# Every other test here pins a refusal with `logger -expect error`, which proves
-# the pass says no but also ends the run, so none of them can say what the
-# design looks like afterwards. That is the question this file exists for. A
-# caller choosing moves on its own will propose illegal ones, and the answer to
-# an illegal proposal has to be an answer rather than the end of the script.
-#
+# A caller choosing moves on its own will propose illegal ones, and the answer
+# to an illegal proposal has to be an answer rather than the end of the script.
 # What is pinned is that a refused move leaves the module exactly as it was,
 # down to the individual connections. That holds because every refusal is
 # raised before the first rewrite, not because anything rolls back: once the
@@ -16,7 +12,7 @@
 # $buf pairs with a legal move one way and a refusal the other.
 
 # ---------------------------------------------------------------------------
-log -header "Refused under -if-legal: the run survives and the design is untouched"
+log -header "Refused: the run survives and the design is untouched"
 log -push
 design -reset
 read_verilog -icells opt_retime_buf.v
@@ -27,8 +23,8 @@ select -assert-count 4 t:$buf
 design -save orig
 
 # b0's A is q0, already registered by f0, so a backward move onto it would
-# stack a second register on the same net. Without -if-legal this aborts.
-opt_retime -flop f1 -cut b0 -backward -if-legal
+# stack a second register on the same net.
+opt_retime -flop f1 -cut b0 -backward
 
 # reaching this line at all is half the test
 log -header "Still running, so the refusal did not end the script."
@@ -58,16 +54,14 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-log -header "Legal under -if-legal: the move still happens"
+log -header "Legal: the move still happens"
 log -push
 design -reset
 read_verilog -icells opt_retime_buf.v
 hierarchy -top retime_probe
 check -assert
 design -save orig
-# -if-legal changes what a refusal does and nothing else, so a legal move runs
-# exactly as it would without the option
-opt_retime -flop f1 -cut b2 -forward -if-legal
+opt_retime -flop f1 -cut b2 -forward
 check -assert
 scratchpad -assert opt_retime.moved true
 # unset rather than emptied on success, so no earlier reason can be mistaken
@@ -100,9 +94,9 @@ check -assert
 # a refusal leaves nothing behind for the next command to trip over, so they
 # can be proposed one after another and a real move still lands afterwards.
 # This is the shape a move-picking driver runs in.
-opt_retime -flop f1 -cut b0 -backward -if-legal
+opt_retime -flop f1 -cut b0 -backward
 scratchpad -assert opt_retime.moved false
-opt_retime -flop f1 -cut b0 -backward -if-legal
+opt_retime -flop f1 -cut b0 -backward
 scratchpad -assert opt_retime.moved false
 select -assert-count 3 t:$dff
 select -assert-count 1 c:f1 %x:+[D] w:n0 %i

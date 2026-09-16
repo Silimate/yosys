@@ -204,7 +204,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
 # The capture flop is 9 bits and the live operand is 8; invert would have to
 # pick a preimage of a different width.
 log -header "Refused: backward does not invert a width change"
@@ -219,5 +218,6 @@ endmodule
 EOF
 hierarchy -top backwide
 check -assert
-logger -expect error "would resize flop fq from 9 to 8 bits" 1
 opt_retime -flop fq -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Backward move across a0 would resize flop fq from 9 to 8 bits, which is not supported yet."

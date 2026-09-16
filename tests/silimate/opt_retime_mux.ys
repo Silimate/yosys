@@ -103,8 +103,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to be last.
-#
 # This is the tripwire for treating S as a control port that gets left behind.
 # If S were dropped from the cut's data inputs, this move would be accepted and
 # would silently change when the output samples sel.
@@ -125,5 +123,8 @@ endmodule
 EOF
 hierarchy -top liveselect
 check -assert
-logger -expect error "Input S of cell m0 is not driven by a flop" 1
 opt_retime -flop fa -cut m0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input S of cell m0 is not driven by a flop or a constant, so flop fa cannot move forward across it."
+design -reset
+log -pop

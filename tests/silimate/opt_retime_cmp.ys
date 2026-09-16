@@ -221,8 +221,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to be last.
-#
 # Folding needs every init value it combines to be defined. Here fa has one and
 # fb does not, so the $add would fold 8'h0f against undefined bits and give
 # undefined bits back, throwing away what fa said about its first cycle. The
@@ -244,5 +242,8 @@ endmodule
 EOF
 hierarchy -top mixinit
 check -assert
-logger -expect error "Flop fa cannot move because the move would fold init values together and only some of them are defined" 1
 opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fa cannot move because the move would fold init values together and only some of them are defined."
+design -reset
+log -pop

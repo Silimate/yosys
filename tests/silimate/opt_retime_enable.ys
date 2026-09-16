@@ -88,8 +88,6 @@ log -pop
 # parameter rather than part of the cell type, so the cell-type check passes
 # and only the enable comparison catches it. fb updates when fa holds, so no
 # single register can stand in for both.
-#
-# logger -expect error exits yosys successfully, so it has to come last.
 design -reset
 read_verilog -icells <<EOF
 module enmix(input clk, en, input [7:0] a, b, output [7:0] q);
@@ -106,5 +104,6 @@ EOF
 hierarchy -top enmix
 check -assert
 select -assert-count 2 t:$dffe
-logger -expect error "Flop fb on input B of cell a0 has an enable of the opposite polarity to flop fa" 1
 opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has an enable of the opposite polarity to flop fa."
