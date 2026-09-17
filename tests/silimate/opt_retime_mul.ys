@@ -166,6 +166,48 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
+# Every \$mul case either side of this one is a single hop, so the modular
+# inverse is the whole fold. A chain composes one inverse per hop, innermost
+# last, and getting that order wrong still type-checks: both hops here are
+# 8 bits wide and both are invertible. 0xd1 back through + 7 is 0xca, and 0xca
+# back through * 3 is 0xee, since 3 * 0xee = 0x2ca and the low byte is 0xca.
+log -header "Backward: folding an init through \$mul and \$add together"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module mulchain(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] p, y;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(8'd3), .Y(p));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(p), .B(8'd7), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top mulchain
+setattr -set init 8'hd1 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut m0 -backward
+check -assert
+select -assert-count 1 t:$dff
+# The register lands ahead of both hops, and both still compute in order
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:m0 %x:+[Y] w:p %i
+select -assert-count 1 c:a0 %x:+[Y] w:q %i
+# The two inverses composed: 0xd1 - 7 = 0xca, then 0xca / 3 = 0xee
+select -assert-count 1 w:y a:init=8'hee %i
+rename mulchain gate
+design -import orig -as gold
+setattr -set init 8'hd1 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
 # 2 has no inverse, but 8'h0a is in the image: 5 * 2 = 10. The high bit of
 # the preimage is free; the pass leaves it 0.
 log -header "Backward: \$mul against an even constant, init in the image"

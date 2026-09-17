@@ -252,6 +252,58 @@ log -pop
 # ---------------------------------------------------------------------------
 # logger -expect error exits yosys successfully, so this has to come last.
 # A forward move merges the registers on the other operands into the one that
+# ---------------------------------------------------------------------------
+# Every case above starts from an undefined init, so the batch never folds a
+# stored value. Each register in the batch carries its own, and each has to be
+# folded through its own copy of the cone: the siblings share the cone but not
+# the value, so one fold cannot stand in for the other. $mul against an odd
+# constant is the fold worth checking, being the one that runs the modular
+# inverse rather than returning the value unchanged.
+log -header "-all-fanouts folds each sibling's own init"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module batchinit(input clk, en1, en2, input [7:0] a, output [7:0] res1, res2);
+  wire [7:0] p;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(8'd3), .Y(p));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(p), .Q(res1));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(p), .Q(res2));
+endmodule
+EOF
+hierarchy -top batchinit
+# 3 * 0x39 = 0xab and 3 * 0x11 = 0x33, both mod 256, so the two siblings fold
+# to different preimages and neither is the identity
+setattr -set init 8'hab w:res1
+setattr -set init 8'h33 w:res2
+check -assert
+design -save orig
+opt_retime -flop f1 -cut m0 -backward -all-fanouts
+check -assert
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+select -assert-count 2 t:$mul
+select -assert-count 2 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:a %i
+select -assert-count 1 c:f2 %x:+[D] w:a %i
+# Each register keeps its own preimage: 0xab / 3 = 0x39, 0x33 / 3 = 0x11
+select -assert-count 1 w:p a:init=8'h39 %i
+select -assert-count 1 w:m0_dup_y a:init=8'h11 %i
+
+rename batchinit gate
+design -import orig -as gold
+setattr -set init 8'hab gold/w:res1
+setattr -set init 8'h33 gold/w:res2
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
 # moves, so it collapses fanin rather than fanning out to readers, and there is
 # nothing for -all-fanouts to mean.
 log -header "Refused: -all-fanouts is a backward-only idea"
