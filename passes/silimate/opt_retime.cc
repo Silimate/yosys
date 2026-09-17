@@ -1169,20 +1169,24 @@ struct OffPath {
 	bool empty() const { return readers.empty() && !output; }
 };
 
-// From flop.D back to cut: each hop's Y drives the next hop's path port (or D,
-// for the first). chain.front() is the cell driving D, chain.back() is the cut.
-// extra comes back parallel to the chain, holding what reads each hop's Y off
-// the path.
+// From start back to cut: each hop's Y drives the next hop's path port (or
+// start, for the first). chain.front() is the cell driving start, chain.back()
+// is the cut. extra comes back parallel to the chain, holding what reads each
+// hop's Y off the path.
+//
+// start is flop's D, or the bits of it being moved when the flop is several
+// registers sharing a cell. It is passed rather than read off the flop so that
+// slice_for_cut can ask where each run of D leads without moving anything.
 std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
-		const dict<SigBit, BitSrc> &drivers, Cell *flop, Cell *cut,
-		std::vector<OffPath> &extra)
+		const dict<SigBit, BitSrc> &drivers, Cell *flop, const SigSpec &start,
+		Cell *cut, std::vector<OffPath> &extra)
 {
 	extra.clear();
 	std::vector<ChainStep> chain;
 	pool<Cell *> seen;
 	Cell *reader = flop;
 	IdString reader_port = ID::D;
-	SigSpec cur = sigmap(flop->getPort(ID::D));
+	SigSpec cur = sigmap(start);
 
 	while (true) {
 		IdString y_port;
@@ -1248,6 +1252,103 @@ void check_chain(FfData &ff, Cell *flop, const std::vector<ChainStep> &chain)
 						log_id(flop), log_id(step.cell), why);
 }
 
+// Which bits of flop are the register the caller meant. A wide cell can be
+// several independent registers, which is what an RTL array declaration leaves
+// behind: one $aldff of width 320 whose D is a concat of ten drivers and whose Q
+// is a concat of ten wires, holding ten 32-bit words that share nothing but a
+// clock. opt_retime moves whole cells, and a D with ten drivers has no unique
+// cell behind it, so every word of such a register is refused before the move
+// starts.
+//
+// D is cut at the bits where its driver changes, which is the rule splitcells
+// uses and which lands on the word boundaries by itself. The -cut names which
+// run to take: the caller gave both ends of the move, so the run whose
+// before-path reaches the cut is the register that was meant, and nothing has to
+// read the flop's name to work out which word it is.
+//
+// A register that is a single run comes back whole, which is the ordinary case
+// and leaves the move exactly as it was.
+std::vector<int> slice_for_cut(Module *module, SigMap &sigmap,
+		const dict<SigBit, BitSrc> &drivers, Cell *flop, Cell *cut)
+{
+	SigSpec d = sigmap(flop->getPort(ID::D));
+	std::vector<std::vector<int>> runs;
+	Cell *prev = nullptr;
+	for (int i = 0; i < GetSize(d); i++) {
+		auto it = drivers.find(d[i]);
+		Cell *driver = it == drivers.end() ? nullptr : it->second.cell;
+		// An undriven bit joins nothing: it cannot be part of a run that has a
+		// unique cell behind it, and starting a fresh run keeps it from
+		// swallowing the next one.
+		if (runs.empty() || driver == nullptr || driver != prev)
+			runs.push_back({});
+		runs.back().push_back(i);
+		prev = driver;
+	}
+
+	std::vector<int> all;
+	for (int i = 0; i < GetSize(d); i++)
+		all.push_back(i);
+	if (GetSize(runs) < 2)
+		return all;
+
+	// The chain walk is the authority on whether a run reaches the cut, so it is
+	// what gets asked, rather than a second walk that could disagree with it.
+	// It refuses by throwing, and a run that refuses is simply not this move.
+	std::vector<int> found;
+	int reaching = 0;
+	for (auto &run : runs) {
+		SigSpec start;
+		for (int i : run)
+			start.append(d[i]);
+		std::vector<OffPath> extra;
+		try {
+			collect_backward_chain(module, sigmap, drivers, flop, start, cut, extra);
+		} catch (const MoveRefused &) {
+			continue;
+		}
+		if (reaching++ == 0)
+			found = run;
+	}
+
+	if (reaching == 1)
+		return found;
+	if (reaching == 0)
+		refuse("Flop %s is %d registers sharing one cell, and the before-path of "
+				"none of them reaches cut %s.\n",
+				log_id(flop), GetSize(runs), log_id(cut));
+	refuse("Flop %s is %d registers sharing one cell and %d of them reach cut %s, "
+			"so opt_retime cannot tell which one to move.\n",
+			log_id(flop), GetSize(runs), reaching, log_id(cut));
+}
+
+// The bits of a width-wide register that keep is not taking.
+std::vector<int> other_bits(const std::vector<int> &keep, int width)
+{
+	pool<int> taken(keep.begin(), keep.end());
+	std::vector<int> rest;
+	for (int i = 0; i < width; i++)
+		if (!taken.count(i))
+			rest.push_back(i);
+	return rest;
+}
+
+// A cell holds more than one register when its D arrives in several pieces:
+// each piece is driven on its own and nothing ties them together but the clock.
+// This is a look at the port rather than a walk of the module, so it is cheap
+// enough to ask anywhere, and it errs the safe way -- a D that arrives whole is
+// one register for every purpose here, whatever its width.
+void refuse_if_shared(Cell *flop, const char *what)
+{
+	if (!flop->hasPort(ID::D))
+		return;
+	int pieces = GetSize(flop->getPort(ID::D).chunks());
+	if (pieces > 1)
+		refuse("Flop %s is %d registers sharing one cell, which opt_retime can "
+				"take apart for a plain -backward move but not for %s yet.\n",
+				log_id(flop), pieces, what);
+}
+
 // dry_run asks the question and skips the answer: every refusal this move can
 // make has been made by the time the first cell is touched, so returning there
 // leaves a legality check with no side effects. -all-fanouts is what wants it,
@@ -1265,14 +1366,27 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 	SigMap sigmap(module);
 	FfInitVals initvals(&sigmap, module);
 
-	FfData ff(&initvals, flop);
-	if (!ff.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
+	FfData whole(&initvals, flop);
+	if (!whole.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
 		refuse("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
+
+	// Everything below works on one register. When the cell holds several, that
+	// is the run the cut picked; the rest of the cell is put back beside the
+	// move at the end. The slice is a value and builds nothing, so a refusal
+	// between here and the commit still leaves the design untouched.
+	std::vector<int> bits = slice_for_cut(module, sigmap, drivers, flop, cut);
+	bool sliced = GetSize(bits) != whole.width;
+	FfData ff = sliced ? whole.slice(bits) : whole;
+	// The register the caller named is the one that moves, so it keeps the name
+	// and the remainder takes a new one. FfData::slice hands out a fresh id.
+	if (sliced)
+		ff.name = whole.name;
+
 	std::vector<OffPath> extra;
 	std::vector<ChainStep> chain = collect_backward_chain(module, sigmap, drivers,
-			flop, cut, extra);
+			flop, ff.sig_d, cut, extra);
 
 	check_chain(ff, flop, chain);
 
@@ -1320,8 +1434,8 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 	IdString path_port = chain.back().port;
 	Cell *front = chain.front().cell;
 	SigSpec path_in = cut->getPort(path_port);
-	SigSpec d = flop->getPort(ID::D);
-	SigSpec q = flop->getPort(ID::Q);
+	SigSpec d = ff.sig_d;
+	SigSpec q = ff.sig_q;
 
 	if (GetSize(path_in) != GetSize(q))
 		refuse("Backward move across %s would resize flop %s from %d to %d "
@@ -1535,6 +1649,30 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 	front->setPort(ID::Y, q);
 	cut->setPort(path_port, link);
 
+	// What the move is not taking goes back as its own cell, and the shared one
+	// goes away. This runs before the moved register is built because that one
+	// is taking the shared cell's name, which is not free until it is gone. The
+	// snapshot the remainder is cut from was taken before any rewiring, and the
+	// rewiring above touched only nets this move owns -- the front hop's Y is
+	// the moved run's D in full, or the chain walk would not have accepted it --
+	// so the other registers come back reading what they always read.
+	if (sliced) {
+		std::vector<int> rest = other_bits(bits, whole.width);
+		FfData keep = whole.slice(rest);
+		keep.name = module->uniquify(whole.name.str() + "_rest");
+		whole.remove();
+		// Fatal rather than refused, for the same reason as the clone above:
+		// the shared cell is already gone by the time this could decline.
+		if (!keep.emit())
+			log_error("The %d register(s) left beside flop %s did not survive "
+					"being rebuilt after the move.\n",
+					GetSize(rest), log_id(whole.name));
+		log("Flop %s held several registers; moving the %d bit(s) whose "
+				"before-path reaches %s and leaving the other %d as %s.\n",
+				log_id(whole.name), GetSize(bits), log_id(cut), GetSize(rest),
+				log_id(keep.name));
+	}
+
 	ff.remove_init();
 	IdString flop_name = ff.name;
 	ff.sig_d = path_in;
@@ -1615,6 +1753,12 @@ void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
 
 	SigMap sigmap(module);
 
+	// A plain -backward takes one register out of a cell holding several. Here
+	// the siblings are found by the net they capture, and a sliced register
+	// captures part of one, so what counts as a sibling would have to be settled
+	// first. Refused plainly rather than half-answered.
+	refuse_if_shared(flop, "-all-fanouts");
+
 	std::vector<Cell *> targets;
 	targets.push_back(flop);
 	for (auto cell : capture_siblings(module, sigmap, flop))
@@ -1648,7 +1792,7 @@ void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
 	std::vector<OffPath> extra;
 	int depth = GetSize(collect_backward_chain(module, sigmap, drivers, flop,
-			cut, extra));
+			flop->getPort(ID::D), cut, extra));
 
 	// Names and nets to report at the end, read now because the registers are
 	// rebuilt rather than edited and the cells these point at will be gone.
@@ -1688,6 +1832,12 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 				log_id(cut), log_id(cut->type));
 	if (flop == cut)
 		refuse("Flop and cut must be different cells.\n");
+
+	// A backward move picks the register out of a shared cell by asking which
+	// run of D reaches the cut. Forward has no such question to ask: it starts
+	// at Q, and the registers in a shared cell fan out to unrelated places, so
+	// which one was meant is not written anywhere the pass can read.
+	refuse_if_shared(flop, "-forward");
 
 	SigMap sigmap(module);
 	FfInitVals initvals(&sigmap, module);
@@ -1942,6 +2092,9 @@ struct OptRetimePass : public Pass {
 		log("\n");
 		log("    -backward\n");
 		log("        move the register upstream onto the path input of -cut.\n");
+		log("        A cell holding several registers, as an RTL array leaves\n");
+		log("        behind, is taken apart first: the run of D reaching -cut is\n");
+		log("        moved under the cell's name and the rest stays beside it.\n");
 		log("        Invertible cuts: $buf, $not, $xor, $xnor, $add, $sub, $mul,\n");
 		log("        $and, $or, $mux. Other live data inputs get a clone of the flop.\n");
 		log("        The moved flop feeds the cut, so its init has to be a\n");

@@ -1,0 +1,216 @@
+# Moves out of a cell that holds more than one register.
+#
+# An RTL array declaration leaves one cell behind, not one per word: `reg [3:0]
+# firStep [0:9]` becomes a single $dff of width 40 whose D is a concat of ten
+# drivers and whose Q a concat of ten wires. The words share a clock and
+# nothing else. opt_retime moves whole cells, and a D arriving in ten pieces
+# has no unique cell behind it, so without taking the cell apart every word of
+# such a register is refused before the move starts.
+#
+# The -cut says which word was meant. D is split where its driver changes, and
+# the run whose before-path reaches the cut is the one that moves; it keeps the
+# cell's name and the rest of the cell is rebuilt beside it. Nothing reads the
+# register's name to work this out, so a design whose words are not numbered in
+# the name works the same way.
+
+# ---------------------------------------------------------------------------
+log -header "Backward: the word reaching the cut moves, the rest stays"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module arrreg(input clk, input [3:0] a, b, c, output [3:0] q0, q1, q2);
+  wire [3:0] d0, d1, d2;
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    w0 (.A(a), .B(4'd1), .Y(d0));
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    w1 (.A(b), .B(4'd3), .Y(d1));
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    w2 (.A(c), .B(4'd5), .Y(d2));
+  $dff #(.WIDTH(12), .CLK_POLARITY(1'b1))
+    r (.CLK(clk), .D({d2, d1, d0}), .Q({q2, q1, q0}));
+endmodule
+EOF
+hierarchy -top arrreg
+check -assert
+# one cell, three registers
+select -assert-count 1 t:$dff
+setattr -set init 4'd2 w:q0
+setattr -set init 4'd7 w:q1
+setattr -set init 4'd9 w:q2
+design -save orig
+opt_retime -flop r -cut w1 -backward
+check -assert
+# The middle word left the cell, so there are two now: the move under the
+# original name and the two untouched words beside it.
+select -assert-count 2 t:$dff
+select -assert-count 1 c:r
+select -assert-count 1 c:r_rest
+# b -> r -> d1 -> w1 -> q1: the register samples what the cut used to read,
+# and the cut now reads the register and drives the old Q.
+select -assert-count 1 c:r %x:+[D] w:b %i
+select -assert-count 1 c:r %x:+[Q] w:d1 %i
+select -assert-count 1 c:w1 %x:+[A] w:d1 %i
+select -assert-count 1 c:w1 %x:+[Y] w:q1 %i
+# The words that did not move kept their drivers and their outputs.
+select -assert-count 1 c:r_rest %x:+[D] w:d0 %i
+select -assert-count 1 c:r_rest %x:+[D] w:d2 %i
+select -assert-count 1 c:w0 %x:+[Y] w:d0 %i
+select -assert-count 1 c:w2 %x:+[Y] w:d2 %i
+rename arrreg gate
+# The moved register holds the preimage: it feeds a +3 that has to produce the
+# old starting value, so 7 becomes 4. The other two words keep the init they
+# had, which is what says FfData::slice carried the per-word values across into
+# the rebuilt remainder rather than flattening them.
+setattr -set init 4'd4 gate/w:d1
+setattr -set init 4'd2 gate/w:q0
+setattr -set init 4'd9 gate/w:q2
+design -import orig -as gold
+setattr -set init 4'd2 gold/w:q0
+setattr -set init 4'd7 gold/w:q1
+setattr -set init 4'd9 gold/w:q2
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: leaving a single word behind"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module twoword(input clk, input [3:0] a, b, output [3:0] q0, q1);
+  wire [3:0] d0, d1;
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    w0 (.A(a), .B(4'd1), .Y(d0));
+  $xor #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    w1 (.A(b), .B(4'd6), .Y(d1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1))
+    r (.CLK(clk), .D({d1, d0}), .Q({q1, q0}));
+endmodule
+EOF
+hierarchy -top twoword
+check -assert
+select -assert-count 1 t:$dff
+setattr -set init 4'd5 w:q0
+setattr -set init 4'd12 w:q1
+design -save orig
+# The low word this time, so the run that moves is not the one in the middle
+# and the remainder is a single word rather than a pair.
+opt_retime -flop r -cut w0 -backward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 1 c:r %x:+[D] w:a %i
+select -assert-count 1 c:r %x:+[Q] w:d0 %i
+select -assert-count 1 c:r_rest %x:+[D] w:d1 %i
+select -assert-count 1 c:r_rest %x:+[Q] w:q1 %i
+rename twoword gate
+# 5 - 1 is 4
+setattr -set init 4'd4 gate/w:d0
+setattr -set init 4'd12 gate/w:q1
+design -import orig -as gold
+setattr -set init 4'd5 gold/w:q0
+setattr -set init 4'd12 gold/w:q1
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: no word of the shared cell reaches the cut"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module noreach(input clk, input [3:0] a, b, e, output [3:0] q0, q1, y);
+  wire [3:0] d0, d1;
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    w0 (.A(a), .B(4'd1), .Y(d0));
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    w1 (.A(b), .B(4'd3), .Y(d1));
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    far (.A(e), .B(4'd7), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1))
+    r (.CLK(clk), .D({d1, d0}), .Q({q1, q0}));
+endmodule
+EOF
+hierarchy -top noreach
+check -assert
+select -assert-count 1 t:$dff
+select -assert-count 3 t:$add
+# far drives a module output, not the register, so neither word can get to it
+opt_retime -flop r -cut far -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, and the before-path of none of them reaches cut far."
+# A refusal is not allowed to take the cell apart on its way out: the slice is
+# a value and nothing is built from it until the last refusal is behind us.
+check -assert
+select -assert-count 1 t:$dff
+select -assert-count 3 t:$add
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: two words of the shared cell reach the cut"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module ambig(input clk, input [3:0] a, output [3:0] q0, q1);
+  wire [3:0] y, d0, d1;
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    shared (.A(a), .B(4'd1), .Y(y));
+  $not #(.A_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0)) n0 (.A(y), .Y(d0));
+  $not #(.A_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0)) n1 (.A(y), .Y(d1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1))
+    r (.CLK(clk), .D({d1, d0}), .Q({q1, q0}));
+endmodule
+EOF
+hierarchy -top ambig
+check -assert
+select -assert-count 1 t:$dff
+# Both words are fed through their own inverter from the same cut, so the cut
+# no longer says which register was meant and the move is declined rather than
+# guessed at.
+opt_retime -flop r -cut shared -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell and 2 of them reach cut shared, so opt_retime cannot tell which one to move."
+check -assert
+select -assert-count 1 t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: forward and -all-fanouts do not take a shared cell apart"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module notyet(input clk, input [3:0] a, b, output [3:0] q0, q1, s);
+  wire [3:0] d0, d1;
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    w0 (.A(a), .B(4'd1), .Y(d0));
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    w1 (.A(b), .B(4'd3), .Y(d1));
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    after (.A(q0), .B(4'd2), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1))
+    r (.CLK(clk), .D({d1, d0}), .Q({q1, q0}));
+endmodule
+EOF
+hierarchy -top notyet
+check -assert
+select -assert-count 1 t:$dff
+# Forward starts at Q, and the registers in a shared cell fan out to unrelated
+# places, so there is no cut to pick between them the way -backward has.
+opt_retime -flop r -cut after -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, which opt_retime can take apart for a plain -backward move but not for -forward yet."
+select -assert-count 1 t:$dff
+opt_retime -flop r -cut w0 -backward -all-fanouts
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, which opt_retime can take apart for a plain -backward move but not for -all-fanouts yet."
+check -assert
+select -assert-count 1 t:$dff
+design -reset
+log -pop
