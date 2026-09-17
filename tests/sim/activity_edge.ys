@@ -1,0 +1,48 @@
+# A transition on the closing sample is not a toggle the window can account for.
+#
+# activity_edge.vcd (see activity_edge_gen.py) is a 64-cycle 1GHz window that ends
+# exactly on a rising edge, so several bits change on the last sample. Such a change
+# opens an interval of zero width: duty never sees the level it switched to, while the
+# toggle itself would still be counted. The pair then stops describing one waveform --
+# a bit reports toggling more often than the time it was given allows.
+#
+# `flip` and `quiet` carry the same 4-cycle stimulus and differ only in whether their
+# last change lands on the closing sample, so they must annotate identically.
+#
+# `bus` is why this needs per-bit state. Both bits are visited on the closing sample
+# because bus[0] changes there, so a check that only asked "was this bit written at
+# max_time" would take a toggle off bus[1] as well, which never changed there. bus[1]
+# settles mid-window and keeps its single toggle.
+#
+# `xz` covers the weight. Its closing change is x -> 1, worth half a toggle rather than
+# a whole one, so removing a whole one would drive its count negative.
+
+read_verilog activity_edge.v
+prep -top activity_edge
+
+sim -r activity_edge.vcd -scope tb.uut -activity -q
+
+select -assert-any A:$DURATION=64000000
+
+# The period comes from the raw toggle count, closing edge included: that asks how many
+# half periods the window spans, and this one spans 64 whole periods. Dropping the edge
+# here instead would read the window as slightly longer than it is.
+select -assert-any A:$FREQUENCY=1000000000.000000
+
+# The clock rises on the closing sample, so its reported activity is 127/128 rather than
+# a flat 1: the 64th rise has no high phase inside the window to account for it.
+select -assert-count 1 w:clk a:$ACKT=0.992188* %i
+select -assert-count 1 w:clk a:$DUTY=0.500000* %i
+
+# Same stimulus, one ending on the closing sample and one not: identical numbers.
+select -assert-count 1 w:flip a:$ACKT=0.117188* %i
+select -assert-count 1 w:quiet a:$ACKT=0.117188* %i
+
+# bus[0] toggles on the closing sample and keeps nothing; bus[1] is visited at the same
+# instant without changing, so its own toggle survives. Asserting the pair together is
+# what pins the per-bit distinction.
+select -assert-count 1 w:bus a:$ACKT="0.000000 0.007812" %i
+
+# x -> 1 on the closing sample adds half a toggle, so exactly half is taken back off.
+# Removing a whole one instead leaves -0.5, which no waveform can produce.
+select -assert-count 1 w:xz a:$ACKT=0.000000* %i

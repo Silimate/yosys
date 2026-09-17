@@ -3135,6 +3135,10 @@ struct AnnotateActivity : public OutputWriter {
 		std::vector<uint64_t> highTimes;
 		// Time the bit held a known 0 or 1, which is what duty is a fraction of
 		std::vector<uint64_t> knownTimes;
+		// What the bit's last event added to its toggle count, 0 if it held its value.
+		// An x/z transition is worth half a toggle, so the weight is kept rather than
+		// recomputed when a boundary event has to be taken back off.
+		std::vector<double_t> lastToggleWeights;
 	};
 
 	typedef std::unordered_map<int, SignalActivityData> SignalActivityDataMap;
@@ -3170,10 +3174,12 @@ struct AnnotateActivity : public OutputWriter {
 				entry.highTimes.assign(GetSize(value), 0);
 				entry.knownTimes.assign(GetSize(value), 0);
 				entry.toggleCounts.assign(GetSize(value), 0);
+				entry.lastToggleWeights.assign(GetSize(value), 0.0);
 				itr = dataMap.emplace(sig, std::move(entry)).first;
 			}
 			std::vector<uint64_t> &lastVals = itr->second.lastValues;
 			std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
+			std::vector<double_t> &lastToggleWeights = itr->second.lastToggleWeights;
 			std::vector<uint64_t> &prevTimes = itr->second.prevTimes;
 			std::vector<uint64_t> &highTimes = itr->second.highTimes;
 			std::vector<uint64_t> &knownTimes = itr->second.knownTimes;
@@ -3208,12 +3214,14 @@ struct AnnotateActivity : public OutputWriter {
 					}
 				}
 				prevTimes[i] = time;
+				lastToggleWeights[i] = 0.0;
 				// If signal toggled
 				if (val != lastVals[i]) {
 					if (val == 'x' || val == 'z' || lastVals[i] == 'x' || lastVals[i] == 'z')
-						toggleCounts[i] += 0.5;
+						lastToggleWeights[i] = 0.5;
 					else
-						toggleCounts[i] += 1.0;
+						lastToggleWeights[i] = 1.0;
+					toggleCounts[i] += lastToggleWeights[i];
 					if (toggleCounts[i] > highest_toggle) {
 						highest_toggle = toggleCounts[i];
 						clk = sig;
@@ -3337,6 +3345,8 @@ struct AnnotateActivity : public OutputWriter {
 			  if (itr == dataMap.end())
 				  return;
 			  const std::vector<double_t> &toggleCounts = itr->second.toggleCounts;
+			  const std::vector<double_t> &lastToggleWeights = itr->second.lastToggleWeights;
+			  const std::vector<uint64_t> &prevTimes = itr->second.prevTimes;
 			  const std::vector<uint64_t> &highTimes = itr->second.highTimes;
 			  const std::vector<uint64_t> &knownTimes = itr->second.knownTimes;
 			  if (worker->debug) {
@@ -3360,8 +3370,16 @@ struct AnnotateActivity : public OutputWriter {
 				  log_warning("Signal size/value mismatch for %s: %d vs %ld", full_name.c_str(), size, toggleCounts.size());
 			  }
 			  for (uint32_t i = 0; i < (uint32_t)size; i++) {
-				  // Compute Activity
-				  double activity = toggleCounts[i] / (cycles * 2.0);
+				  // Compute Activity. A transition on the window's last instant opens an
+				  // interval of zero width, so duty is never credited the level it
+				  // switched to; counting it here would report the bit toggling more
+				  // often than the time it was given allows. The clock period above is
+				  // derived from the raw count on purpose -- that asks how many half
+				  // periods the window spans, which the closing edge is part of.
+				  double toggles = toggleCounts[i];
+				  if (prevTimes[i] == max_time)
+					  toggles -= lastToggleWeights[i];
+				  double activity = toggles / (cycles * 2.0);
 				  totalActivity += activity;
 				  activity_str += std::to_string(activity) + " ";
 			  }

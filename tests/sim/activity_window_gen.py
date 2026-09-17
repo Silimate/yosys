@@ -10,7 +10,7 @@ The stimulus is periodic over the window: the value at t=0 equals the value at
 t=duration and the window holds a whole number of data periods. That makes every
 expected number exact (see activity_window.ys), with no partial interval at either edge.
 
-  clk  1GHz, rises at k*P              duty 0.500  activity 1.000
+  clk  1GHz, rises at k*P              duty 0.500  activity 0.996094
   a    period 4 cycles, 50% high       duty 0.500  activity 0.250
   b    period 8 cycles, 50% high       duty 0.500  activity 0.125
   c    constant high                   duty 1.000  activity 0.000
@@ -18,6 +18,13 @@ expected number exact (see activity_window.ys), with no partial interval at eith
 
 Yosys reports activity as toggles/(2*cycles), so a signal whose period is N cycles has
 activity 1/N: two toggles per period, spread over N cycles, halved.
+
+The clock is the exception, at 255/256 rather than a flat 1. The window both starts and
+ends on a rising edge, and the closing one opens an interval of zero width -- duty is
+never credited the level it switched to, so activity does not count it either. The clock
+*period* is still derived from the raw count, which is what keeps $FREQUENCY at 1GHz:
+that asks how many half periods the window spans, and the closing edge is part of the
+span it measures.
 """
 
 import sys

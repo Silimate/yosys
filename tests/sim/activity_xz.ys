@@ -29,7 +29,7 @@ select -assert-any A:$DURATION=128000000
 select -assert-any A:$FREQUENCY=1000000000.000000
 
 # Fully known: same answer under either definition.
-select -assert-count 1 w:clk a:$ACKT=1.000000* %i
+select -assert-count 1 w:clk a:$ACKT=0.996094* %i
 select -assert-count 1 w:clk a:$DUTY=0.500000* %i
 
 # High on both sides of a 40M-tick hole: high for all of the time it was driven.
