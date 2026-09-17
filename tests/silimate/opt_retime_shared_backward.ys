@@ -226,8 +226,7 @@ log -pop
 # A duplicate reads the duplicate of the hop below it and nothing else on the
 # chain, so a hop that reads another hop off the path would need that same
 # substitution made on the duplicate's own operands. Refused rather than wired
-# to the delayed copy by mistake. A refusal leaves the design untouched, so
-# the module-output refusal below can still run in the same script.
+# to the delayed copy by mistake.
 log -header "Refused: reconvergence inside the chain"
 log -push
 design -reset
@@ -259,9 +258,12 @@ log -pop
 
 # ---------------------------------------------------------------------------
 # A duplicate serves extra readers by taking over their input port. A module
-# output has no port to repoint: the cone's Y net is the output, and the move
-# needs that same net for the path.
-log -header "Refused: the shared net is a module output"
+# output has no port to repoint, so that hop hands the duplicate the output net
+# it already drives and takes a fresh one for the delayed value. The register's
+# Q cannot reuse the old D net either, the duplicate having kept it, so the move
+# allocates a link the same way a resizing forward move does.
+log -header "Backward: the shared net is a module output"
+log -push
 design -reset
 read_verilog -icells <<EOF
 module outtap(input clk, en1, in1, in2, output res1, output sum);
@@ -272,7 +274,27 @@ module outtap(input clk, en1, in1, in2, output res1, output sum);
 endmodule
 EOF
 hierarchy -top outtap
+setattr -set init 1'b0 w:res1
 check -assert
+design -save orig
 opt_retime -flop f1 -cut a0 -backward
-scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Y of cell a0 is a module output as well as the before-path of flop f1, so there is no net to hand the duplicate that would keep driving it."
+scratchpad -assert opt_retime.moved true
+check -assert
+# The duplicate keeps driving the output; the original a0 drives the old Q net.
+select -assert-count 2 t:$add
+select -assert-count 2 t:$dffe
+select -assert-count 1 c:a0_dup %x:+[Y] w:sum %i
+select -assert-count 1 c:a0 %x:+[Y] w:res1 %i
+# a0 slides onto A, so B gets the clone and the register samples the old A net.
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 c:a0_dup %x:+[A] w:in1 %i
+select -assert-count 1 c:a0_dup %x:+[B] w:in2 %i
+rename outtap gate
+design -import orig -as gold
+setattr -set init 1'b0 gold/w:res1
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop

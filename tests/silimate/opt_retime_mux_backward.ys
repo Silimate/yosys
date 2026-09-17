@@ -186,4 +186,4 @@ hierarchy -top selpath
 check -assert
 opt_retime -flop f -cut u0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Both data inputs of u0 are constant or already registered, so flop f would have to slide onto the select, which opt_retime does not do yet."
+scratchpad -assert opt_retime.refusal "Both data inputs of u0 are constant, already registered, or only partly a wire, so flop f would have to slide onto the select, which opt_retime does not do yet."

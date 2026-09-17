@@ -177,11 +177,15 @@ pool<SigBit> wire_bits(const SigSpec &sig)
 	return bits;
 }
 
-// Add every bit of sig, refusing on a constant the way wire_bits does.
+// Add the wire bits of sig, passing over constants rather than refusing the way
+// wire_bits does. Every caller is building the set of data nets a control signal
+// may not also be, and a constant is not a net, so it cannot collide with one.
+// That is what lets a cloned operand carry constant bits alongside its wires.
 void insert_wire_bits(pool<SigBit> &bits, const SigSpec &sig)
 {
-	for (auto bit : wire_bits(sig))
-		bits.insert(bit);
+	for (auto bit : sig)
+		if (bit.is_wire())
+			bits.insert(bit);
 }
 
 dict<SigBit, BitSrc> index_output_bits(Module *module, SigMap &sigmap)
@@ -977,20 +981,26 @@ bool cell_signed(Cell *cell, IdString param)
 // cut, which is what lets the move walk back through a whole mux tree instead
 // of stopping at the first level with a live select. A unique live input that
 // is already a flop is stacking, not cloning, and is refused.
+//
+// Only the port the flop slides onto has to be a net the flop can take over in
+// full, so being partly constant rules a port out of being the path but not out
+// of being cloned: a clone's D carries the constant bits along with the wires,
+// the same way a forward move classifies a mixed operand bit by bit.
 IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		Cell *cell, Cell *flop)
 {
-	IdString path, first_ff;
+	IdString path, first_ff, first_mixed;
 	int live = 0;
 	for (auto port : data_inputs(cell)) {
 		SigSpec sig = sigmap(cell->getPort(port));
 		if (sig.is_fully_const())
 			continue;
 		live++;
-		if (!sig_all_wires(sig))
-			refuse("Input %s of cell %s is only partly a wire, so flop %s "
-					"cannot move backward onto it.\n",
-					log_id(port), log_id(cell), log_id(flop));
+		if (!sig_all_wires(sig)) {
+			if (first_mixed == IdString())
+				first_mixed = port;
+			continue;
+		}
 		if (driven_by_ff(drivers, sig)) {
 			if (first_ff == IdString())
 				first_ff = port;
@@ -1002,19 +1012,23 @@ IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 	if (live == 0)
 		refuse("Every data input of cell %s is constant, so flop %s has "
 				"nothing to slide onto.\n", log_id(cell), log_id(flop));
-	if (path == IdString())
+	if (path == IdString() && first_ff != IdString())
 		refuse("Input %s of cell %s is already registered, so flop %s "
 				"cannot move backward onto it: that would stack a second "
 				"register on the same net.\n",
 				log_id(first_ff), log_id(cell), log_id(flop));
+	if (path == IdString())
+		refuse("Input %s of cell %s is only partly a wire, so flop %s "
+				"cannot move backward onto it.\n",
+				log_id(first_mixed), log_id(cell), log_id(flop));
 	// Sliding onto a select is a different problem from sliding onto a data
 	// port. The clone that makes cycle 0 work is the select's, and there is no
 	// select clone left to place: the two data clones would both have to start
 	// at the stored value rather than at a fixed identity, which is a per-fold
 	// starting value and not what clone_start hands out.
 	if (cell->type == ID($mux) && path == ID::S)
-		refuse("Both data inputs of %s are constant or already "
-				"registered, so flop %s would have to slide onto the "
+		refuse("Both data inputs of %s are constant, already registered, or "
+				"only partly a wire, so flop %s would have to slide onto the "
 				"select, which opt_retime does not do yet.\n",
 				log_id(cell), log_id(flop));
 	return path;
@@ -1144,13 +1158,24 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 	return x;
 }
 
+// What reads a hop's Y besides the path, and so has to be served the undelayed
+// value from a duplicate. A cell port is served by pointing it at the duplicate;
+// a module output has no port to point, so that hop hands the duplicate the
+// original net instead and takes a fresh one for the delayed value.
+struct OffPath {
+	std::vector<CellPort> readers;
+	bool output = false;
+
+	bool empty() const { return readers.empty() && !output; }
+};
+
 // From flop.D back to cut: each hop's Y drives the next hop's path port (or D,
 // for the first). chain.front() is the cell driving D, chain.back() is the cut.
-// extra comes back parallel to the chain, holding the readers of each hop's Y
-// that are not the path and so have to be served from a duplicate.
+// extra comes back parallel to the chain, holding what reads each hop's Y off
+// the path.
 std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 		const dict<SigBit, BitSrc> &drivers, Cell *flop, Cell *cut,
-		std::vector<std::vector<CellPort>> &extra)
+		std::vector<OffPath> &extra)
 {
 	extra.clear();
 	std::vector<ChainStep> chain;
@@ -1171,19 +1196,14 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 					log_id(cell), log_id(cell->type));
 
 		// Readers of Y that are not the path do not stop the move; the cell is
-		// duplicated for them. A module output is the one reader that cannot
-		// be served that way, having no port to point somewhere else. The flop
-		// is the other: it is rebuilt at the end from the FfData snapshot taken
+		// duplicated for them. The flop is the one reader that cannot be served
+		// that way: it is rebuilt at the end from the FfData snapshot taken
 		// before any rewiring, which would bring its original control nets back
 		// with it and undo the substitution.
 		std::vector<CellPort> others;
 		bool drives_output = false;
 		scan_extra_readers(module, sigmap, sigmap(cell->getPort(ID::Y)),
 				reader, reader_port, others, drives_output);
-		if (drives_output)
-			refuse("Y of cell %s is a module output as well as the before-path "
-					"of flop %s, so there is no net to hand the duplicate that "
-					"would keep driving it.\n", log_id(cell), log_id(flop));
 		for (auto &rd : others)
 			if (rd.cell == flop)
 				refuse("Flop %s reads Y of cell %s on port %s as well as on its "
@@ -1196,7 +1216,7 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 
 		IdString path_port = backward_path_port(sigmap, drivers, cell, flop);
 		chain.push_back({cell, path_port});
-		extra.push_back(others);
+		extra.push_back({others, drives_output});
 		if (cell == cut)
 			return chain;
 		reader = cell;
@@ -1250,7 +1270,7 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 		refuse("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
-	std::vector<std::vector<CellPort>> extra;
+	std::vector<OffPath> extra;
 	std::vector<ChainStep> chain = collect_backward_chain(module, sigmap, drivers,
 			flop, cut, extra);
 
@@ -1270,7 +1290,7 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 		chain_cells.insert(step.cell);
 	int dup_from = GetSize(chain);
 	for (int i = 0; i < GetSize(chain); i++) {
-		for (auto &rd : extra[i])
+		for (auto &rd : extra[i].readers)
 			if (chain_cells.count(rd.cell))
 				refuse("Cell %s is on the before-path of flop %s and also reads "
 						"Y of %s off it, which opt_retime cannot duplicate "
@@ -1403,29 +1423,52 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 		Cell *cell = chain[i].cell;
 		SigSpec y = cell->getPort(ID::Y);
 		Cell *copy = module->addCell(module->uniquify(cell->name.str() + "_dup"), cell);
-		SigSpec ywire = module->addWire(
-				module->uniquify(cell->name.str() + "_dup_y"), GetSize(y));
-		copy->setPort(ID::Y, ywire);
 		if (i + 1 < GetSize(chain))
 			copy->setPort(chain[i].port, dup_y.at(chain[i + 1].cell));
-		dup_y[cell] = ywire;
 
-		dict<SigBit, SigBit> subst;
-		SigSpec mapped = sigmap(y);
-		for (int b = 0; b < GetSize(mapped); b++)
-			subst[mapped[b]] = ywire[b];
-		for (auto &rd : extra[i]) {
-			SigSpec neu;
-			for (auto bit : rd.cell->getPort(rd.port)) {
-				auto it = subst.find(sigmap(bit));
-				neu.append(it == subst.end() ? bit : it->second);
+		if (extra[i].output) {
+			// A module output has no port to point at the duplicate, so this
+			// hop hands the duplicate its original net and takes a fresh one
+			// for the delayed value. Everything else reading the hop off the
+			// path comes along for free, already on the net the duplicate now
+			// drives. Only the path has to be told where the value went: the
+			// hop below reads it on its path port, and at the first hop it is
+			// what the register's Q becomes, which `link` picks up below.
+			copy->setPort(ID::Y, y);
+			dup_y[cell] = y;
+			if (i > 0) {
+				SigSpec ywire = module->addWire(
+						module->uniquify(cell->name.str() + "_retimed_y"), GetSize(y));
+				cell->setPort(ID::Y, ywire);
+				chain[i - 1].cell->setPort(chain[i - 1].port, ywire);
 			}
-			rd.cell->setPort(rd.port, neu);
+		} else {
+			SigSpec ywire = module->addWire(
+					module->uniquify(cell->name.str() + "_dup_y"), GetSize(y));
+			copy->setPort(ID::Y, ywire);
+			dup_y[cell] = ywire;
+
+			dict<SigBit, SigBit> subst;
+			SigSpec mapped = sigmap(y);
+			for (int b = 0; b < GetSize(mapped); b++)
+				subst[mapped[b]] = ywire[b];
+			for (auto &rd : extra[i].readers) {
+				SigSpec neu;
+				for (auto bit : rd.cell->getPort(rd.port)) {
+					auto it = subst.find(sigmap(bit));
+					neu.append(it == subst.end() ? bit : it->second);
+				}
+				rd.cell->setPort(rd.port, neu);
+			}
 		}
-		if (!extra[i].empty())
+		if (extra[i].output)
+			log("Duplicating cell %s as %s to keep driving the module output on "
+					"the before-path of flop %s.\n", log_id(cell), log_id(copy),
+					log_id(flop));
+		else if (!extra[i].empty())
 			log("Duplicating cell %s as %s for %d reader(s) off the before-path "
 					"of flop %s.\n", log_id(cell), log_id(copy),
-					GetSize(extra[i]), log_id(flop));
+					GetSize(extra[i].readers), log_id(flop));
 		else
 			log("Duplicating cell %s as %s to feed the duplicate above it.\n",
 					log_id(cell), log_id(copy));
@@ -1480,15 +1523,22 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 
 	// The chain keeps its internal wiring. The flop samples the cut's old
 	// path input; the cut reads Q; the cell that used to drive D now drives
-	// the old Q sinks. The old D net is reused as the Q / cut-input link.
-	// Extra live inputs already hold a clone of that flop.
+	// the old Q sinks. The old D net is reused as the Q / cut-input link,
+	// being free once the first hop's Y moves onto the old Q net -- unless
+	// that net is a module output, in which case the duplicate above kept it
+	// and the link has to be a fresh one. Extra live inputs already hold a
+	// clone of that flop.
+	SigSpec link = d;
+	if (extra.front().output)
+		link = module->addWire(
+				module->uniquify(flop->name.str() + "_retimed"), GetSize(d));
 	front->setPort(ID::Y, q);
-	cut->setPort(path_port, d);
+	cut->setPort(path_port, link);
 
 	ff.remove_init();
 	IdString flop_name = ff.name;
 	ff.sig_d = path_in;
-	ff.sig_q = d;
+	ff.sig_q = link;
 	ff.width = GetSize(path_in);
 	stored.apply(ff, GetSize(path_in));
 	// Fatal rather than refused, for the same reason as the clone above: emit
@@ -1596,7 +1646,7 @@ void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
 	}
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
-	std::vector<std::vector<CellPort>> extra;
+	std::vector<OffPath> extra;
 	int depth = GetSize(collect_backward_chain(module, sigmap, drivers, flop,
 			cut, extra));
 

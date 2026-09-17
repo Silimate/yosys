@@ -144,6 +144,48 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
+# A backward move asks less of the operands it clones than of the one it slides
+# onto. The path port has to be a net the register can take over in full, but a
+# clone's D is just a signal, so it carries constant bits alongside its wires
+# the same way the forward classification does. Here A is a nibble of register
+# and a nibble of constant: it cannot be the path, and B can, so B takes the
+# register and A takes the clone with its constant bits intact.
+log -header "Backward: a mixed constant operand takes a clone"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module mixedback(input clk, input [7:0] b, input [3:0] a, output [7:0] q);
+  wire [7:0] y;
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A({4'h5, a}), .B(b), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top mixedback
+setattr -set init 8'h00 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut x0 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+# One register slid onto B, one clone on the mixed A, and x0 still computes y.
+select -assert-count 2 t:$dff
+select -assert-count 1 c:f %x:+[D] w:b %i
+select -assert-count 1 c:x0 %x:+[Y] w:q %i
+# The clone's D keeps the constant nibble, and xor folds init 0 to its identity.
+select -assert-count 1 c:f_A %x:+[D] w:a %i
+select -assert-count 1 w:f_A_q a:init=8'h00 %i
+rename mixedback gate
+design -import orig -as gold
+setattr -set init 8'h00 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
 # Both operands constant: a backward move has no live port to slide onto.
 log -header "Refused: backward across a cell whose every input is constant"
 design -reset
@@ -160,3 +202,21 @@ check -assert
 opt_retime -flop f -cut a0 -backward
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Every data input of cell a0 is constant, so flop f has nothing to slide onto."
+
+# ---------------------------------------------------------------------------
+# Mixed on every live port: nothing left that the register can slide onto.
+log -header "Refused: backward when the only live input is partly constant"
+design -reset
+read_verilog -icells <<EOF
+module allmixed(input clk, input [3:0] a, output [7:0] q);
+  wire [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A({4'h5, a}), .B(8'd2), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top allmixed
+check -assert
+opt_retime -flop f -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input A of cell a0 is only partly a wire, so flop f cannot move backward onto it."
