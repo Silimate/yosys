@@ -1012,11 +1012,15 @@ IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 	if (live == 0)
 		refuse("Every data input of cell %s is constant, so flop %s has "
 				"nothing to slide onto.\n", log_id(cell), log_id(flop));
-	if (path == IdString() && first_ff != IdString())
-		refuse("Input %s of cell %s is already registered, so flop %s "
-				"cannot move backward onto it: that would stack a second "
-				"register on the same net.\n",
-				log_id(first_ff), log_id(cell), log_id(flop));
+	// An input that is already registered is not stacking, because the move
+	// does not leave a register behind on it: the flop slides off the net it
+	// was on, and whatever registered the input is then the only register on
+	// that path. The plain-wire preference above still wins, so this only
+	// decides where to land when every live input is registered -- an
+	// accumulator entered on its own feedback operand, or a $buf chain whose
+	// far end is another flop's Q.
+	if (path == IdString())
+		path = first_ff;
 	if (path == IdString())
 		refuse("Input %s of cell %s is only partly a wire, so flop %s "
 				"cannot move backward onto it.\n",
@@ -1464,17 +1468,15 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 					log_id(cell), n, GetSize(q));
 		}
 
-	pool<SigBit> qbits = wire_bits(sigmap(q));
-	if (touches(sigmap, qbits, path_in))
-		refuse("Flop %s cannot move backward across %s: the path input "
-				"depends on the flop's Q.\n", log_id(flop), log_id(cut));
-	for (int i = 0; i < GetSize(chain); i++)
-		for (auto port : clone_ports[i])
-			if (touches(sigmap, qbits, chain[i].cell->getPort(port)))
-				refuse("Flop %s cannot move backward across %s: input "
-						"%s of %s depends on the flop's Q.\n",
-						log_id(flop), log_id(cut), log_id(port),
-						log_id(chain[i].cell));
+	// A path input or a clone that reads the flop's own Q used to be refused as
+	// a second register in the flop's own loop. It is not one. The commit below
+	// points the first hop's Y at the old Q net, and that hop computes at t what
+	// it used to compute at t-1, which is exactly what the register held at t.
+	// So Q keeps its value on every cycle while ceasing to be a register, the
+	// clone reading it becomes the one register on the feedback arm, and each
+	// loop comes out with the register count it went in with. opt_retime_holdloop
+	// proves both shapes: a clone on the hold arm of an enable mux, and a path
+	// input that is the flop's Q bit for bit.
 
 	// Every operand this hop is not entered on, as the constant the inverse
 	// sees on cycle 0: the one still wired there, or the clone's start value.

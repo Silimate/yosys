@@ -8,8 +8,10 @@
 # register has been rebuilt there is no putting it back, which is why the two
 # failures only visible mid-rewrite are log_error rather than refusals.
 #
-# retime_probe is f0 -> b0 -> b1 -> f1 -> b2 -> b3 -> f2, so f1 sits between two
-# $buf pairs with a legal move one way and a refusal the other.
+# retime_probe is f0 -> b0 -> b1 -> f1 -> b2 -> b3 -> f2. b3 is on f1's
+# after-path, so asking for it as a backward cut walks the before-path the other
+# way and runs out at f0's Q, which is a refusal that needs no special shape in
+# the design.
 
 # ---------------------------------------------------------------------------
 log -header "Refused: the run survives and the design is untouched"
@@ -22,9 +24,10 @@ select -assert-count 3 t:$dff
 select -assert-count 4 t:$buf
 design -save orig
 
-# b0's A is q0, already registered by f0, so a backward move onto it would
-# stack a second register on the same net.
-opt_retime -flop f1 -cut b0 -backward
+# b3 is downstream of f1, so it is not on the before-path at all: the walk back
+# from f1 passes b1 and b0 and then reaches f0's Q, where there is no cell Y to
+# continue from.
+opt_retime -flop f1 -cut b3 -backward
 
 # reaching this line at all is half the test
 log -header "Still running, so the refusal did not end the script."
@@ -33,7 +36,7 @@ check -assert
 # the other half is being able to tell, without reading the log
 scratchpad -assert opt_retime.moved false
 scratchpad -assert-set opt_retime.refusal
-scratchpad -assert opt_retime.refusal "Input A of cell b0 is already registered, so flop f1 cannot move backward onto it: that would stack a second register on the same net."
+scratchpad -assert opt_retime.refusal "The before-path of flop f1 is not a unique cell Y at \q0."
 
 # nothing added, nothing removed, nothing rewired
 select -assert-count 3 t:$dff
@@ -94,9 +97,9 @@ check -assert
 # a refusal leaves nothing behind for the next command to trip over, so they
 # can be proposed one after another and a real move still lands afterwards.
 # This is the shape a move-picking driver runs in.
-opt_retime -flop f1 -cut b0 -backward
+opt_retime -flop f1 -cut b3 -backward
 scratchpad -assert opt_retime.moved false
-opt_retime -flop f1 -cut b0 -backward
+opt_retime -flop f1 -cut b3 -backward
 scratchpad -assert opt_retime.moved false
 select -assert-count 3 t:$dff
 select -assert-count 1 c:f1 %x:+[D] w:n0 %i
