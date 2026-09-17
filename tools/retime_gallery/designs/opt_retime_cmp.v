@@ -1,0 +1,39 @@
+// Comparator and reduction: wide in, one bit out, so a move changes how many
+// flop bits the design costs.
+//   fa -\
+//        c_eq ($eq) -> e -\
+//   fb -/                  g0 ($and) -> bg ($buf) -> fq
+//   fc -> r_or ($reduce_or) -> r -/
+// Every net is single-fanout. Forward moves it covers:
+//   -flop fc -cut r_or -forward : 8 flop bits collapse to 1, with no merge at
+//                                 all, since a reduction has one data input
+//   -flop fa -cut c_eq -forward : 16 flop bits collapse to 1, merging fb
+//   -flop fa -cut g0 -forward   : legal only after fc has moved across r_or to
+//                                 put a register on g0.B. Then it merges an
+//                                 8-bit fb and a 1-bit fc in the same move.
+// Backward moves it covers (opt_retime_and.ys):
+//   -flop fq -cut g0 -backward  : needs nothing to go first, but costs a flop,
+//                                 since both operands of g0 are live
+
+module retime_cmp (clk, a, b, c, q);
+  input clk;
+  input [7:0] a, b, c;
+  output q;
+  wire [7:0] ra, rb, rc;
+  wire e, r, g, gb;
+
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+
+  $eq #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    c_eq (.A(ra), .B(rb), .Y(e));
+  $reduce_or #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0))
+    r_or (.A(rc), .Y(r));
+  $and #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    g0 (.A(e), .B(r), .Y(g));
+  $buf #(.WIDTH(1))
+    bg (.A(g), .Y(gb));
+
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(gb), .Q(q));
+endmodule
