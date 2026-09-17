@@ -408,3 +408,74 @@ select -assert-none t:$pos
 
 design -reset
 log -pop
+
+
+
+# Test 12
+log -header "Rerun on a netlist whose earlier buffers were removed but outputs kept"
+log -push
+design -reset
+# gate_fbuf and s_fbuf_1 are free cell names, but their *_out wires survived
+read_rtlil <<EOT
+module \top
+  wire input 1 \a
+  wire input 2 \b
+  wire output 3 \w1
+  wire output 4 \w2
+  wire output 5 \w3
+  wire output 6 \w4
+  wire output 7 \w5
+  wire output 8 \x1
+  wire output 9 \x2
+  wire output 10 \x3
+  wire output 11 \x4
+  wire output 12 \x5
+  wire \g
+  wire \s_fbuf_out
+  attribute \keep 1
+  wire \gate_fbuf_out
+  attribute \keep 1
+  wire \s_fbuf_1_out
+  cell $and \gate
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_SIGNED 0
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \a
+    connect \B \b
+    connect \Y \g
+  end
+  attribute \keep 1
+  cell $buf \s_fbuf
+    parameter \WIDTH 1
+    connect \A \b
+    connect \Y \s_fbuf_out
+  end
+  connect \w1 \g
+  connect \w2 \g
+  connect \w3 \g
+  connect \w4 \g
+  connect \w5 \g
+  connect \x1 \s_fbuf_out
+  connect \x2 \s_fbuf_out
+  connect \x3 \s_fbuf_out
+  connect \x4 \s_fbuf_out
+  connect \x5 \s_fbuf_out
+end
+EOT
+check -assert
+
+# Check equivalence after fanoutbuf - one new buffer per net, named past the leftovers
+equiv_opt -assert fanoutbuf
+design -load postopt
+select -assert-count 3 t:$buf
+select -assert-none c:gate_fbuf c:s_fbuf_1
+select -assert-count 1 t:$buf c:gate_fbuf_1 %i
+select -assert-count 1 t:$buf c:s_fbuf_2 %i
+select -assert-count 2 w:gate_fbuf_1_out w:s_fbuf_2_out
+select -assert-count 2 w:gate_fbuf_out w:s_fbuf_1_out
+check -assert
+
+design -reset
+log -pop

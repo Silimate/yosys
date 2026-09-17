@@ -21,6 +21,7 @@
 
 #include "DataBase.h"
 #include "FileSystem.h"
+#include "frontends/verific/rtl_bind.h"
 
 YOSYS_NAMESPACE_BEGIN
 
@@ -88,6 +89,8 @@ public:
 	dict<RTLIL::IdString, int> uniquify_cache;
 
 	int num_sva_continue = 0;
+
+	RtlBinder rtl_binder; // SILIMATE
 
 	VerificImporter(bool mode_gates, bool mode_keep, bool mode_nosva, bool mode_sva_continue, bool mode_names, bool mode_verific, bool mode_autocover, bool mode_fullinit);
 

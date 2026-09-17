@@ -139,6 +139,30 @@ struct FfTypeData {
 	Const val_srst;
 };
 
+// SILIMATE: the RTL object bit one Q bit of a sequential cell holds. The cell's `rtl_bind`
+// attribute lists these as `obj/width[first]`, `obj/width[first:last]` or `-` (unbound) tokens.
+struct RtlBindBit {
+	bool valid = false;
+	std::string obj;
+	int width = 0;
+	int bit = 0;
+};
+
+std::vector<RtlBindBit> rtl_bind_expand(const std::string &value); // empty on a malformed value
+std::string rtl_bind_compress(const std::vector<RtlBindBit> &bits);
+
+// SILIMATE: what reg_rename made of each Q bit (passes/silimate/reg_rename.cc says what each
+// word means). The cell's `rtl_bind_status` attribute lists them in Q bit order from Q[0] as
+// runs, each `status` for one bit or `status*count` for `count` bits in a row: "bound*4 absent*28".
+inline constexpr const char *RTL_BIND_STATUS_WORDS[] = {"bound", "unstamped", "absent", "unplaced", "conflict", "unwired"};
+std::vector<std::string> rtl_bind_status_expand(const std::string &value); // empty on a malformed value
+std::string rtl_bind_status_compress(const std::vector<std::string> &bits);
+
+// Narrow the `rtl_bind` and `rtl_bind_status` of a `width`-bit cell to the given bits,
+// dropping either one that does not match the cell
+void slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, const std::vector<int> &bits);
+void slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, int lsb, int msb);
+
 struct FfData : FfTypeData {
 	Module *module;
 	FfInitVals *initvals;

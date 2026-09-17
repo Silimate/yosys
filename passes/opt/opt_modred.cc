@@ -126,6 +126,7 @@ struct OptModRedWorker : CutRegionWorker {
 	bool push_shift_sub = false;
 	bool opaque_digits = false;
 	bool div_cells = false;
+	bool mux_depth = false;
 	bool sink_shift_en = false;
 
 	int k = 0;      // modulus width
@@ -1757,13 +1758,31 @@ struct OptModRedWorker : CutRegionWorker {
 	// a stage per quotient bit, so one cell can hide more depth than the entire
 	// tree that would replace it, and counting it as 1 makes every rewrite of a
 	// bare `A % C` look like a loss. The operand width is a floor on that chain.
+	//
+	// A select-driven mux hides depth the same way. A residue table written as
+	// an RTL `case` imports as one $bmux over the whole digit, which bmuxmap
+	// expands into S_WIDTH levels of 2:1 mux; charged 1, a four-level fold of
+	// them measures 3 deep and loses every profitability comparison to the tree
+	// that replaces it. A $pmux selects one case per select bit rather than one
+	// per code, and a multi-hot select is don't-care, so a lowering is free to
+	// balance it: estimate the log of the case count, not the select width.
+	// Both are estimates of a balanced lowering, and both are floors on what a
+	// single level can hide -- which is all the comparison below needs.
 	int cell_depth_cost(Cell *cell) const
 	{
-		if (!div_cells || cell == nullptr)
+		if (cell == nullptr)
 			return 1;
-		if (!cell->type.in(ID($div), ID($mod), ID($divfloor), ID($modfloor)))
-			return 1;
-		return std::max(1, cell->getParam(ID::A_WIDTH).as_int());
+		if (div_cells && cell->type.in(ID($div), ID($mod), ID($divfloor), ID($modfloor)))
+			return std::max(1, cell->getParam(ID::A_WIDTH).as_int());
+		if (mux_depth && cell->type == ID($bmux))
+			return std::max(1, cell->getParam(ID::S_WIDTH).as_int());
+		if (mux_depth && cell->type == ID($pmux)) {
+			int cases = cell->getParam(ID::S_WIDTH).as_int() + 1, lv = 0;
+			while ((1 << lv) < cases)
+				lv++;
+			return std::max(1, lv);
+		}
+		return 1;
 	}
 
 	// Longest path through `region`, weighting each cell by the depth it stands
@@ -1776,7 +1795,7 @@ struct OptModRedWorker : CutRegionWorker {
 		auto unit = compute_cone_depths(region, &order);
 		if (covered != nullptr)
 			*covered = GetSize(unit);
-		if (!div_cells) {
+		if (!div_cells && !mux_depth) {
 			int worst = 0;
 			for (auto &it : unit)
 				worst = std::max(worst, it.second);
@@ -3473,6 +3492,17 @@ struct OptModRedPass : public Pass {
 		log("        its only cut is the whole operand. Off by default: it rewrites a\n");
 		log("        cell the rest of the flow may still be relying on.\n");
 		log("\n");
+		log("    -mux-depth\n");
+		log("        estimate a select-driven mux at the depth of the mux tree it\n");
+		log("        stands for -- S_WIDTH levels for `$bmux`, the log of the case\n");
+		log("        count for a balanced `$pmux` lowering -- when weighing a rewrite.\n");
+		log("        A residue table spelled as an RTL `case` imports as one such mux\n");
+		log("        per digit, so a fold of them measures one level per stage and is\n");
+		log("        refused as unprofitable, while the same table spelled as a flat\n");
+		log("        decode measures its real depth and is taken. Off by default: it\n");
+		log("        only widens which proven reductions are judged worth rewriting,\n");
+		log("        never what is matched.\n");
+		log("\n");
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -3484,7 +3514,7 @@ struct OptModRedPass : public Pass {
 		int max_bits_eval_cells = 256, max_bound_bits = 12, max_bound_cells = 256;
 		int max_sink_group_bits = 10, min_sink_gain = 2;
 		bool push_shift_sub = false, opaque_digits = false, div_cells = false;
-		bool sink_shift_en = false;
+		bool sink_shift_en = false, mux_depth = false;
 
 		// 2^k-1 lives in an int all through the prover, and the residue table is
 		// 2^k entries long, so a wider modulus has neither a representable value
@@ -3551,6 +3581,10 @@ struct OptModRedPass : public Pass {
 			}
 			if (args[argidx] == "-div-cells" || args[argidx] == "-div_cells") {
 				div_cells = true;
+				continue;
+			}
+			if (args[argidx] == "-mux-depth" || args[argidx] == "-mux_depth") {
+				mux_depth = true;
 				continue;
 			}
 			if (args[argidx] == "-sink-shift" || args[argidx] == "-sink_shift") {
@@ -3632,6 +3666,7 @@ struct OptModRedPass : public Pass {
 				worker.max_bound_cells = max_bound_cells;
 				worker.opaque_digits = opaque_digits;
 				worker.div_cells = div_cells;
+				worker.mux_depth = mux_depth;
 				worker.sink_shift_en = sink_shift_en;
 				worker.max_sink_group_bits = max_sink_group_bits;
 				worker.min_sink_gain = min_sink_gain;

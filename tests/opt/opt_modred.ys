@@ -1500,3 +1500,320 @@ opt_modred -opaque-digits -max-bound-cells 1
 logger -check-expected
 design -reset
 log -pop
+
+# K1: the same opaque-leaf fold as H1, but with the residue table spelled as a
+# `case` instead of a flat OR of masked compares. Each c7 call becomes one
+# select-driven mux over the whole digit -- $pmux here, $bmux from a vectorizing
+# frontend -- and charging that one level makes the three-level fold measure 4
+# deep, which loses to the tree replacing it. -mux-depth charges the mux the
+# depth of the tree it stands for, and the same fold H1 takes is taken here.
+log -header "K1: case-spelled residue table folds under -mux-depth (equiv)"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input wire [23:0] a, output wire [2:0] y);
+  function automatic [2:0] c7 (input [5:0] v);
+    case (v)
+      6'b000_000: c7 = 3'd0;
+      6'b000_001: c7 = 3'd1;
+      6'b000_010: c7 = 3'd2;
+      6'b000_011: c7 = 3'd3;
+      6'b000_100: c7 = 3'd4;
+      6'b000_101: c7 = 3'd5;
+      6'b000_110: c7 = 3'd6;
+      6'b001_000: c7 = 3'd1;
+      6'b001_001: c7 = 3'd2;
+      6'b001_010: c7 = 3'd3;
+      6'b001_011: c7 = 3'd4;
+      6'b001_100: c7 = 3'd5;
+      6'b001_101: c7 = 3'd6;
+      6'b001_110: c7 = 3'd0;
+      6'b010_000: c7 = 3'd2;
+      6'b010_001: c7 = 3'd3;
+      6'b010_010: c7 = 3'd4;
+      6'b010_011: c7 = 3'd5;
+      6'b010_100: c7 = 3'd6;
+      6'b010_101: c7 = 3'd0;
+      6'b010_110: c7 = 3'd1;
+      6'b011_000: c7 = 3'd3;
+      6'b011_001: c7 = 3'd4;
+      6'b011_010: c7 = 3'd5;
+      6'b011_011: c7 = 3'd6;
+      6'b011_100: c7 = 3'd0;
+      6'b011_101: c7 = 3'd1;
+      6'b011_110: c7 = 3'd2;
+      6'b100_000: c7 = 3'd4;
+      6'b100_001: c7 = 3'd5;
+      6'b100_010: c7 = 3'd6;
+      6'b100_011: c7 = 3'd0;
+      6'b100_100: c7 = 3'd1;
+      6'b100_101: c7 = 3'd2;
+      6'b100_110: c7 = 3'd3;
+      6'b101_000: c7 = 3'd5;
+      6'b101_001: c7 = 3'd6;
+      6'b101_010: c7 = 3'd0;
+      6'b101_011: c7 = 3'd1;
+      6'b101_100: c7 = 3'd2;
+      6'b101_101: c7 = 3'd3;
+      6'b101_110: c7 = 3'd4;
+      6'b110_000: c7 = 3'd6;
+      6'b110_001: c7 = 3'd0;
+      6'b110_010: c7 = 3'd1;
+      6'b110_011: c7 = 3'd2;
+      6'b110_100: c7 = 3'd3;
+      6'b110_101: c7 = 3'd4;
+      6'b110_110: c7 = 3'd5;
+      default: c7 = 3'd0;
+    endcase
+  endfunction
+  wire [2:0] c0 = c7(a[5:0]);
+  wire [2:0] c1 = c7(a[11:6]);
+  wire [2:0] c2 = c7(a[17:12]);
+  wire [2:0] c3 = c7(a[23:18]);
+  wire [2:0] d0 = c7({c1, c0});
+  wire [2:0] d1 = c7({c3, c2});
+  assign y = c7({d1, d0});
+endmodule
+EOF
+proc -norom
+opt_expr
+opt_clean
+check -assert
+logger -expect log "Rewrote 1 mod-\(2\^k-1\) reduction\(s\)" 1
+equiv_opt -assert opt_modred -opaque-digits -mux-depth
+logger -check-expected
+design -load postopt
+design -reset
+log -pop
+
+# K2: the same design without the flag. Counting a mux as the tree it stands for
+# only ever makes a rewrite look better, so it is opt-in, and the pass has to be
+# a no-op without it.
+log -header "K2: a case-spelled table is not charged its mux depth by default"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input wire [23:0] a, output wire [2:0] y);
+  function automatic [2:0] c7 (input [5:0] v);
+    case (v)
+      6'b000_000: c7 = 3'd0;
+      6'b000_001: c7 = 3'd1;
+      6'b000_010: c7 = 3'd2;
+      6'b000_011: c7 = 3'd3;
+      6'b000_100: c7 = 3'd4;
+      6'b000_101: c7 = 3'd5;
+      6'b000_110: c7 = 3'd6;
+      6'b001_000: c7 = 3'd1;
+      6'b001_001: c7 = 3'd2;
+      6'b001_010: c7 = 3'd3;
+      6'b001_011: c7 = 3'd4;
+      6'b001_100: c7 = 3'd5;
+      6'b001_101: c7 = 3'd6;
+      6'b001_110: c7 = 3'd0;
+      6'b010_000: c7 = 3'd2;
+      6'b010_001: c7 = 3'd3;
+      6'b010_010: c7 = 3'd4;
+      6'b010_011: c7 = 3'd5;
+      6'b010_100: c7 = 3'd6;
+      6'b010_101: c7 = 3'd0;
+      6'b010_110: c7 = 3'd1;
+      6'b011_000: c7 = 3'd3;
+      6'b011_001: c7 = 3'd4;
+      6'b011_010: c7 = 3'd5;
+      6'b011_011: c7 = 3'd6;
+      6'b011_100: c7 = 3'd0;
+      6'b011_101: c7 = 3'd1;
+      6'b011_110: c7 = 3'd2;
+      6'b100_000: c7 = 3'd4;
+      6'b100_001: c7 = 3'd5;
+      6'b100_010: c7 = 3'd6;
+      6'b100_011: c7 = 3'd0;
+      6'b100_100: c7 = 3'd1;
+      6'b100_101: c7 = 3'd2;
+      6'b100_110: c7 = 3'd3;
+      6'b101_000: c7 = 3'd5;
+      6'b101_001: c7 = 3'd6;
+      6'b101_010: c7 = 3'd0;
+      6'b101_011: c7 = 3'd1;
+      6'b101_100: c7 = 3'd2;
+      6'b101_101: c7 = 3'd3;
+      6'b101_110: c7 = 3'd4;
+      6'b110_000: c7 = 3'd6;
+      6'b110_001: c7 = 3'd0;
+      6'b110_010: c7 = 3'd1;
+      6'b110_011: c7 = 3'd2;
+      6'b110_100: c7 = 3'd3;
+      6'b110_101: c7 = 3'd4;
+      6'b110_110: c7 = 3'd5;
+      default: c7 = 3'd0;
+    endcase
+  endfunction
+  wire [2:0] c0 = c7(a[5:0]);
+  wire [2:0] c1 = c7(a[11:6]);
+  wire [2:0] c2 = c7(a[17:12]);
+  wire [2:0] c3 = c7(a[23:18]);
+  wire [2:0] d0 = c7({c1, c0});
+  wire [2:0] d1 = c7({c3, c2});
+  assign y = c7({d1, d0});
+endmodule
+EOF
+proc -norom
+opt_expr
+opt_clean
+logger -expect log "Rewrote 0 mod-\(2\^k-1\) reduction\(s\)" 1
+opt_modred -opaque-digits
+logger -check-expected
+design -reset
+log -pop
+
+# K3: the same fold as K1 spelled as $bmux, which is what a vectorizing frontend
+# imports a `case` residue table as -- Yosys' own frontend never emits one, so
+# it is written out here. The leaves are opaque digits, leaving d0/d1 and y as
+# the matched region: 2 levels charged 1 apiece against a tree of 4, and charged
+# S_WIDTH apiece it is 12 and folds.
+log -header "K3: a $bmux residue table folds under -mux-depth (equiv)"
+log -push
+design -reset
+read_rtlil <<EOF
+module \top
+  wire width 24 input 1 \a
+  wire width 3 output 2 \y
+  wire width 3 \c0
+  wire width 3 \c1
+  wire width 3 \c2
+  wire width 3 \c3
+  wire width 3 \d0
+  wire width 3 \d1
+
+  cell $bmux $0
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S \a [5:0]
+    connect \Y \c0
+  end
+  cell $bmux $1
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S \a [11:6]
+    connect \Y \c1
+  end
+  cell $bmux $2
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S \a [17:12]
+    connect \Y \c2
+  end
+  cell $bmux $3
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S \a [23:18]
+    connect \Y \c3
+  end
+  cell $bmux $4
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S { \c1 \c0 }
+    connect \Y \d0
+  end
+  cell $bmux $5
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S { \c3 \c2 }
+    connect \Y \d1
+  end
+  cell $bmux $6
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S { \d1 \d0 }
+    connect \Y \y
+  end
+end
+EOF
+hierarchy -top top
+check -assert
+logger -expect log "Rewrote 1 mod-\(2\^k-1\) reduction\(s\)" 1
+equiv_opt -assert opt_modred -opaque-digits -mux-depth
+logger -check-expected
+design -load postopt
+design -reset
+log -pop
+
+# K4: the $bmux half of the default no-op, matching K2.
+log -header "K4: a $bmux is not charged its mux depth by default"
+log -push
+design -reset
+read_rtlil <<EOF
+module \top
+  wire width 24 input 1 \a
+  wire width 3 output 2 \y
+  wire width 3 \c0
+  wire width 3 \c1
+  wire width 3 \c2
+  wire width 3 \c3
+  wire width 3 \d0
+  wire width 3 \d1
+
+  cell $bmux $0
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S \a [5:0]
+    connect \Y \c0
+  end
+  cell $bmux $1
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S \a [11:6]
+    connect \Y \c1
+  end
+  cell $bmux $2
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S \a [17:12]
+    connect \Y \c2
+  end
+  cell $bmux $3
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S \a [23:18]
+    connect \Y \c3
+  end
+  cell $bmux $4
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S { \c1 \c0 }
+    connect \Y \d0
+  end
+  cell $bmux $5
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S { \c3 \c2 }
+    connect \Y \d1
+  end
+  cell $bmux $6
+    parameter \WIDTH 3
+    parameter \S_WIDTH 6
+    connect \A 192'000000000000000000000000000101100011010001000110000100011010001000110101000011010001000110101100000010001000110101100011000001000110101100011010000000110101100011010001000110101100011010001000
+    connect \S { \d1 \d0 }
+    connect \Y \y
+  end
+end
+EOF
+hierarchy -top top
+logger -expect log "Rewrote 0 mod-\(2\^k-1\) reduction\(s\)" 1
+opt_modred -opaque-digits
+logger -check-expected
+design -reset
+log -pop

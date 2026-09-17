@@ -1,0 +1,66 @@
+$timescale 1ns $end
+$scope module tb $end
+$scope module dut $end
+$var wire 12 ! grid[1] [11:0] $end
+$var wire 1 " grid[0] [11] $end
+$var wire 1 # grid[0] [10] $end
+$var wire 1 $ grid[0] [9] $end
+$var wire 1 % grid[0] [8] $end
+$var wire 1 & grid[0] [7] $end
+$var wire 1 ' grid[0] [6] $end
+$var wire 1 ( grid[0] [5] $end
+$var wire 1 ) grid[0] [4] $end
+$var wire 1 * grid[0] [3] $end
+$var wire 1 + grid[0] [2] $end
+$var wire 1 , grid[0] [1] $end
+$var wire 1 - grid[0] [0] $end
+$var wire 24 . grid_q [23:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+b001101101001 !
+1"
+1#
+0$
+0%
+1&
+1'
+1(
+1)
+0*
+0+
+1,
+0-
+b001101101001110011110010 .
+#10
+b100010111110 !
+0"
+0#
+0$
+1%
+0&
+1'
+0(
+0)
+0*
+1+
+1,
+1-
+b100010111110000101000111 .
+#20
+b110100000011 !
+0"
+1#
+1$
+0%
+1&
+0'
+0(
+1)
+1*
+1+
+0,
+0-
+b110100000011011010011100 .
+#30

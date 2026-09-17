@@ -1,0 +1,18 @@
+$timescale 1ns $end
+$scope module tb $end
+$scope module dut $end
+$var wire 24 ! grid [23:0] $end
+$var wire 24 " grid_q [23:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+b001101101001110011110010 !
+b001101101001110011110010 "
+#10
+b100010111110000101000111 !
+b100010111110000101000111 "
+#20
+b110100000011011010011100 !
+b110100000011011010011100 "
+#30

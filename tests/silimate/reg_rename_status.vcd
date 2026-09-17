@@ -1,0 +1,56 @@
+$timescale 1ns $end
+$scope module tb $end
+$scope module dut $end
+$var wire 1 ! clk $end
+$var reg 4 " cnt [3:0] $end
+$var reg 4 # acc [3:0] $end
+$var reg 6 $ wide [5:0] $end
+$var reg 2 % pp [1:0] $end
+$var reg 1 & dup $end
+$var reg 4 ' st.a [3:0] $end
+$var reg 4 ( st.b [3:0] $end
+$scope begin arr $end
+$var reg 4 ) [0] [3:0] $end
+$var reg 4 * [1] [3:0] $end
+$upscope $end
+$scope begin hw_gen $end
+$var reg 4 + cnt [3:0] $end
+$var reg 8 , thr [7:0] $end
+$var wire 3 - dbg [2:0] $end
+$upscope $end
+$var reg 2 . mem[0] [1:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+0!
+b0000 "
+b0000 #
+b000000 $
+b00 %
+0&
+b0000 '
+b0000 (
+b0000 )
+b0000 *
+b0000 +
+b00000000 ,
+b000 -
+b00 .
+#5
+1!
+b0001 "
+b0010 #
+b000011 $
+b01 %
+1&
+b0101 '
+b1010 (
+b0110 )
+b1001 *
+b0001 +
+b00010001 ,
+b001 -
+b10 .
+#10
+0!
