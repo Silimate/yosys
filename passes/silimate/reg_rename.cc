@@ -206,9 +206,12 @@ static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, Dum
 	if (leaves.empty() || bit < 0 || bit >= width)
 		return false;
 
-	// A single leaf covering the whole object: the bit indexes straight into it
+	// A single leaf covering the object: the bit indexes straight into it. A dump narrower
+	// than the object is normal -- a converter can dump fewer bits than the register holds --
+	// so place the bits it carries and leave the rest unplaced. A wider dump means the leaf
+	// is not this object after all.
 	if (leaves.size() == 1 && leaves[0].rel.empty()) {
-		if (leaves[0].width != width)
+		if (leaves[0].width > width || bit >= leaves[0].width)
 			return false;
 		out = leaves[0];
 		leaf_bit = bit;
