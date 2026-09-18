@@ -162,9 +162,9 @@ bool describe_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		FfInitVals &initvals, FfData &ref, Cell *named,
 		Cell *cell, IdString port, const SigSpec &path_sig,
 		std::vector<PortBit> &desc, bool error);
-Cell *next_on_path(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+void hops_on_path(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		FfInitVals &initvals, FfData &ref, Cell *named, const SigSpec &cur,
-		IdString &port);
+		std::vector<ChainStep> &hops);
 
 pool<SigBit> wire_bits(const SigSpec &sig)
 {
@@ -319,34 +319,51 @@ Cell *unique_reader(Module *module, SigMap &sigmap, const SigSpec &sig, IdString
 	return full[0].cell;
 }
 
-// Walk the unique after-path of start.Y looking for cut. Used to pick which
-// reader of a multi-fanout flop is the one the move follows; the first hop
-// itself is allowed to share the flop's Q with other readers.
+// Is cut on the after-path of start? Every hop out of a cell is followed and
+// not just a unique one, because a net two cells read is not the end of a path:
+// it is a branch, and asking this of each branch is how next_on_path works out
+// which one the move follows. Breadth-first over cells, so a cell is asked
+// about once however many ways the walk arrives at it, and a combinational
+// loop is walked once rather than for ever.
+//
+// reach carries the answers already known, which for one move is a property of
+// the cell: a chain that branches at every hop asks after the same cells over
+// and over, once for each branch above them, and answering each walk from
+// scratch is cubic in the length of the chain. Filling it in is the reason the
+// walk keeps the cell it arrived from.
 bool reaches_cut(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
-		FfInitVals &initvals, FfData &ref, Cell *named, Cell *start, Cell *cut)
+		FfInitVals &initvals, FfData &ref, Cell *named, Cell *start, Cell *cut,
+		dict<Cell *, bool> &reach)
 {
-	if (start == cut)
-		return true;
-	if (!start->hasPort(ID::Y))
-		return false;
+	auto known = reach.find(start);
+	if (known != reach.end())
+		return known->second;
 
-	pool<Cell *> seen;
-	seen.insert(start);
-	SigSpec cur = sigmap(start->getPort(ID::Y));
-	while (true) {
-		IdString port;
-		Cell *next = next_on_path(module, sigmap, drivers, initvals, ref, named, cur, port);
-		if (!next)
-			return false;
-		if (seen.count(next))
-			return false;
-		seen.insert(next);
-		if (next == cut)
+	dict<Cell *, Cell *> from;
+	std::vector<Cell *> queue;
+	from[start] = nullptr;
+	queue.push_back(start);
+	for (int i = 0; i < GetSize(queue); i++) {
+		if (queue[i] == cut) {
+			for (Cell *cell = queue[i]; cell; cell = from.at(cell))
+				reach[cell] = true;
 			return true;
-		if (!next->hasPort(ID::Y))
-			return false;
-		cur = sigmap(next->getPort(ID::Y));
+		}
+		if (!queue[i]->hasPort(ID::Y))
+			continue;
+		std::vector<ChainStep> hops;
+		hops_on_path(module, sigmap, drivers, initvals, ref, named,
+				sigmap(queue[i]->getPort(ID::Y)), hops);
+		for (auto &hop : hops)
+			if (!from.count(hop.cell)) {
+				from[hop.cell] = queue[i];
+				queue.push_back(hop.cell);
+			}
 	}
+	// The cut is not in the cone at all, so nothing the walk saw reaches it.
+	for (auto &entry : from)
+		reach[entry.first] = false;
+	return false;
 }
 
 // True when `to` sits on the unique after-path of `from`. A leftover copy of
@@ -482,27 +499,106 @@ bool describe_operand(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 	return true;
 }
 
-Cell *next_on_path(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+// Every data input that consumes the whole of cur: each one is a cell the path
+// could carry on into. Several of them is a fanout on the net rather than an
+// ambiguity, and which one is the path is not a question this can answer.
+void hops_on_path(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		FfInitVals &initvals, FfData &ref, Cell *named, const SigSpec &cur,
-		IdString &port)
+		std::vector<ChainStep> &hops)
 {
-	Cell *found = nullptr;
-	port = IdString();
-	int hits = 0;
-	for (auto cell : module->cells()) {
+	hops.clear();
+	for (auto cell : module->cells())
 		for (auto cand : data_inputs(cell)) {
 			std::vector<PortBit> desc;
-			if (!describe_port(sigmap, drivers, initvals, ref, named, cell, cand,
+			if (describe_port(sigmap, drivers, initvals, ref, named, cell, cand,
 					cur, desc, false))
-				continue;
-			hits++;
-			found = cell;
-			port = cand;
+				hops.push_back({cell, cand});
 		}
-	}
-	if (hits != 1)
+}
+
+// The hop the move follows out of cur. A branch is decided by which side the
+// cut is on: the other side keeps the value it has, from the register the move
+// leaves on the net (the peel in apply_forward_move), so a second reader costs
+// a register rather than the move.
+//
+// Two hops cannot both hold the cut. A cell the path enters has every other
+// data input registered or constant, so it cannot be fed by a second live path,
+// and the cut behind both of them would have to be reached twice over. What can
+// happen is one cell entered on two of its ports, which is the same cut twice
+// and has no single port for the register to land on.
+Cell *next_on_path(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *named, const SigSpec &cur,
+		Cell *cut, dict<Cell *, bool> &reach, IdString &port)
+{
+	std::vector<ChainStep> hops;
+	hops_on_path(module, sigmap, drivers, initvals, ref, named, cur, hops);
+	port = IdString();
+	if (hops.empty())
 		return nullptr;
+	// One hop is followed whether or not the cut is behind it, so that a chain
+	// running past the cut ends where it really ends and the refusal can say so.
+	if (GetSize(hops) == 1) {
+		port = hops[0].port;
+		return hops[0].cell;
+	}
+
+	Cell *found = nullptr;
+	int hits = 0;
+	for (auto &hop : hops)
+		if (reaches_cut(module, sigmap, drivers, initvals, ref, named, hop.cell, cut,
+				reach)) {
+			hits++;
+			found = hop.cell;
+			port = hop.port;
+		}
+	if (hits > 1)
+		refuse("Cut %s is reachable from flop %s on more than one path.\n",
+				log_id(cut), log_id(named));
+	if (hits == 0) {
+		port = IdString();
+		return nullptr;
+	}
 	return found;
+}
+
+// Why the cut was never reached, said from where the path actually gave out.
+// Walking on from there costs nothing at this point -- the move is already
+// refused -- and it answers the question the old wording provoked, which was
+// what the pass thought the after-path was.
+[[noreturn]] void refuse_off_path(Module *module, SigMap &sigmap,
+		const dict<SigBit, BitSrc> &drivers, FfInitVals &initvals, FfData &ref,
+		Cell *flop, Cell *cut, Cell *start)
+{
+	Cell *end = start;
+	pool<Cell *> seen;
+	while (end->hasPort(ID::Y) && !seen.count(end)) {
+		seen.insert(end);
+		std::vector<ChainStep> hops;
+		hops_on_path(module, sigmap, drivers, initvals, ref, flop,
+				sigmap(end->getPort(ID::Y)), hops);
+		if (GetSize(hops) != 1)
+			break;
+		end = hops[0].cell;
+	}
+
+	if (end->hasPort(ID::Y)) {
+		std::vector<CellPort> readers;
+		bool output = false;
+		scan_extra_readers(module, sigmap, sigmap(end->getPort(ID::Y)), nullptr,
+				IdString(), readers, output);
+		pool<Cell *> cells;
+		for (auto &rd : readers)
+			cells.insert(rd.cell);
+		// Several readers, and either none of them a cell the register could
+		// cross whole -- they are taking the net between them, in slices or as
+		// a control -- or none of them with the cut behind it.
+		if (GetSize(cells) > 1)
+			refuse("Y of cell %s is read by %d cells, so the after-path of flop "
+					"%s ends there and never reaches cut %s.\n",
+					log_id(end), GetSize(cells), log_id(flop), log_id(cut));
+	}
+	refuse("The after-path of flop %s ends at cell %s and never reaches cut %s.\n",
+			log_id(flop), log_id(end), log_id(cut));
 }
 
 Const stored_bit(FfInitVals &initvals, Cell *flop, int offset, FoldKind kind)
@@ -545,13 +641,18 @@ Const assemble_const(const std::vector<PortBit> &desc, const Const &cur,
 	return Const(bits);
 }
 
+// start is the flop's Q, or the bits of it being moved when the flop is several
+// registers sharing a cell. It is passed rather than read off the flop so that
+// slice_forward_for_cut can ask where each run of Q leads without moving
+// anything, the way collect_backward_chain takes its start off D.
 std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 		const dict<SigBit, BitSrc> &drivers, FfInitVals &initvals, FfData &ref,
-		Cell *flop, Cell *cut)
+		Cell *flop, const SigSpec &start, Cell *cut)
 {
 	std::vector<ChainStep> chain;
 	pool<Cell *> seen;
-	SigSpec q = sigmap(flop->getPort(ID::Q));
+	SigSpec q = sigmap(start);
+	dict<Cell *, bool> reach;
 
 	// First hop: any data-input port that consumes all of Q, including a
 	// wide port that only slices Q as one bit among sibling flop Qs. Extra
@@ -559,6 +660,7 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 	// mean a copy is left behind, which is apply_move's decision.
 	ChainStep first = {};
 	int paths = 0;
+	std::vector<ChainStep> starts;
 	for (auto cell : module->cells()) {
 		for (auto port : data_inputs(cell)) {
 			std::vector<PortBit> desc;
@@ -566,12 +668,18 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 			if (!describe_port(sigmap, drivers, initvals, ref, flop, cell, port,
 					q, desc, error))
 				continue;
-			if (!reaches_cut(module, sigmap, drivers, initvals, ref, flop, cell, cut))
+			starts.push_back({cell, port});
+			if (!reaches_cut(module, sigmap, drivers, initvals, ref, flop, cell, cut,
+					reach))
 				continue;
 			paths++;
 			first = {cell, port};
 		}
 	}
+	// Q does go somewhere the move could cross, just not to the cut, so the
+	// answer is where that path gives out rather than a flat no.
+	if (paths == 0 && GetSize(starts) == 1)
+		refuse_off_path(module, sigmap, drivers, initvals, ref, flop, cut, starts[0].cell);
 	if (paths == 0)
 		refuse("Cut %s is not on the after-path of flop %s.\n", log_id(cut), log_id(flop));
 	if (paths > 1)
@@ -586,7 +694,8 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 	SigSpec cur = sigmap(first.cell->getPort(ID::Y));
 	while (true) {
 		IdString port;
-		Cell *next = next_on_path(module, sigmap, drivers, initvals, ref, flop, cur, port);
+		Cell *next = next_on_path(module, sigmap, drivers, initvals, ref, flop, cur,
+				cut, reach, port);
 		if (!next)
 			break;
 
@@ -602,7 +711,8 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 	}
 
 	if (chain.back().cell != cut)
-		refuse("Cut %s is not on the after-path of flop %s.\n", log_id(cut), log_id(flop));
+		refuse_off_path(module, sigmap, drivers, initvals, ref, flop, cut,
+				chain.back().cell);
 	return chain;
 }
 
@@ -658,7 +768,7 @@ Const fold_value(Module *, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		FfInitVals &initvals, FfData &ref, Cell *flop,
 		const std::vector<ChainStep> &chain, FoldKind kind, Const cur)
 {
-	SigSpec path = sigmap(flop->getPort(ID::Q));
+	SigSpec path = sigmap(ref.sig_q);
 	for (auto &step : chain) {
 		std::vector<Const> args;
 		for (auto port : data_inputs(step.cell)) {
@@ -708,7 +818,7 @@ bool fold_through(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &dr
 {
 	bool any = !start.is_fully_undef();
 	bool all = start.is_fully_def();
-	SigSpec path = sigmap(flop->getPort(ID::Q));
+	SigSpec path = sigmap(ref.sig_q);
 	for (auto &step : chain) {
 		for (auto port : data_inputs(step.cell)) {
 			std::vector<PortBit> desc;
@@ -881,7 +991,7 @@ std::vector<Merge> collect_merges(Module *module, SigMap &sigmap,
 {
 	std::vector<Merge> merges;
 	pool<Cell *> seen;
-	SigSpec path = sigmap(flop->getPort(ID::Q));
+	SigSpec path = sigmap(ref.sig_q);
 	for (auto &step : chain) {
 		for (auto port : data_inputs(step.cell)) {
 			std::vector<PortBit> desc;
@@ -1029,13 +1139,22 @@ bool cell_signed(Cell *cell, IdString param)
 IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		Cell *cell, Cell *flop)
 {
-	IdString path, first_ff, first_mixed;
+	IdString path, first_ff, first_mixed, select;
 	int live = 0;
 	for (auto port : data_inputs(cell)) {
 		SigSpec sig = sigmap(cell->getPort(port));
 		if (sig.is_fully_const())
 			continue;
 		live++;
+		// A select is held back until the data ports have had their turn. It is
+		// a landing like any other, but it is the port whose clone pays for
+		// cycle 0 on the others, so taking it over means every live data port
+		// gets a clone of the flop's full width instead of one narrow one. A
+		// data port costs nothing extra and wins even when it is registered.
+		if (cell->type == ID($mux) && port == ID::S) {
+			select = port;
+			continue;
+		}
 		if (!sig_all_wires(sig)) {
 			if (first_mixed == IdString())
 				first_mixed = port;
@@ -1061,20 +1180,17 @@ IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 	// far end is another flop's Q.
 	if (path == IdString())
 		path = first_ff;
+	// Nothing left but the select, so the register takes that over: it resizes
+	// to the select's one bit and holds whichever bit reproduces the value it
+	// used to hold, and the data clones come up holding that value themselves.
+	// A port that is part wire and part constant cannot be landed on but can be
+	// cloned, so the select is preferred to refusing over one of those.
+	if (path == IdString())
+		path = select;
 	if (path == IdString())
 		refuse("Input %s of cell %s is only partly a wire, so flop %s "
 				"cannot move backward onto it.\n",
 				log_id(first_mixed), log_id(cell), log_id(flop));
-	// Sliding onto a select is a different problem from sliding onto a data
-	// port. The clone that makes cycle 0 work is the select's, and there is no
-	// select clone left to place: the two data clones would both have to start
-	// at the stored value rather than at a fixed identity, which is a per-fold
-	// starting value and not what clone_start hands out.
-	if (cell->type == ID($mux) && path == ID::S)
-		refuse("Both data inputs of %s are constant, already registered, or "
-				"only partly a wire, so flop %s would have to slide onto the "
-				"select, which opt_retime does not do yet.\n",
-				log_id(cell), log_id(flop));
 	return path;
 }
 
@@ -1082,7 +1198,11 @@ IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 // path port, so the path flop can hold the old stored value itself and f still
 // reproduces it. This is per port and not just per cell type, because a $mux
 // reaches identity on two ports at once and asks something different of each.
-Const clone_start(Cell *cell, IdString path_port, IdString clone_port, int width)
+//
+// stored is the value the register has to reproduce on this cell's output, which
+// only a select landing needs: the identity values below do not depend on it.
+Const clone_start(Cell *cell, IdString path_port, IdString clone_port, int width,
+		const Const &stored)
 {
 	if (cell->type == ID($mux)) {
 		// The select is the whole cycle-0 argument: pin it at the constant
@@ -1090,6 +1210,13 @@ Const clone_start(Cell *cell, IdString path_port, IdString clone_port, int width
 		// other data clone came up holding. So that one is a don't-care.
 		if (clone_port == ID::S)
 			return Const(path_port == ID::A ? State::S0 : State::S1, width);
+		// Landing on the select turns that round. The select is the register
+		// now and has nothing to pin, so cycle 0 is paid by the data clones:
+		// each comes up holding the value the register held, and then whichever
+		// one the select picks is that value. invert_step is what checks the
+		// select can pick one, a constant operand being free to disagree.
+		if (path_port == ID::S)
+			return stored;
 		return Const(State::Sx, width);
 	}
 	// x & 1s and ~(x ^ 1s) are both x; $mul is identity at 1; the rest are
@@ -1148,6 +1275,23 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 		auto it = others.find(port);
 		return it == others.end() ? Const() : it->second;
 	};
+
+	// A select is the one path port narrower than Y that still inverts, because
+	// it is not an operand the identity resizes: it picks between the operands,
+	// so its preimage is the bit that picks the one holding y, and there are
+	// only two to try. A width check would rule this out before it is asked.
+	if (cell->type == ID($mux) && path_port == ID::S) {
+		for (auto bit : {State::S0, State::S1}) {
+			bool err = false;
+			Const back = CellTypes::eval(cell, operand(ID::A), operand(ID::B),
+					Const(bit, 1), &err);
+			if (!err && back == y)
+				return Const(bit, 1);
+		}
+		refuse("Cell %s has no input on %s that produces %s, so a "
+				"backward move has no stored value to leave behind.\n",
+				log_id(cell), log_id(path_port), log_signal(y));
+	}
 
 	int len = GetSize(cell->getPort(path_port));
 	if (GetSize(cell->getPort(ID::Y)) != len)
@@ -1439,6 +1583,125 @@ std::vector<int> slice_for_cut(Module *module, SigMap &sigmap,
 			log_id(flop), GetSize(runs), reaching, log_id(cut));
 }
 
+// The same question looking forward, and the same answer: which bits of the
+// flop are the register the caller meant. Backward picks the run of D that has
+// one driver behind it, so forward picks the run of Q that has one set of
+// readers in front of it, and the -cut says which run was meant.
+//
+// serv leaves the shape behind: a 5-bit register whose Q is the concat of three
+// RTL signals, four of whose bits go to a comparator and the fifth to an
+// inverter. No cell reads all five on one port, so the whole register has no
+// forward move at all, while the run the cut reads has an ordinary one.
+//
+// Readers are compared as the ordered list of ports that read the bit, plus
+// whether it leaves the module, so bits come apart the moment anything
+// downstream can tell them apart. That is stricter than the question being
+// asked, since a register the cut reads whole splits too as soon as one of its
+// bits has a second reader, so the split is a list of candidates rather than a
+// verdict: the whole of Q is tried first and comes back whole, which is the
+// ordinary case, and the runs answer only when it cannot go.
+std::vector<int> slice_forward_for_cut(Module *module, SigMap &sigmap,
+		const dict<SigBit, BitSrc> &drivers, FfInitVals &initvals, FfData &ref,
+		Cell *flop, Cell *cut)
+{
+	SigSpec q = sigmap(ref.sig_q);
+	dict<SigBit, int> index;
+	for (int i = 0; i < GetSize(q); i++)
+		if (q[i].is_wire())
+			index[q[i]] = i;
+
+	std::vector<std::vector<CellPort>> readers(GetSize(q));
+	for (auto cell : module->cells())
+		for (auto &conn : cell->connections()) {
+			if (!cell->input(conn.first))
+				continue;
+			for (auto bit : sigmap(conn.second)) {
+				auto it = index.find(bit);
+				if (it == index.end())
+					continue;
+				// A port reading the same bit twice says it once here, the bits
+				// of a port arriving in order.
+				std::vector<CellPort> &rd = readers[it->second];
+				if (rd.empty() || rd.back().cell != cell || rd.back().port != conn.first)
+					rd.push_back({cell, conn.first});
+			}
+		}
+	std::vector<bool> leaves(GetSize(q), false);
+	for (auto wire : module->wires()) {
+		if (!wire->port_output)
+			continue;
+		for (auto bit : sigmap(SigSpec(wire))) {
+			auto it = index.find(bit);
+			if (it != index.end())
+				leaves[it->second] = true;
+		}
+	}
+
+	std::vector<std::vector<int>> runs;
+	for (int i = 0; i < GetSize(q); i++) {
+		bool same = !runs.empty() && q[i].is_wire() && q[i - 1].is_wire() &&
+				leaves[i] == leaves[i - 1] && readers[i].size() == readers[i - 1].size();
+		for (int j = 0; same && j < GetSize(readers[i]); j++)
+			same = readers[i][j].cell == readers[i - 1][j].cell &&
+					readers[i][j].port == readers[i - 1][j].port;
+		if (!same)
+			runs.push_back({});
+		runs.back().push_back(i);
+	}
+
+	std::vector<int> all;
+	for (int i = 0; i < GetSize(q); i++)
+		all.push_back(i);
+	if (GetSize(runs) < 2)
+		return all;
+
+	// The chain walk is the authority on whether a set of bits reaches the cut,
+	// so it is what gets asked, rather than a second walk that could disagree
+	// with it. It refuses by throwing, and bits that refuse are simply not this
+	// move.
+	std::string whole;
+	auto reaches = [&](const std::vector<int> &take, std::string *why) {
+		SigSpec start;
+		for (int i : take)
+			start.append(q[i]);
+		try {
+			collect_chain(module, sigmap, drivers, initvals, ref, flop, start, cut);
+		} catch (const MoveRefused &refused) {
+			if (why)
+				*why = refused.reason;
+			return false;
+		}
+		return true;
+	};
+
+	// Differing readers are a reason to look, not a verdict. A register read
+	// whole by the cut is one register however else its bits are read off to
+	// the side, and the plain move is still the move, so the whole of Q is
+	// asked before any of it is taken apart.
+	if (reaches(all, &whole))
+		return all;
+
+	std::vector<int> found;
+	int reaching = 0;
+	for (auto &run : runs)
+		if (reaches(run, nullptr) && reaching++ == 0)
+			found = run;
+
+	if (reaching == 1)
+		return found;
+	// Nothing the cell holds reaches the cut on its own, and the register the
+	// caller actually named is the whole of it, so its own answer is carried
+	// out rather than replaced: it is the one that knows about an unregistered
+	// operand or a path that gives out, which being split apart cannot explain.
+	if (reaching == 0)
+		refuse("Flop %s is %d registers sharing one cell, none of which reaches "
+				"cut %s on its own, and read whole: %s",
+				log_id(flop), GetSize(runs), log_id(cut), whole.c_str());
+	refuse("Flop %s is %d registers sharing one cell and %d of them reach cut %s, "
+			"so opt_retime cannot tell which one to move.\n",
+			log_id(flop), GetSize(runs), reaching, log_id(cut));
+}
+
 // The bits of a width-wide register that keep is not taking.
 std::vector<int> other_bits(const std::vector<int> &keep, int width)
 {
@@ -1564,7 +1827,12 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 	SigSpec d = ff.sig_d;
 	SigSpec q = ff.sig_q;
 
-	if (GetSize(path_in) != GetSize(q))
+	// Landing on a select is the one resize a backward move makes, and it is the
+	// point of that landing rather than a side effect: the register stops
+	// holding the mux output and holds the one bit that picks between its
+	// operands. Any other width change is a different transform.
+	bool select_landing = cut->type == ID($mux) && path_port == ID::S;
+	if (GetSize(path_in) != GetSize(q) && !select_landing)
 		refuse("Backward move across %s would resize flop %s from %d to %d "
 				"bits, which is not supported yet.\n",
 				log_id(cut), log_id(flop), GetSize(q), GetSize(path_in));
@@ -1603,7 +1871,9 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 
 	// Every operand this hop is not entered on, as the constant the inverse
 	// sees on cycle 0: the one still wired there, or the clone's start value.
-	auto invert_others = [&](int i) {
+	// stored is the value the register has to reproduce on this hop's output,
+	// which a clone under a select landing starts at.
+	auto invert_others = [&](int i, const Const &stored) {
 		dict<IdString, Const> others;
 		ChainStep &step = chain[i];
 		for (auto port : data_inputs(step.cell)) {
@@ -1611,11 +1881,17 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 				continue;
 			int len = GetSize(step.cell->getPort(port));
 			others[port] = clone_ports[i].count(port)
-					? clone_start(step.cell, step.port, port, len)
+					? clone_start(step.cell, step.port, port, len, stored)
 					: sigmap(step.cell->getPort(port)).as_const();
 		}
 		return others;
 	};
+
+	// What the clones at each hop start at, per stored value. Only a select
+	// landing has a start that varies by hop and by kind, but the inversion
+	// walk is what knows those values, so they are kept here as it goes rather
+	// than worked out again when the clones are built.
+	std::vector<std::map<FoldKind, Const>> hop_stored(GetSize(chain));
 
 	StoredValues stored;
 	stored.collect(ff, [&](FoldKind kind, Const start, Const &result) {
@@ -1626,8 +1902,11 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 					"defined, so the inverse fold would be ambiguous.\n",
 					log_id(flop), fold_kind_name(kind));
 		Const cur = start;
-		for (int i = 0; i < GetSize(chain); i++)
-			cur = invert_step(chain[i].cell, chain[i].port, cur, invert_others(i));
+		for (int i = 0; i < GetSize(chain); i++) {
+			hop_stored[i][kind] = cur;
+			cur = invert_step(chain[i].cell, chain[i].port, cur,
+					invert_others(i, cur));
+		}
 		result = cur;
 		return true;
 	});
@@ -1735,14 +2014,25 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 			cloned.sig_d = din;
 			cloned.sig_q = qwire;
 			cloned.width = n;
-			Const start = clone_start(cell, chain[i].port, port, n);
-			cloned.val_init = stored.got_init ? start : Const(State::Sx, n);
+			// One start per stored value, because a select landing starts its
+			// data clones at the value the register held, and that is a
+			// different constant for an init than for a reset.
+			auto start = [&](FoldKind kind) {
+				auto it = hop_stored[i].find(kind);
+				Const at = it == hop_stored[i].end() ? Const(State::Sx, n) : it->second;
+				return clone_start(cell, chain[i].port, port, n, at);
+			};
+			cloned.val_init = stored.got_init
+					? start(FoldKind::Init) : Const(State::Sx, n);
 			if (cloned.has_srst)
-				cloned.val_srst = stored.got_srst ? start : Const(State::Sx, n);
+				cloned.val_srst = stored.got_srst
+						? start(FoldKind::Srst) : Const(State::Sx, n);
 			if (cloned.has_arst)
-				cloned.val_arst = stored.got_arst ? start : Const(State::Sx, n);
+				cloned.val_arst = stored.got_arst
+						? start(FoldKind::Arst) : Const(State::Sx, n);
 			if (cloned.has_aload && cloned.sig_ad.is_fully_const())
-				cloned.sig_ad = stored.got_aload ? start : Const(State::Sx, n);
+				cloned.sig_ad = stored.got_aload
+						? start(FoldKind::Aload) : Const(State::Sx, n);
 			// Not a refusal, and deliberately fatal. FfData::emit only declines
 			// to build a cell for a zero width or for a register left with no
 			// control input at all, neither of which can reach here: the width
@@ -1765,12 +2055,13 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 	// the old Q sinks. The old D net is reused as the Q / cut-input link,
 	// being free once the first hop's Y moves onto the old Q net -- unless
 	// that net is a module output, in which case the duplicate above kept it
-	// and the link has to be a fresh one. Extra live inputs already hold a
-	// clone of that flop.
+	// and the link has to be a fresh one, or the register is landing on a
+	// narrower port than it came off, in which case the old net is the wrong
+	// width to be one. Extra live inputs already hold a clone of that flop.
 	SigSpec link = d;
-	if (extra.front().output)
+	if (extra.front().output || GetSize(path_in) != GetSize(d))
 		link = module->addWire(
-				module->uniquify(flop->name.str() + "_retimed"), GetSize(d));
+				module->uniquify(flop->name.str() + "_retimed"), GetSize(path_in));
 	front->setPort(ID::Y, q);
 	cut->setPort(path_port, link);
 
@@ -1978,47 +2269,55 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	if (flop == cut)
 		refuse("Flop and cut must be different cells.\n");
 
-	// A backward move picks the register out of a shared cell by asking which
-	// run of D reaches the cut. Forward has no such question to ask: it starts
-	// at Q, and the registers in a shared cell fan out to unrelated places, so
-	// which one was meant is not written anywhere the pass can read.
+	// A shared cell whose D arrives in several pieces has no unique cell behind
+	// any of them, so a forward move of one run would leave the rest reading a
+	// net the move has taken over. Which run of Q to take is a question the cut
+	// does answer, and slice_forward_for_cut asks it below.
 	refuse_if_shared(flop, "-forward");
 
 	SigMap sigmap(module);
 	FfInitVals initvals(&sigmap, module);
 
-	FfData ff(&initvals, flop);
-	if (!ff.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
+	FfData whole(&initvals, flop);
+	if (!whole.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
 		refuse("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
-	std::vector<ChainStep> chain = collect_chain(module, sigmap, drivers, initvals, ff, flop, cut);
+
+	// The run of Q the cut reads, which is the whole of it unless the cell holds
+	// several registers. Everything from here on is about that run: the rest of
+	// the cell comes back as its own register at the commit, the way a backward
+	// slice does.
+	std::vector<int> bits = slice_forward_for_cut(module, sigmap, drivers, initvals,
+			whole, flop, cut);
+	bool sliced = GetSize(bits) != whole.width;
+	FfData ff = sliced ? whole.slice(bits) : whole;
+	if (sliced)
+		ff.name = whole.name;
+
+	std::vector<ChainStep> chain = collect_chain(module, sigmap, drivers, initvals, ff,
+			flop, ff.sig_q, cut);
 
 	check_chain(ff, flop, chain);
 
-	// Extra readers of an intermediate Y are not the two-full-hop case
-	// next_on_path already refuses. A module output, another flop, or a
-	// partial tap still sees that net, and the rewrite would switch the hop
-	// from Q to D, so those readers would see the value a cycle early. The
-	// cut is exempt: its Y becomes the moved flop's Q. Extra readers of Q
-	// itself are peel, below.
-	for (int i = 0; i + 1 < GetSize(chain); i++) {
-		std::vector<CellPort> others;
-		bool drives_output = false;
+	// What reads an intermediate Y besides the next hop: a module output,
+	// another flop, a partial tap, a control net. The rewrite switches that hop
+	// from Q to D, so those readers would see the value a cycle early, and each
+	// such hop keeps a register on the net it drives to hand them the value they
+	// had. That is the peel the flop's own Q gets below, one hop further down.
+	// The cut is exempt: its Y becomes the moved flop's Q.
+	std::vector<OffPath> extra(GetSize(chain));
+	for (int i = 0; i + 1 < GetSize(chain); i++)
 		scan_extra_readers(module, sigmap, sigmap(chain[i].cell->getPort(ID::Y)),
-				chain[i + 1].cell, chain[i + 1].port, others, drives_output);
-		if (drives_output || !others.empty())
-			refuse("Y of cell %s is read off the after-path of flop %s, so a "
-					"forward move past it would change those readers.\n",
-					log_id(chain[i].cell), log_id(flop));
-	}
+				chain[i + 1].cell, chain[i + 1].port, extra[i].readers,
+				extra[i].output);
 
 	ChainStep first_step = chain.front();
 	Cell *first = first_step.cell;
 	Cell *last = chain.back().cell;
 
-	SigSpec d = flop->getPort(ID::D);
-	SigSpec q = flop->getPort(ID::Q);
+	SigSpec d = ff.sig_d;
+	SigSpec q = ff.sig_q;
 	SigSpec y = last->getPort(ID::Y);
 
 	SigSpec map_q = sigmap(q);
@@ -2052,6 +2351,22 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 				kind, start, result);
 	});
 
+	// A register left on a hop's Y holds the value that hop produced, so its
+	// stored values are the same fold stopped at that hop. The chain is walked
+	// again from the start for each of them rather than the values being kept
+	// on the way past, which is a fold of a few constants against reusing
+	// fold_through exactly as the full-chain fold does.
+	std::vector<StoredValues> held(GetSize(chain));
+	for (int i = 0; i + 1 < GetSize(chain); i++) {
+		if (extra[i].empty())
+			continue;
+		std::vector<ChainStep> upto(chain.begin(), chain.begin() + i + 1);
+		held[i].collect(ff, [&](FoldKind kind, Const start, Const &result) {
+			return fold_through(module, sigmap, drivers, initvals, ff, flop, upto,
+					kind, start, result);
+		});
+	}
+
 	// TODO relax some of these contraints by rewiring these control nets
 	pool<SigBit> forbidden = wire_bits(map_y);
 	if (!peel)
@@ -2073,14 +2388,18 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	if (GetSize(y) != GetSize(q) && ff.is_fine)
 		refuse("Flop %s is a single-bit cell and cannot widen to %d bits.\n",
 				log_id(flop), GetSize(y));
-
-	if (peel) {
-		IdString left_name = module->uniquify(flop->name.str() + "_fanout");
-		module->addCell(left_name, flop);
-		flop->unsetPort(ID::Q);
-		log("Leaving a copy of flop %s as %s for its other readers.\n",
-				log_id(flop), log_id(left_name));
-	}
+	// The registers left on the way have the same problem, at the width of the
+	// hop they sit on rather than of the cut.
+	if (ff.is_fine)
+		for (int i = 0; i + 1 < GetSize(chain); i++) {
+			if (extra[i].empty())
+				continue;
+			int n = GetSize(chain[i].cell->getPort(ID::Y));
+			if (n != 1)
+				refuse("Flop %s is a single-bit cell, so it cannot leave a %d-bit "
+						"register on Y of cell %s for the readers off the "
+						"after-path.\n", log_id(flop), n, log_id(chain[i].cell));
+		}
 
 	// The register keeps its name, so the caller can still find the flop it
 	// named, but it takes the width of the cut output. Where that width is
@@ -2132,6 +2451,58 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 			step.cell->setPort(port, neu);
 		}
 	}
+
+	// Each hop read off the after-path hands its old net to a register and takes
+	// a fresh one for the value it now computes a cycle early. Everything
+	// reading that hop off the path keeps the net it already had, so none of
+	// those readers is rewired; the only cell told where the value went is the
+	// next hop, whose path port is moved onto the fresh net bit for bit.
+	int nheld = 0;
+	for (int i = 0; i + 1 < GetSize(chain); i++) {
+		if (extra[i].empty())
+			continue;
+		Cell *cell = chain[i].cell;
+		SigSpec yi = cell->getPort(ID::Y);
+		SigSpec fresh = module->addWire(
+				module->uniquify(cell->name.str() + "_retimed_y"), GetSize(yi));
+		cell->setPort(ID::Y, fresh);
+
+		dict<SigBit, SigBit> subst;
+		SigSpec mapped = sigmap(yi);
+		for (int b = 0; b < GetSize(mapped); b++)
+			subst[mapped[b]] = fresh[b];
+		Cell *next = chain[i + 1].cell;
+		SigSpec neu;
+		for (auto bit : next->getPort(chain[i + 1].port)) {
+			auto it = subst.find(sigmap(bit));
+			neu.append(it == subst.end() ? bit : it->second);
+		}
+		next->setPort(chain[i + 1].port, neu);
+
+		FfData keep = ff;
+		keep.cell = nullptr;
+		keep.name = module->uniquify(flop->name.str() + "_" +
+				RTLIL::unescape_id(cell->name) + "_fanout");
+		keep.sig_d = fresh;
+		keep.sig_q = yi;
+		keep.width = GetSize(yi);
+		held[i].apply(keep, GetSize(yi));
+		// Fatal rather than refused, for the same reason as the rebuild below:
+		// the rewrite is already under way and there is no untouched module to
+		// hand back. emit only declines a zero width or a register with no
+		// control input at all, and neither can reach here.
+		if (!keep.emit())
+			log_error("The register left on Y of cell %s for the readers off the "
+					"after-path of flop %s did not survive being built.\n",
+					log_id(cell), log_id(flop));
+		log("Leaving register %s on Y of cell %s for %d reader(s) off the "
+				"after-path of flop %s.\n", log_id(keep.name), log_id(cell),
+				GetSize(extra[i].readers) + (extra[i].output ? 1 : 0),
+				log_id(flop));
+		held[i].log_folds(keep.name);
+		nheld++;
+	}
+
 	last->setPort(ID::Y, link);
 
 	// The old Q net has become the combinational link from the cut, and the
@@ -2157,6 +2528,41 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 		module->remove(merge.flop);
 	}
 
+	IdString flop_name = ff.name;
+
+	// The registers that stay: the run of the shared cell the move is not
+	// taking, and a copy for the readers of Q the move does not serve. Both go
+	// in before the moved register, which is taking the original's name, and
+	// after the shared cell is gone, which is what frees that name and clears
+	// the init values off Q. Between them they drive every bit of the old Q net
+	// the move leaves behind.
+	if (sliced) {
+		FfData keep = whole.slice(other_bits(bits, whole.width));
+		keep.name = module->uniquify(whole.name.str() + "_rest");
+		whole.remove();
+		// Fatal rather than refused, for the same reason as the rebuild below:
+		// the shared cell is already gone by the time this could decline.
+		if (!keep.emit())
+			log_error("The registers flop %s was not moving did not survive "
+					"being rebuilt as %s.\n", log_id(flop_name), log_id(keep.name));
+		log("Flop %s held several registers; moving the %d bit(s) whose "
+				"after-path reaches %s and leaving the other %d as %s.\n",
+				log_id(flop_name), GetSize(bits), log_id(cut),
+				keep.width, log_id(keep.name));
+	} else if (peel) {
+		flop->unsetPort(ID::Q);
+	}
+	if (peel) {
+		FfData copy = ff;
+		copy.cell = nullptr;
+		copy.name = module->uniquify(flop_name.str() + "_fanout");
+		if (!copy.emit())
+			log_error("The copy of flop %s left for its other readers did not "
+					"survive being built.\n", log_id(flop_name));
+		log("Leaving a copy of flop %s as %s for its other readers.\n",
+				log_id(flop_name), log_id(copy.name));
+	}
+
 	// The register is rebuilt rather than rewired, because a folded reset value
 	// can change which cell it has to be: the single-bit types spell the value
 	// they reset to into their name, so a $_SDFF_PP0_ whose fold inverts that
@@ -2164,7 +2570,6 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	// type from the values, resizes the parameters, and writes the init value
 	// onto the new Q net on the way. Undefined values still have to be resized,
 	// or emitting a widened register would assert on their width.
-	IdString flop_name = ff.name;
 	ff.sig_d = link;
 	ff.sig_q = y;
 	ff.width = GetSize(y);
@@ -2181,6 +2586,8 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 			log_id(flop_name), GetSize(chain), log_id(cut), GetSize(merges));
 	if (kept)
 		log("Kept %d merged flop(s) that still have other readers.\n", kept);
+	if (nheld)
+		log("Left %d register(s) on the chain for readers off the after-path.\n", nheld);
 }
 
 // Make a move if it is legal, and say why not if it is not. An empty string
@@ -2232,8 +2639,12 @@ struct OptRetimePass : public Pass {
 		log("        move the register downstream past -cut. Other operand\n");
 		log("        registers are merged in (same clock, enable, and reset net).\n");
 		log("        The flop keeps its name and takes the cut's output width.\n");
-		log("        Extra readers of an intermediate Y refuse; extra readers of\n");
-		log("        the cut Y become the new flop Q.\n");
+		log("        A cell holding several registers is taken apart first: the\n");
+		log("        run of Q whose readers lead to -cut is moved under the\n");
+		log("        cell's name and the rest stays beside it as <name>_rest.\n");
+		log("        Extra readers of the cut Y become the new flop Q; extra\n");
+		log("        readers of Q or of an intermediate Y keep a register on the\n");
+		log("        net they read, holding the value they had.\n");
 		log("\n");
 		log("    -backward\n");
 		log("        move the register upstream onto the path input of -cut.\n");
@@ -2245,6 +2656,10 @@ struct OptRetimePass : public Pass {
 		log("        cloned. Invertible cuts: $buf, $not, $xor, $xnor, $add,\n");
 		log("        $sub, $mul, $and, $or, $mux. Other live data inputs get a\n");
 		log("        clone of the flop.\n");
+		log("        With no data port to land on, a $mux select is the landing:\n");
+		log("        the flop resizes to that one bit and holds whichever value\n");
+		log("        picks what it used to hold, and any live data port gets a\n");
+		log("        clone starting at that same value.\n");
 		log("        The moved flop feeds the cut, so its init has to be a\n");
 		log("        cut-input that yields the old Q. Types with no such input\n");
 		log("        ($mul of an even constant by an odd stored value), or that\n");
