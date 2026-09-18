@@ -295,6 +295,20 @@ design -load gold
 equiv_opt -assert opt_muldist -max-reduce 8 -min-chain-width 12 -shared-inc
 design -reset
 
+# A surviving reader inside the same sum refuses -shared-inc: the second
+# multiply enters the chain shifted, so it is not rewritable and not a stranded
+# peer either, yet the increment still gates the chain through it
+read_verilog -sv <<EOT
+module test(input [7:0] x, input [2:0] z, w, input [11:0] u, output [14:0] y);
+  wire [7:0] xp = x + 8'd1;
+  assign y = z * xp[7:2] + {w * xp[7:2], 2'b00} + u;
+endmodule
+EOT
+prep
+opt_muldist -max-reduce 8 -min-chain-width 12 -shared-inc
+select -assert-none a:opt_muldist
+design -reset
+
 # The operand identity where the window takes the increment's carry-out: the
 # sum cannot overflow a window wider than itself, so no wrap term is needed
 read_verilog -sv <<EOT
@@ -315,6 +329,42 @@ read_verilog -sv <<EOT
 module test(input [4:0] x, input [2:0] z, input [11:0] u, v, output [12:0] y);
   wire [5:0] xp = x + 6'd1;
   assign y = z * xp[5:2] + u + v;
+endmodule
+EOT
+prep
+opt_muldist -max-reduce 8 -min-chain-width 12
+select -assert-none a:opt_muldist
+design -save gold
+opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
+select -assert-min 1 a:opt_muldist
+design -load gold
+equiv_opt -assert opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
+design -reset
+
+# A window reaching two bits above x: the top one can never be set, so the
+# operand is the same value read wider
+read_verilog -sv <<EOT
+module test(input [4:0] x, input [2:0] z, input [11:0] u, v, output [12:0] y);
+  wire [6:0] xp = x + 7'd1;
+  assign y = z * xp[6:2] + u + v;
+endmodule
+EOT
+prep
+opt_muldist -max-reduce 8 -min-chain-width 12
+select -assert-none a:opt_muldist
+design -save gold
+opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
+select -assert-min 1 a:opt_muldist
+design -load gold
+equiv_opt -assert opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
+design -reset
+
+# A window starting at x's top bit: the slice is zero and the whole operand is
+# the carry, so the product drops out and only the gated row is left
+read_verilog -sv <<EOT
+module test(input [4:0] x, input [2:0] z, input [11:0] u, v, output [12:0] y);
+  wire [7:0] xp = x + 8'd1;
+  assign y = z * xp[7:5] + u + v;
 endmodule
 EOT
 prep
