@@ -188,19 +188,34 @@ void insert_wire_bits(pool<SigBit> &bits, const SigSpec &sig)
 			bits.insert(bit);
 }
 
+// Every question the pass asks about what is behind a net goes through this
+// index, and it rewires on the answer, so a bit that several cell outputs drive
+// must not come back with one of them: a backward move would take a multiply
+// driven net for its unique before-path, and a forward move would merge away a
+// register that is not the only thing driving the operand. Such a bit is left
+// out of the index instead, which reads the same as undriven and is refused
+// wherever a driver was needed.
 dict<SigBit, BitSrc> index_output_bits(Module *module, SigMap &sigmap)
 {
 	dict<SigBit, BitSrc> drivers;
+	pool<SigBit> conflicting;
 	for (auto cell : module->cells()) {
 		for (auto &conn : cell->connections()) {
 			if (!cell->output(conn.first))
 				continue;
 			SigSpec mapped = sigmap(conn.second);
-			for (int i = 0; i < GetSize(mapped); i++)
-				if (mapped[i].is_wire())
+			for (int i = 0; i < GetSize(mapped); i++) {
+				if (!mapped[i].is_wire())
+					continue;
+				if (drivers.count(mapped[i]))
+					conflicting.insert(mapped[i]);
+				else
 					drivers[mapped[i]] = {cell, conn.first, i};
+			}
 		}
 	}
+	for (auto bit : conflicting)
+		drivers.erase(bit);
 	return drivers;
 }
 
@@ -1827,26 +1842,37 @@ std::vector<Cell *> capture_siblings(Module *module, SigMap &sigmap, Cell *flop)
 	return out;
 }
 
-// The cell as far back from this register's D as the cut is from the named
-// flop's. Every move duplicates the chain for the registers that have not gone
+// The cell at the end of this register's copy of the chain the named flop
+// crossed. Every move duplicates the chain for the registers that have not gone
 // yet, so a sibling's cut is a copy the pass named itself and there is no name
-// to pass down. What does survive the batch is the shape, since the siblings
-// all started on one net, so the cut is found by counting hops.
-Cell *cut_at_depth(Module *module, Cell *flop, int depth)
+// to pass down. What does survive the batch is the shape, since the siblings all
+// started on one net, so walking back along the same ports lands on the copy of
+// the same cell.
+//
+// The route is the ports the named flop's chain was found on, replayed rather
+// than worked out again: a hop with two live data inputs reaches the cut on one
+// of them and an unrelated cone on the other, and backward_path_port answers
+// which input to land on and not which one the cut is behind. Asking it here
+// would retime the siblings across whichever input it prefers.
+Cell *cut_on_route(Module *module, Cell *flop, const std::vector<IdString> &route)
 {
 	SigMap sigmap(module);
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
 	SigSpec cur = sigmap(flop->getPort(ID::D));
 	Cell *cell = nullptr;
-	for (int i = 0; i < depth; i++) {
+	for (int i = 0; i <= GetSize(route); i++) {
 		IdString y_port;
 		cell = unique_full_driver(drivers, sigmap, cur, y_port);
 		if (cell == nullptr || y_port != ID::Y)
 			refuse("The before-path of flop %s is not a unique cell Y at %s.\n",
 					log_id(flop), log_signal(cur));
-		if (i + 1 < depth)
-			cur = sigmap(cell->getPort(
-					backward_path_port(sigmap, drivers, cell, flop)));
+		if (i == GetSize(route))
+			break;
+		if (!cell->hasPort(route[i]))
+			refuse("Cell %s on the before-path of flop %s has no port %s, so it "
+					"is not a copy of the chain the move crossed.\n",
+					log_id(cell), log_id(flop), log_id(route[i]));
+		cur = sigmap(cell->getPort(route[i]));
 	}
 	return cell;
 }
@@ -1901,8 +1927,17 @@ void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
 	std::vector<OffPath> extra;
-	int depth = GetSize(collect_backward_chain(module, sigmap, drivers, flop,
-			flop->getPort(ID::D), cut, extra));
+	std::vector<ChainStep> chain = collect_backward_chain(module, sigmap, drivers,
+			flop, flop->getPort(ID::D), cut, extra);
+	int depth = GetSize(chain);
+
+	// The port every hop of that chain leads to the next one on, which is what
+	// each sibling replays to find its own copy of the cut. The last hop is the
+	// cut itself, and its port is where the flop lands rather than a way
+	// further back, so it is not part of the route.
+	std::vector<IdString> route;
+	for (int i = 0; i + 1 < depth; i++)
+		route.push_back(chain[i].port);
 
 	// Names and nets to report at the end, read now because the registers are
 	// rebuilt rather than edited and the cells these point at will be gone.
@@ -1916,7 +1951,7 @@ void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
 	for (int i = 1; i < GetSize(targets); i++) {
 		try {
 			apply_backward_move(module, targets[i],
-					cut_at_depth(module, targets[i], depth));
+					cut_on_route(module, targets[i], route));
 		} catch (const MoveRefused &refused) {
 			// Past the first move this is not a legality question any more.
 			// There is no untouched module left to answer it with, so a refusal
@@ -2219,6 +2254,9 @@ struct OptRetimePass : public Pass {
 		log("        with -backward, move every register capturing the same net.\n");
 		log("        All-or-nothing. No -forward form.\n");
 		log("\n");
+		log("The selection is where the two named cells are looked up, and both\n");
+		log("have to be in it. The cells between them travel with the move.\n");
+		log("\n");
 		log("A refused move is reported and leaves the design unchanged.\n");
 		log("Scratchpad: opt_retime.moved, opt_retime.refusal (unset on\n");
 		log("success), and opt.did_something when a move is made.\n");
@@ -2275,7 +2313,12 @@ struct OptRetimePass : public Pass {
 		Cell *cut = nullptr;
 		for (auto mod : design->selected_modules()) {
 			Cell *found = mod->cell(RTLIL::escape_id(flop));
-			if (!found)
+			// A partially selected module is still handed over, so whether the
+			// cell itself is in the selection is a separate question from
+			// whether its module is. Both ends of the move are rewritten, so a
+			// caller who left one out of the selection did not ask for this
+			// move to be made.
+			if (!found || !mod->selected(found))
 				continue;
 			if (module)
 				log_cmd_error("Flop cell '%s' found in more than one selected module.\n", flop.c_str());
@@ -2287,6 +2330,9 @@ struct OptRetimePass : public Pass {
 			log_cmd_error("Flop cell '%s' not found in the selection.\n", flop.c_str());
 		if (!cut)
 			log_cmd_error("Cut cell '%s' not found in module %s.\n", cut_cell.c_str(), log_id(module));
+		if (!module->selected(cut))
+			log_cmd_error("Cut cell '%s' is in module %s but not in the selection.\n",
+					cut_cell.c_str(), log_id(module));
 
 		log("Move: module=%s flop=%s direction=%s cut=%s%s\n",
 				log_id(module), log_id(flop_cell),

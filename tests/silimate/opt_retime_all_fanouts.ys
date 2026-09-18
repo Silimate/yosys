@@ -250,9 +250,6 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# logger -expect error exits yosys successfully, so this has to come last.
-# A forward move merges the registers on the other operands into the one that
-# ---------------------------------------------------------------------------
 # Every case above starts from an undefined init, so the batch never folds a
 # stored value. Each register in the batch carries its own, and each has to be
 # folded through its own copy of the cone: the siblings share the cone but not
@@ -304,6 +301,65 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
+# A hop with two live inputs leads to the cut on one of them and somewhere else
+# entirely on the other, and which is which is not something the shape of a
+# copy can be asked about later: a backward move would land on either. So the
+# batch replays the inputs the named flop's chain was found on rather than
+# choosing again, and the sibling crosses the copy of the adder instead of the
+# and-gate sitting beside it on the same xor.
+log -header "Multi-hop: the sibling follows the input the named flop did"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module twoway(input clk, en1, en2, in1, in2, in3, in4, output res1, res2);
+  wire sum, other, mix;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $and #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    n0 (.A(in3), .B(in4), .Y(other));
+  $xor #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(other), .B(sum), .Y(mix));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(mix), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(mix), .Q(res2));
+endmodule
+EOF
+hierarchy -top twoway
+check -assert
+design -save orig
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
+check -assert
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+# The xor and the adder are the chain, so both are copied. The and-gate is not
+# on it: the one there was stays where it was, now read by the clone each
+# register grew on the xor's other input.
+select -assert-count 2 t:$xor
+select -assert-count 2 t:$add
+select -assert-count 1 t:$and
+select -assert-count 2 t:$dffe c:n0 %x:+[Y] %co %i
+# Both registers came to rest on the adder's operands, f2 on its own copy.
+select -assert-count 6 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 c:f2 %x:+[D] w:in1 %i
+select -assert-count 1 c:f2_B %x:+[D] w:in2 %i
+select -assert-count 1 c:a0_dup %x:+[A] %ci c:f2 %i
+select -assert-count 1 c:x0_dup %x:+[Y] w:res2 %i
+
+rename twoway gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to come last.
+# A forward move merges the registers on the other operands into the one that
 # moves, so it collapses fanin rather than fanning out to readers, and there is
 # nothing for -all-fanouts to mean.
 log -header "Refused: -all-fanouts is a backward-only idea"

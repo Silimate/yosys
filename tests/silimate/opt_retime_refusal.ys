@@ -112,3 +112,71 @@ select -assert-count 3 t:$dff
 select -assert-count 1 c:f1 %x:+[Q] w:m1 %i
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+# A net two cells drive has no driver the pass can name, and answering with
+# either of them is how a rewrite lands on a circuit nobody described. Both
+# designs below are ill-formed - yosys's own check calls the net a conflict,
+# which is why these two sections run it without -assert - and being handed one
+# is not a licence to pick a driver and go.
+log -header "Refused: the before-path net has two drivers"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module dual(input clk, en, in1, in2, in3, output res1);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $and #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    n0 (.A(in3), .B(in3), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(sum), .Q(res1));
+endmodule
+EOF
+hierarchy -top dual
+logger -expect warning "multiple conflicting drivers for dual\." 1
+check
+# Taking the adder for the whole before-path would slide f1 onto in1 and in2 and
+# leave the and-gate driving a net the register no longer reads.
+opt_retime -flop f1 -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "The before-path of flop f1 is not a unique cell Y at \sum."
+select -assert-count 1 t:$add
+select -assert-count 1 t:$and
+select -assert-count 1 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:sum %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Forward, the same ambiguity costs a register rather than a wire: a merged
+# operand flop is deleted, and q2 has an and-gate on it that would be left
+# driving the net alone with nothing registering it.
+log -header "Refused: an operand of the cut has two drivers"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module dualop(input clk, en, in1, in2, in3, output res1);
+  wire q1, q2;
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(in1), .Q(q1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en), .D(in2), .Q(q2));
+  $and #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    n0 (.A(in3), .B(in3), .Y(q2));
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(q1), .B(q2), .Y(res1));
+endmodule
+EOF
+hierarchy -top dualop
+logger -expect warning "multiple conflicting drivers for dualop\." 1
+check
+opt_retime -flop f1 -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input B of cell a0 is not driven by a flop or a constant, so flop f1 cannot move forward across it."
+# Both registers still there, so nothing was merged away.
+select -assert-count 2 t:$dffe
+select -assert-count 1 c:f1 %x:+[Q] %co c:a0 %i
+select -assert-count 1 c:f2 %x:+[Q] %co c:a0 %i
+design -reset
+log -pop
