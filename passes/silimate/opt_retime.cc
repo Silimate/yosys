@@ -645,11 +645,6 @@ Const fold_value(Module *, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 {
 	SigSpec path = sigmap(flop->getPort(ID::Q));
 	for (auto &step : chain) {
-		if (is_buf(step.cell)) {
-			path = sigmap(step.cell->getPort(ID::Y));
-			continue;
-		}
-
 		std::vector<Const> args;
 		for (auto port : data_inputs(step.cell)) {
 			std::vector<PortBit> desc;
@@ -686,10 +681,12 @@ Const fold_value(Module *, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 }
 
 // Fold one kind of stored value through the chain, if there is one to fold.
-// Returns false when every copy of it is undefined, meaning there is nothing to
-// carry. A mix of defined and undefined copies is refused rather than folded:
-// evaluating one against the other gives undefined bits back, which would
-// quietly discard what the defined side said.
+// Returns false when there is nothing to carry, which is decided on the folded
+// result rather than on the copies going in: every copy can be undefined and
+// the result still be pinned by a constant operand. A mix of defined and
+// undefined copies is refused rather than folded, because evaluating one
+// against the other gives undefined bits back, which would quietly discard
+// what the defined side said.
 bool fold_through(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		FfInitVals &initvals, FfData &ref, Cell *flop,
 		const std::vector<ChainStep> &chain, FoldKind kind, Const start, Const &result)
@@ -698,10 +695,6 @@ bool fold_through(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &dr
 	bool all = start.is_fully_def();
 	SigSpec path = sigmap(flop->getPort(ID::Q));
 	for (auto &step : chain) {
-		if (is_buf(step.cell)) {
-			path = sigmap(step.cell->getPort(ID::Y));
-			continue;
-		}
 		for (auto port : data_inputs(step.cell)) {
 			std::vector<PortBit> desc;
 			if (port == step.port)
@@ -720,12 +713,27 @@ bool fold_through(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &dr
 		}
 		path = sigmap(step.cell->getPort(ID::Y));
 	}
-	if (!any)
-		return false;
-	if (!all)
+	if (any && !all)
 		refuse("Flop %s cannot move because the move would fold %s values together "
 				"and only some of them are defined.\n", log_id(flop), fold_kind_name(kind));
-	result = fold_value(module, sigmap, drivers, initvals, ref, flop, chain, kind, start);
+	// Folded even when no copy was defined, because a constant operand can
+	// still pin the result on its own: x & 0 is 0 whatever the register held.
+	Const out = fold_value(module, sigmap, drivers, initvals, ref, flop, chain, kind, start);
+	if (!out.is_fully_def()) {
+		// Reaching an undefined result from defined inputs means the chain
+		// itself produced it, which $div and $mod by zero, a multi-hot $pmux
+		// select and $shiftx all do. Writing that back would turn "resets to
+		// 9" into "resets to anything", a licence the design never gave,
+		// while the cell carries on computing a definite value every other
+		// cycle. An init is the one kind where undefined and absent mean the
+		// same thing, so there it is an answer rather than a refusal.
+		if (any && kind != FoldKind::Init)
+			refuse("Flop %s cannot move because folding its %s value through the "
+					"chain gives an undefined result.\n",
+					log_id(flop), fold_kind_name(kind));
+		return false;
+	}
+	result = out;
 	return true;
 }
 
@@ -823,6 +831,13 @@ const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
 		if (ff.pol_srst != ref.pol_srst)
 			return "a sync reset of the opposite polarity to";
 	}
+	// $sdffe and $sdffce carry the same set of controls on the same nets and
+	// differ only in whether an inactive enable suppresses the reset, so the
+	// has_* comparison above cannot tell them apart. Merging them would hand
+	// the survivor one register's answer to "does this reset while held" and
+	// silently give the other register's bits the same one.
+	if (ff.has_ce && ff.has_srst && ff.ce_over_srst != ref.ce_over_srst)
+		return "a different priority between enable and sync reset than";
 	if (ff.has_arst) {
 		if (sigmap(ff.sig_arst) != sigmap(ref.sig_arst))
 			return "a different async reset net than";
@@ -966,6 +981,16 @@ Cell *unique_full_driver(const dict<SigBit, BitSrc> &drivers, SigMap &sigmap,
 			return nullptr;
 	}
 	if (sigmap(cell->getPort(port)) != sig)
+		return nullptr;
+	return cell;
+}
+
+Cell *unique_y_driver(const dict<SigBit, BitSrc> &drivers, SigMap &sigmap,
+		const SigSpec &sig)
+{
+	IdString port;
+	Cell *cell = unique_full_driver(drivers, sigmap, sig, port);
+	if (cell == nullptr || port != ID::Y)
 		return nullptr;
 	return cell;
 }
@@ -1173,10 +1198,32 @@ struct OffPath {
 	bool empty() const { return readers.empty() && !output; }
 };
 
+// A hop the named flop can actually sit on: invertible and the same width as
+// the register. A 1-bit $mux on a 32-bit enable select fails the width check,
+// which is why sha256's i86 is not itself a landing even when it is on the
+// before-path. Path-port refusals (sliding onto a select, a width-changing
+// operand) are left for the chain to raise, so those messages stay specific.
+bool legal_backward_landing(Cell *cell, int width)
+{
+	if (!is_invertible_backward(cell) || !cell->hasPort(ID::Y))
+		return false;
+	return GetSize(cell->getPort(ID::Y)) == width;
+}
+
 // From start back to cut: each hop's Y drives the next hop's path port (or
 // start, for the first). chain.front() is the cell driving start, chain.back()
-// is the cut. extra comes back parallel to the chain, holding what reads each
-// hop's Y off the path.
+// is the landing, which is the cut when the flop can slide onto it and the
+// last legal ancestor when it cannot. extra comes back parallel to the chain,
+// holding what reads each hop's Y off the path.
+//
+// The walk looks at every data input, not only the preferred path port. STA
+// names a cell on the timing path, and a $mux select is on that path even
+// when backward_path_port would rather follow a data operand: sha256's i86
+// drives H_we into the enable mux, and a walk that only followed H1_new
+// would run off the flop's own Q at digest and report a missing cell Y.
+// Finding the cut on a select does not mean sliding onto the select. The
+// flop lands on a data port of the last same-width invertible cell, and the
+// select is cloned, which is the move that registers i86's Y.
 //
 // start is flop's D, or the bits of it being moved when the flop is several
 // registers sharing a cell. It is passed rather than read off the flop so that
@@ -1186,22 +1233,80 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 		Cell *cut, std::vector<OffPath> &extra)
 {
 	extra.clear();
-	std::vector<ChainStep> chain;
-	pool<Cell *> seen;
-	Cell *reader = flop;
-	IdString reader_port = ID::D;
 	SigSpec cur = sigmap(start);
+	Cell *first = unique_y_driver(drivers, sigmap, cur);
+	if (first == nullptr)
+		refuse("The before-path of flop %s is not a unique cell Y at %s.\n",
+				log_id(flop), log_signal(cur));
 
-	while (true) {
-		IdString y_port;
-		Cell *cell = unique_full_driver(drivers, sigmap, cur, y_port);
-		if (cell == nullptr || y_port != ID::Y)
-			refuse("The before-path of flop %s is not a unique cell Y at %s.\n",
-					log_id(flop), log_signal(cur));
-		if (!is_invertible_backward(cell))
+	// parent[cell] is the hop whose named port is driven by cell's Y, and the
+	// seed has none: it drives start. Breadth-first so the reconstructed path
+	// is a shortest one, which is what a one-hop cut and a three-hop select
+	// driver both want.
+	struct Reach {
+		Cell *parent;
+		IdString port;
+	};
+	dict<Cell *, Reach> how;
+	std::vector<Cell *> q;
+	how[first] = {nullptr, IdString()};
+	q.push_back(first);
+	for (int qi = 0; qi < GetSize(q); qi++) {
+		if (q[qi] == cut)
+			break;
+		for (auto port : data_inputs(q[qi])) {
+			Cell *drv = unique_y_driver(drivers, sigmap,
+					sigmap(q[qi]->getPort(port)));
+			if (drv == nullptr || how.count(drv))
+				continue;
+			how[drv] = {q[qi], port};
+			q.push_back(drv);
+		}
+	}
+	if (!how.count(cut))
+		refuse("Cut %s is not on the before-path of flop %s.\n",
+				log_id(cut), log_id(flop));
+
+	std::vector<Cell *> path;
+	for (Cell *cell = cut; cell != nullptr; cell = how.at(cell).parent)
+		path.push_back(cell);
+	std::reverse(path.begin(), path.end());
+
+	int width = GetSize(start);
+	int land = -1;
+	for (int i = 0; i < GetSize(path); i++) {
+		if (!legal_backward_landing(path[i], width))
+			break;
+		land = i;
+		if (i + 1 >= GetSize(path))
+			continue;
+		// An intermediate hop has to carry the register's width on the port
+		// that leads to the next cell. A $mux select is one bit, so the enable
+		// mux can be a landing but not a hop toward the 1-bit cell that drives
+		// that select.
+		IdString conn = how.at(path[i + 1]).port;
+		if (!path[i]->hasPort(conn) || GetSize(path[i]->getPort(conn)) != width)
+			break;
+	}
+	if (land < 0) {
+		if (path[0] == cut && !is_invertible_backward(cut))
 			refuse("Cut cell %s has type %s, which opt_retime cannot move "
 					"backward across yet.\n",
-					log_id(cell), log_id(cell->type));
+					log_id(cut), log_id(cut->type));
+		refuse("Cut %s is on the before-path of flop %s but is not a legal "
+				"landing, and no invertible same-width cell on the path to it "
+				"is either.\n", log_id(cut), log_id(flop));
+	}
+	path.resize(land + 1);
+
+	std::vector<ChainStep> chain;
+	Cell *reader = flop;
+	IdString reader_port = ID::D;
+	for (int i = 0; i < GetSize(path); i++) {
+		Cell *cell = path[i];
+		IdString path_port = i + 1 == GetSize(path)
+				? backward_path_port(sigmap, drivers, cell, flop)
+				: how.at(path[i + 1]).port;
 
 		// Readers of Y that are not the path do not stop the move; the cell is
 		// duplicated for them. The flop is the one reader that cannot be served
@@ -1218,19 +1323,12 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 						"before-path, so it cannot move backward across it.\n",
 						log_id(flop), log_id(cell), log_id(rd.port));
 
-		if (seen.count(cell))
-			refuse("Cycle on the before-path of flop %s.\n", log_id(flop));
-		seen.insert(cell);
-
-		IdString path_port = backward_path_port(sigmap, drivers, cell, flop);
 		chain.push_back({cell, path_port});
 		extra.push_back({others, drives_output});
-		if (cell == cut)
-			return chain;
 		reader = cell;
 		reader_port = path_port;
-		cur = sigmap(cell->getPort(path_port));
 	}
+	return chain;
 }
 
 // The checks both directions make on the chain once it is known. Every hop
@@ -1394,9 +1492,19 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 
 	check_chain(ff, flop, chain);
 
-	if (chain.back().cell != cut)
+	if (chain.empty())
 		refuse("Cut %s is not on the before-path of flop %s.\n",
 				log_id(cut), log_id(flop));
+	// The named cut can sit on a select, or be a 1-bit cell driving one. The
+	// chain then ends at the last cell the flop can actually slide onto, and
+	// the rest of the move names that cell so clones and the path port match
+	// the landing rather than the request.
+	if (chain.back().cell != cut) {
+		log("Cut %s is not a legal backward landing for flop %s; moving across "
+				"%s, the last invertible same-width cell on a path to it.\n",
+				log_id(cut), log_id(flop), log_id(chain.back().cell));
+		cut = chain.back().cell;
+	}
 
 	// A duplicate reads the duplicate of the hop below it, and nothing else on
 	// the chain, so a chain cell reading another hop off the path would need
@@ -2097,8 +2205,11 @@ struct OptRetimePass : public Pass {
 		log("        A cell holding several registers, as an RTL array leaves\n");
 		log("        behind, is taken apart first: the run of D reaching -cut is\n");
 		log("        moved under the cell's name and the rest stays beside it.\n");
-		log("        Invertible cuts: $buf, $not, $xor, $xnor, $add, $sub, $mul,\n");
-		log("        $and, $or, $mux. Other live data inputs get a clone of the flop.\n");
+		log("        A cut that only drives a select is accepted as the mux that\n");
+		log("        reads it: the flop lands on a data port and the select is\n");
+		log("        cloned. Invertible cuts: $buf, $not, $xor, $xnor, $add,\n");
+		log("        $sub, $mul, $and, $or, $mux. Other live data inputs get a\n");
+		log("        clone of the flop.\n");
 		log("        The moved flop feeds the cut, so its init has to be a\n");
 		log("        cut-input that yields the old Q. Types with no such input\n");
 		log("        ($mul of an even constant by an odd stored value), or that\n");

@@ -10,8 +10,7 @@
 #
 # retime_probe is f0 -> b0 -> b1 -> f1 -> b2 -> b3 -> f2. b3 is on f1's
 # after-path, so asking for it as a backward cut walks the before-path the other
-# way and runs out at f0's Q, which is a refusal that needs no special shape in
-# the design.
+# way, stops at f0's Q, and never reaches b3.
 
 # ---------------------------------------------------------------------------
 log -header "Refused: the run survives and the design is untouched"
@@ -25,8 +24,8 @@ select -assert-count 4 t:$buf
 design -save orig
 
 # b3 is downstream of f1, so it is not on the before-path at all: the walk back
-# from f1 passes b1 and b0 and then reaches f0's Q, where there is no cell Y to
-# continue from.
+# from f1 passes b1 and b0 and stops at f0's Q, which is not a cell Y, so b3 is
+# never reached.
 opt_retime -flop f1 -cut b3 -backward
 
 # reaching this line at all is half the test
@@ -36,7 +35,7 @@ check -assert
 # the other half is being able to tell, without reading the log
 scratchpad -assert opt_retime.moved false
 scratchpad -assert-set opt_retime.refusal
-scratchpad -assert opt_retime.refusal "The before-path of flop f1 is not a unique cell Y at \q0."
+scratchpad -assert opt_retime.refusal "Cut b3 is not on the before-path of flop f1."
 
 # nothing added, nothing removed, nothing rewired
 select -assert-count 3 t:$dff

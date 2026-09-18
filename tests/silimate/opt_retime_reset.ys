@@ -231,3 +231,42 @@ scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different sync reset net than flop fa."
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+# Every reset value here is defined, so the fold has everything it needs and
+# still cannot produce an answer: $mod by zero is undefined in Yosys, and the
+# reset operands happen to divide by it. Writing that back would set
+# SRST_VALUE to x, which says the register may reset to anything, while the
+# $mod goes on computing a definite value on every cycle that is not a reset.
+# The pass would be inventing the licence, so it refuses instead. $div by
+# zero, a multi-hot $pmux select and $shiftx all reach the same place.
+log -header "Refused: a fold that is undefined although its inputs are not"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module rstundef(input clk, rst, en, input [2:0] dn, input [1:0] ds, output [3:0] qo);
+  (* init = 3'd5 *) wire [2:0] qn;
+  (* init = 1'b0 *) wire s0;
+  (* init = 1'b1 *) wire s1;
+  wire [3:0] y;
+  (* init = 4'd7 *) wire [3:0] qo;
+  $sdffe #(.WIDTH(3), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(3'd1))
+    fn (.CLK(clk), .EN(en), .SRST(rst), .D(dn), .Q(qn));
+  $sdffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(1'd1))
+    fs0 (.CLK(clk), .EN(en), .SRST(rst), .D(ds[0]), .Q(s0));
+  $sdffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(1'd0))
+    fs1 (.CLK(clk), .EN(en), .SRST(rst), .D(ds[1]), .Q(s1));
+  $mod #(.A_WIDTH(4), .B_WIDTH(1), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    c0 (.A({s0, qn[2], qn[1], qn[0]}), .B({s1}), .Y(y));
+  $sdffe #(.WIDTH(4), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(4'd0))
+    fq (.CLK(clk), .EN(en), .SRST(rst), .D(y), .Q(qo));
+endmodule
+EOF
+hierarchy -top rstundef
+check -assert
+# on reset the operands are 4'b1001 and 1'b0, so the fold is 9 % 0
+opt_retime -flop fn -cut c0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fn cannot move because folding its sync reset value through the chain gives an undefined result."
+design -reset
+log -pop

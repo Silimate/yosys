@@ -4,17 +4,25 @@
 # carry it to the far side of the chain as the value that cycle would have
 # produced there, so the pass evaluates the chain on constants: an init of 0
 # crossing a $not arrives as ~0, and a merge folds the other operands' init
-# values in alongside it. Only fully defined values are folded; a mix of
-# defined and undefined is refused, and that refusal is pinned in
-# opt_retime_cmp.ys next to the $not move that used to be refused outright.
+# values in alongside it. A mix of defined and undefined copies is refused,
+# and that refusal is pinned in opt_retime_cmp.ys next to the $not move that
+# used to be refused outright. Copies that are all undefined are neither
+# refused nor dropped: the chain is evaluated anyway, because a constant
+# operand can pin the result on its own, which the last section covers.
 #
 # Two separate things have to happen, and the $buf chain in section 1 is here
-# because only one of them is arithmetic. A $buf needs no fold, being the
-# identity, but the value still has to move onto the register's new Q net.
-# Leaving it on the old net is not a no-op: that net is combinational after the
-# move, so the init is both ignored where it now sits and missing where it is
-# needed. That case was accepted and silently wrong before folding existed, and
-# the direct assertions below are what would catch it coming back.
+# because only one of them is arithmetic. A $buf over the whole path needs no
+# fold, being the identity, but the value still has to move onto the
+# register's new Q net. Leaving it on the old net is not a no-op: that net is
+# combinational after the move, so the init is both ignored where it now sits
+# and missing where it is needed. That case was accepted and silently wrong
+# before folding existed, and the direct assertions below are what would catch
+# it coming back.
+#
+# A $buf is only the identity on the value being carried when its A is the
+# path in full. A wider A mixes in sibling registers and constants exactly as
+# an $add does, so it is folded the same way as any other hop rather than
+# skipped; the two sections after the resize cover it from both sides.
 #
 # Every value is asserted directly as well as proved. A sequential proof only
 # pins down an init value if something downstream actually looks at the first
@@ -142,6 +150,140 @@ select -assert-count 0 w:rcb a:init %i
 select -assert-count 1 w:fca_retimed
 select -assert-count 1 c:fca %x:+[Q] w:car %i
 rename initresize gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: a \$buf as the cut, carrying more than the register"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module bufwide(input clk, input d, e, output [1:0] q);
+  (* init = 1'b1 *) wire r;
+  (* init = 1'b0 *) wire r2;
+  wire [1:0] yb;
+  (* init = 2'b01 *) wire [1:0] q;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) f  (.CLK(clk), .D(d), .Q(r));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) f2 (.CLK(clk), .D(e), .Q(r2));
+  $buf #(.WIDTH(2)) b0 (.A({r2, r}), .Y(yb));
+  $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(yb), .Q(q));
+endmodule
+EOF
+hierarchy -top bufwide
+check -assert
+design -save orig
+# f is one bit of a two-bit $buf, so the move widens the register to two and
+# has to assemble the other bit from f2 rather than carry f's init alone.
+# Skipping the hop as an identity left a one-bit value on a two-bit register.
+opt_retime -flop f -cut b0 -forward
+check -assert
+scratchpad -assert opt_retime.moved true
+# {r2, r} is {1'b0, 1'b1}, so the register arrives holding 2'b01
+select -assert-count 1 w:yb a:init=2'b01 %i
+select -assert-count 0 w:r a:init %i
+rename bufwide gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: a \$buf mid-chain mixing a constant into the value"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module bufmid(input clk, input d, output [1:0] q);
+  (* init = 1'b1 *) wire r;
+  wire [1:0] yb, y;
+  (* init = 2'b10 *) wire [1:0] q;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(d), .Q(r));
+  $buf #(.WIDTH(2)) b0 (.A({1'b1, r}), .Y(yb));
+  $not #(.A_WIDTH(2), .A_SIGNED(0), .Y_WIDTH(2)) n0 (.A(yb), .Y(y));
+  $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top bufmid
+check -assert
+design -save orig
+# the $buf is not the cut this time, so a skipped hop reaches the $not with a
+# one-bit value and folds ~1'b1 where it should fold ~2'b11
+opt_retime -flop f -cut n0 -forward
+check -assert
+scratchpad -assert opt_retime.moved true
+# {1'b1, r} is 2'b11 on the first cycle, and ~2'b11 is 2'b00
+select -assert-count 1 w:y a:init=2'b00 %i
+select -assert-count 0 w:r a:init %i
+rename bufmid gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The definedness scan runs over the same hops the fold does, so a $buf has to
+# be walked there too and not just when the value is computed. Skipping it
+# here hides the sibling from the scan, and the mixed case then folds instead
+# of being refused: f2 contributes undefined bits and the move quietly loses
+# f's init rather than saying why it cannot have it.
+log -header "Refused: a \$buf mixing a register with an init and one without"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module bufmixdef(input clk, input d, e, output [1:0] q);
+  (* init = 1'b1 *) wire r;
+  wire r2;
+  wire [1:0] yb;
+  (* init = 2'b01 *) wire [1:0] q;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) f  (.CLK(clk), .D(d), .Q(r));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) f2 (.CLK(clk), .D(e), .Q(r2));
+  $buf #(.WIDTH(2)) b0 (.A({r2, r}), .Y(yb));
+  $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(yb), .Q(q));
+endmodule
+EOF
+hierarchy -top bufmixdef
+check -assert
+opt_retime -flop f -cut b0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop f cannot move because the move would fold init values together and only some of them are defined."
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: a constant operand pins an init the register has not got"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module initpinned(input clk, input [3:0] d, output [3:0] q);
+  wire [3:0] r, y;
+  (* init = 4'b0000 *) wire [3:0] q;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(d), .Q(r));
+  $and #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    c0 (.A(r), .B(4'b0000), .Y(y));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top initpinned
+check -assert
+design -save orig
+# f has no init at all, so there is no stored value to carry, and deciding
+# that on the inputs alone drops an init the move does have: x & 0 is 0 no
+# matter what the register held, so y is hard zero before the first edge.
+opt_retime -flop f -cut c0 -forward
+check -assert
+scratchpad -assert opt_retime.moved true
+select -assert-count 1 w:y a:init=4'b0000 %i
+rename initpinned gate
 design -import orig -as gold
 miter -equiv -flatten -make_assert gold gate miter
 hierarchy -top miter

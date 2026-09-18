@@ -9,6 +9,7 @@
 #
 #   digest -> add_70 -> mux_78 -> mux_13.B -\
 #   digest ------------------> mux_13.A -----> mux_32.A -> H1 -> digest
+#   i86 (we) ----------------> mux_13.S -/
 #
 # Backward moves place the flop on one data input of the cut cell and clone it
 # onto every other live input, so walking back through this tree clones onto
@@ -90,6 +91,58 @@ select -assert-count 1 c:mux_13 %x:+[B] c:H1 %x:+[Q] %i
 select -assert-count 1 c:mux_32 %x:+[Y] w:digest %i
 rename holdloop gate
 design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+flatten
+opt_clean
+sat -tempinduct -seq 16 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# sha256 names i86, the 1-bit mux that produces the enable. That cell is on
+# the before-path, but only as mux_13.S: a walk that followed H1_new would run
+# off the flop's own Q at digest and refuse a missing cell Y. The flop cannot
+# slide onto a 1-bit cut, so the move lands on mux_13, clones the select, and
+# is the same retiming as the section above.
+log -header "Backward: named cut is the 1-bit enable mux, land on the data mux"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module holdloop_we(input clk, rst, init, upd, input [7:0] b_in,
+                   output [7:0] digest);
+  wire we;
+  wire [7:0] b_reg, sum, h_new, held, nxt;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    add_70 (.A(digest), .B(b_reg), .Y(sum));
+  $mux #(.WIDTH(8)) mux_78 (.A(8'h5a),  .B(sum),   .S(upd), .Y(h_new));
+  $mux #(.WIDTH(1)) i86    (.A(init),   .B(1'b1),  .S(upd), .Y(we));
+  $mux #(.WIDTH(8)) mux_13 (.A(digest), .B(h_new), .S(we),  .Y(held));
+  $mux #(.WIDTH(8)) mux_32 (.A(held),   .B(8'h00), .S(rst), .Y(nxt));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) H1  (.CLK(clk), .D(nxt),  .Q(digest));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) b_f (.CLK(clk), .D(b_in), .Q(b_reg));
+endmodule
+EOF
+hierarchy -top holdloop_we
+check -assert
+select -assert-count 2 t:$dff
+design -save origwe
+opt_retime -flop H1 -cut i86 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 5 t:$dff
+select -assert-count 1 c:H1 %x:+[D] w:h_new %i
+select -assert-count 1 c:H1_A %x:+[D] w:digest %i
+select -assert-count 1 c:H1_S %x:+[D] w:we %i
+select -assert-count 1 c:H1_mux_32_S %x:+[D] w:rst %i
+select -assert-count 1 c:b_f %x:+[D] w:b_in %i
+select -assert-count 1 c:mux_13 %x:+[A] c:H1_A %x:+[Q] %i
+select -assert-count 1 c:mux_13 %x:+[B] c:H1 %x:+[Q] %i
+select -assert-count 1 c:mux_13 %x:+[S] c:H1_S %x:+[Q] %i
+select -assert-count 1 c:i86 %x:+[Y] w:we %i
+select -assert-count 1 c:mux_32 %x:+[Y] w:digest %i
+rename holdloop_we gate
+design -import origwe -as gold
 miter -equiv -flatten -make_assert gold gate miter
 hierarchy -top miter
 flatten
