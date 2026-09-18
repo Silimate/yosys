@@ -45,6 +45,8 @@ struct OptMulDistWorker {
 	int max_reduce;
 	int min_chain;
 	int min_chain_width;
+	bool shared_inc;
+	bool carry_out;
 	// Several multiplies commonly read the same slice of the same increment, and
 	// the wrap test and its gated carry depend only on that slice
 	dict<std::string, std::pair<SigBit, SigBit>> shared;
@@ -58,9 +60,9 @@ struct OptMulDistWorker {
 		int lo, hi;  // the slice of (x + 1) the operand takes
 	};
 
-	OptMulDistWorker(Module *module, int max_reduce, int min_chain, int min_chain_width)
+	OptMulDistWorker(Module *module, int max_reduce, int min_chain, int min_chain_width, bool shared_inc, bool carry_out)
 	    : module(module), sigmap(module), max_reduce(max_reduce), min_chain(min_chain),
-	      min_chain_width(min_chain_width)
+	      min_chain_width(min_chain_width), shared_inc(shared_inc), carry_out(carry_out)
 	{
 		index();
 	}
@@ -284,6 +286,48 @@ struct OptMulDistWorker {
 		module->remove(cell);
 	}
 
+	// Everything whose output reaches `root` through its operands
+	pool<Cell *> operand_cone(Cell *root)
+	{
+		pool<Cell *> cone = {root};
+		std::vector<Cell *> todo = {root};
+		while (!todo.empty()) {
+			Cell *cur = todo.back();
+			todo.pop_back();
+			for (auto &conn : cur->connections()) {
+				if (cur->output(conn.first))
+					continue;
+				for (auto bit : sigmap(conn.second)) {
+					auto d = driver.find(bit);
+					if (d != driver.end() && cone.insert(d->second).second)
+						todo.push_back(d->second);
+				}
+			}
+		}
+		return cone;
+	}
+
+	// A surviving reader that feeds the same sum keeps the increment in front of
+	// that sum, so the depth the rewrite buys is still paid on the other reader's
+	// way in and the row it leaves is pure cost. Readers outside the sum are free:
+	// the increment stays for them alone and leaves this chain entirely.
+	bool survivor_in_chain(const Target &t, const std::vector<Target> &targets)
+	{
+		pool<Cell *> cone = operand_cone(t.root);
+		for (auto bit : sigmap(t.inc->getPort(ID::Y)))
+			for (auto user : consumers[bit]) {
+				if (user == t.mul || !cone.count(user))
+					continue;
+				bool rewritten = false;
+				for (auto &o : targets)
+					if (o.mul == user)
+						rewritten = true;
+				if (!rewritten)
+					return true;
+			}
+		return false;
+	}
+
 	// Every reader of the increment has to be a slice we are rewriting, or it
 	// survives and the prefix adder we were paying for is still there
 	bool inc_only_feeds(Cell *inc, const std::vector<Target> &targets)
@@ -335,8 +379,17 @@ struct OptMulDistWorker {
 				// The wrap test is an AND over everything below the top of the
 				// window, so a wide window buys a reduction deeper than the
 				// prefix adder it replaces
-				if (hi + 1 > max_reduce || hi >= GetSize(x))
+				if (hi + 1 > max_reduce)
 					continue;
+				// A window reaching past x's top bit takes the increment's carry-out,
+				// which x itself does not have. Zero-extending keeps (x + 1)[hi:lo]
+				// exact -- the sum cannot overflow a window wider than it, so there
+				// is no modulo and the wrap test folds away to false
+				if (hi >= GetSize(x)) {
+					if (!carry_out)
+						continue;
+					x.extend_u0(hi + 1);
+				}
 				// Moving the row up the chain is only exact if the product it came
 				// off does not truncate, since a truncated product differs from the
 				// real one by a multiple of its width that the wider sum would see
@@ -356,11 +409,14 @@ struct OptMulDistWorker {
 		}
 
 		// Drop any target whose increment survives anyway: the prefix adder is then
-		// still paid for and the distribution is pure cost
+		// still paid for, so the rewrite only buys depth on the multiply it moves,
+		// which is what -shared-inc asks for and the default declines
 		std::vector<Target> keep;
-		for (auto &t : targets)
-			if (inc_only_feeds(t.inc, targets) && !stranded_peer(t, targets))
+		for (auto &t : targets) {
+			bool survives_ok = shared_inc && !survivor_in_chain(t, targets);
+			if ((survives_ok || inc_only_feeds(t.inc, targets)) && !stranded_peer(t, targets))
 				keep.push_back(t);
+		}
 		return keep;
 	}
 
@@ -464,6 +520,22 @@ struct OptMulDistPass : public Pass {
 		log("        require that chain to be at least n bits wide, matching the\n");
 		log("        width gate arith_tree is run with (default: 16).\n");
 		log("\n");
+		log("    -carry-out\n");
+		log("        also take windows reaching past the top of x, into the bit the\n");
+		log("        increment carries out. The sum cannot overflow a window wider\n");
+		log("        than itself, so the wrap test folds away and x is read\n");
+		log("        zero-extended. Off by default: it fires where the increment is\n");
+		log("        declared wider than its input, which the default never matched.\n");
+		log("\n");
+		log("    -shared-inc\n");
+		log("        distribute even when the increment has readers this pass cannot\n");
+		log("        rewrite, so the incrementer survives. It then costs area without\n");
+		log("        leaving the design, but it still leaves the path of the multiply\n");
+		log("        rewritten here, which is the only reason that multiply was deep.\n");
+		log("        Readers that feed the same sum still refuse it: there the\n");
+		log("        increment is in front of the chain either way and the row the\n");
+		log("        rewrite leaves behind is the only thing that changed.\n");
+		log("\n");
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -471,6 +543,8 @@ struct OptMulDistPass : public Pass {
 		int max_reduce = 16;
 		int min_chain = 3;
 		int min_chain_width = 16;
+		bool shared_inc = false;
+		bool carry_out = false;
 
 		log_header(design, "Executing OPT_MULDIST pass (distribute increments out of multiplier operands).\n");
 
@@ -488,12 +562,20 @@ struct OptMulDistPass : public Pass {
 				min_chain_width = atoi(args[++argidx].c_str());
 				continue;
 			}
+			if (args[argidx] == "-shared-inc") {
+				shared_inc = true;
+				continue;
+			}
+			if (args[argidx] == "-carry-out") {
+				carry_out = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
 		for (auto module : design->selected_modules()) {
-			OptMulDistWorker worker(module, max_reduce, min_chain, min_chain_width);
+			OptMulDistWorker worker(module, max_reduce, min_chain, min_chain_width, shared_inc, carry_out);
 			worker.run();
 		}
 	}
