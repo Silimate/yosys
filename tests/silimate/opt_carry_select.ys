@@ -168,3 +168,147 @@ opt_carry_select
 select -assert-count 0 t:$mux
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Default: a late operand reaching the adder through a port is invisible"
+log -push
+design -reset
+read_verilog -sv <<VERILOG
+module lateop(input [4:0] p, input [4:0] q, output [4:0] y);
+  assign y = p ^ q;
+endmodule
+
+module cs(input [31:0] a, input [4:0] c0, input [4:0] c1, output [31:0] y);
+  wire [4:0] cause;
+  lateop u(.p(c0), .q(c1), .y(cause));
+  assign y = a + cause;
+endmodule
+VERILOG
+hierarchy -top cs
+proc; opt_clean
+# the instance output charges zero, so `cause` ranks with `a` and nothing moves
+opt_carry_select
+select -assert-count 0 t:$mux
+select -assert-count 1 t:$add
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "-hier-arrival: the same port-fed operand ranks late and is rewritten"
+log -push
+design -reset
+read_verilog -sv <<VERILOG
+module lateop(input [4:0] p, input [4:0] q, output [4:0] y);
+  assign y = p ^ q;
+endmodule
+
+module cs(input [31:0] a, input [4:0] c0, input [4:0] c1, output [31:0] y);
+  wire [4:0] cause;
+  lateop u(.p(c0), .q(c1), .y(cause));
+  assign y = a + cause;
+endmodule
+VERILOG
+hierarchy -top cs
+proc; opt_clean
+opt_carry_select -hier-arrival
+opt_clean
+# same split as the flat case: low add + high incrementer, plus one select mux
+select -assert-count 2 t:$add
+select -assert-count 1 t:$mux
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Equivalence: rewrite driven by a hierarchical arrival"
+log -push
+design -reset
+read_verilog -sv <<VERILOG
+module lateop(input [4:0] p, input [4:0] q, output [4:0] y);
+  assign y = p ^ q;
+endmodule
+
+module cs(input [31:0] a, input [4:0] c0, input [4:0] c1, output [31:0] y);
+  wire [4:0] cause;
+  lateop u(.p(c0), .q(c1), .y(cause));
+  assign y = a + cause;
+endmodule
+VERILOG
+hierarchy -top cs
+proc; opt_clean
+design -save src
+
+# gold is the original; the rewrite runs on the hierarchy and both are flattened
+# only afterwards, since the miter needs one module to reason about
+design -load src
+flatten cs
+opt_clean
+rename cs gold
+design -save goldflat
+
+design -load src
+opt_carry_select -hier-arrival cs
+flatten cs
+opt_clean
+rename cs gate
+design -copy-from goldflat -as gold gold
+
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt; memory; opt
+sat -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The two blocks below are the same design apart from a second instantiation of
+# lateop, so the rewrite in the first is what the second one loses.
+log -header "Control: one instantiation, operand late enough to rewrite"
+log -push
+design -reset
+read_verilog -sv <<VERILOG
+module lateop(input [4:0] p, input [4:0] q, output [4:0] y);
+  assign y = p ^ q;
+endmodule
+
+module cs(input [31:0] a0, input [31:0] a1, input [4:0] c0, input [4:0] c1,
+          input [4:0] c2, output [31:0] y);
+  wire [31:0] a = a0 ^ a1;   // the wide operand is late too, so the margin is thin
+  wire [4:0] cause;
+  lateop u0(.p((c0 ^ c1) ^ c2), .q(c1), .y(cause));
+  assign y = a + cause;
+endmodule
+VERILOG
+hierarchy -top cs
+proc; opt_clean
+opt_carry_select -hier-arrival
+opt_clean
+select -assert-count 1 t:$mux
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Negative: a second instantiation arriving early holds the module back"
+log -push
+design -reset
+read_verilog -sv <<VERILOG
+module lateop(input [4:0] p, input [4:0] q, output [4:0] y);
+  assign y = p ^ q;
+endmodule
+
+module cs(input [31:0] a0, input [31:0] a1, input [4:0] c0, input [4:0] c1,
+          input [4:0] c2, output [31:0] y, output [4:0] z);
+  wire [31:0] a = a0 ^ a1;
+  wire [4:0] cause;
+  // u1 gives p a port arrival of zero, and a module takes the earliest arrival
+  // any instantiation gives a port, so `cause` now ranks no later than `a`
+  lateop u0(.p((c0 ^ c1) ^ c2), .q(c1), .y(cause));
+  lateop u1(.p(c0),             .q(c1), .y(z));
+  assign y = a + cause;
+endmodule
+VERILOG
+hierarchy -top cs
+proc; opt_clean
+opt_carry_select -hier-arrival
+select -assert-count 0 t:$mux
+design -reset
+log -pop
