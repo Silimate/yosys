@@ -277,6 +277,75 @@ opt_muldist
 select -assert-none a:opt_muldist
 design -reset
 
+# -shared-inc takes that shape anyway: the incrementer stays for the other
+# reader, but it is off the path of the multiply rewritten here
+read_verilog -sv <<EOT
+module test(input [7:0] x, input [2:0] z, input [11:0] u, v,
+            output [12:0] y, output [7:0] shared);
+  wire [7:0] xp = x + 8'd1;
+  assign y = z * xp[7:2] + u + v;
+  assign shared = xp;
+endmodule
+EOT
+prep
+design -save gold
+opt_muldist -max-reduce 8 -min-chain-width 12 -shared-inc
+select -assert-min 1 a:opt_muldist
+design -load gold
+equiv_opt -assert opt_muldist -max-reduce 8 -min-chain-width 12 -shared-inc
+design -reset
+
+# A surviving reader inside the same sum refuses -shared-inc: the second
+# multiply enters the chain shifted, so it is not rewritable and not a stranded
+# peer either, yet the increment still gates the chain through it
+read_verilog -sv <<EOT
+module test(input [7:0] x, input [2:0] z, w, input [11:0] u, output [14:0] y);
+  wire [7:0] xp = x + 8'd1;
+  assign y = z * xp[7:2] + {w * xp[7:2], 2'b00} + u;
+endmodule
+EOT
+prep
+opt_muldist -max-reduce 8 -min-chain-width 12 -shared-inc
+select -assert-none a:opt_muldist
+design -reset
+
+# The operand identity where the window takes the increment's carry-out: the
+# sum cannot overflow a window wider than itself, so no wrap term is needed
+read_verilog -sv <<EOT
+module check(input [13:0] x, output ok);
+  wire [14:0] xp = x + 15'd1;
+  wire        c  = &x[2:0];
+  wire [11:0] ref  = xp[14:3];
+  wire [11:0] dist = {1'b0, x[13:3]} + {11'd0, c};
+  assign ok = (ref == dist);
+endmodule
+EOT
+prep -top check
+sat -verify -prove ok 1'b1
+design -reset
+
+# That window is refused by default and taken under -carry-out
+read_verilog -sv <<EOT
+module test(input [4:0] x, input [2:0] z, input [11:0] u, v, output [12:0] y);
+  wire [5:0] xp = x + 6'd1;
+  assign y = z * xp[5:2] + u + v;
+endmodule
+EOT
+prep
+opt_muldist -max-reduce 8 -min-chain-width 12
+select -assert-none a:opt_muldist
+design -save gold
+opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
+select -assert-min 1 a:opt_muldist
+design -load gold
+equiv_opt -assert opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
+design -reset
+
+# hi == GetSize(x) above is the whole of what -carry-out reaches. wreduce trims
+# the increment's result to one bit above its input, so a window asking for more
+# than that is constant zeros on top of the carry, which is no longer a window
+# of the increment and never matches -- not a case that can be written here.
+
 # Adding a non-unit constant is not an increment: the wrap test would be a
 # comparison rather than an AND reduction
 read_verilog -sv <<EOT
