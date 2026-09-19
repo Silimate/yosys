@@ -312,3 +312,58 @@ opt_carry_select -hier-arrival
 select -assert-count 0 t:$mux
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+# A declared range like [8:4] gives the port wire a nonzero start_offset, but a
+# SigBit's offset is its index within the wire and stays zero-based, so the
+# parent connection is indexed by the same number either way. The pair below is
+# what would catch it if that ever stopped being true: reading the wrong parent
+# bit, or reading past the connection, supplies arrival 0, and the margin here
+# is one level, so the rewrite in the first block would go missing.
+log -header "Port with a nonzero start offset resolves to the right parent bit"
+log -push
+design -reset
+read_verilog -sv <<VERILOG
+module lateop(input [8:4] p, input [8:4] q, output [4:0] y);
+  assign y = p ^ q;
+endmodule
+
+module cs(input [31:0] a0, input [31:0] a1, input [4:0] c0, input [4:0] c1,
+          input [4:0] c2, output [31:0] y);
+  wire [31:0] a = a0 ^ a1;
+  wire [4:0] cause;
+  lateop u0(.p((c0 ^ c1) ^ c2), .q(c1), .y(cause));
+  assign y = a + cause;
+endmodule
+VERILOG
+hierarchy -top cs
+proc; opt_clean
+opt_carry_select -hier-arrival
+opt_clean
+select -assert-count 1 t:$mux
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Negative: same nonzero-offset port, fed early -> no rewrite"
+log -push
+design -reset
+read_verilog -sv <<VERILOG
+module lateop(input [8:4] p, input [8:4] q, output [4:0] y);
+  assign y = p ^ q;
+endmodule
+
+module cs(input [31:0] a0, input [31:0] a1, input [4:0] c0, input [4:0] c1,
+          output [31:0] y);
+  wire [31:0] a = a0 ^ a1;
+  wire [4:0] cause;
+  lateop u0(.p(c0), .q(c1), .y(cause));
+  assign y = a + cause;
+endmodule
+VERILOG
+hierarchy -top cs
+proc; opt_clean
+opt_carry_select -hier-arrival
+select -assert-count 0 t:$mux
+design -reset
+log -pop
