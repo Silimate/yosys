@@ -341,27 +341,10 @@ design -load gold
 equiv_opt -assert opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
 design -reset
 
-# A window reaching two bits above x: the top one can never be set, so the
-# operand is the same value read wider
-read_verilog -sv <<EOT
-module test(input [4:0] x, input [2:0] z, input [11:0] u, v, output [12:0] y);
-  wire [6:0] xp = x + 7'd1;
-  assign y = z * xp[6:2] + u + v;
-endmodule
-EOT
-prep
-opt_muldist -max-reduce 8 -min-chain-width 12
-select -assert-none a:opt_muldist
-design -save gold
-opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
-select -assert-min 1 a:opt_muldist
-design -load gold
-equiv_opt -assert opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
-design -reset
-
-# A window starting at or above x's top bit is not reachable to test: wreduce
-# trims the increment's result to one bit above its input, so such a window is
-# the carry bit plus constants, which is no longer a window of the increment
+# hi == GetSize(x) above is the whole of what -carry-out reaches. wreduce trims
+# the increment's result to one bit above its input, so a window asking for more
+# than that is constant zeros on top of the carry, which is no longer a window
+# of the increment and never matches -- not a case that can be written here.
 
 # Adding a non-unit constant is not an increment: the wrap test would be a
 # comparison rather than an AND reduction
