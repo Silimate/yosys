@@ -359,23 +359,9 @@ design -load gold
 equiv_opt -assert opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
 design -reset
 
-# A window starting at x's top bit: the slice is zero and the whole operand is
-# the carry, so the product drops out and only the gated row is left
-read_verilog -sv <<EOT
-module test(input [4:0] x, input [2:0] z, input [11:0] u, v, output [12:0] y);
-  wire [7:0] xp = x + 8'd1;
-  assign y = z * xp[7:5] + u + v;
-endmodule
-EOT
-prep
-opt_muldist -max-reduce 8 -min-chain-width 12
-select -assert-none a:opt_muldist
-design -save gold
-opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
-select -assert-min 1 a:opt_muldist
-design -load gold
-equiv_opt -assert opt_muldist -max-reduce 8 -min-chain-width 12 -carry-out
-design -reset
+# A window starting at or above x's top bit is not reachable to test: wreduce
+# trims the increment's result to one bit above its input, so such a window is
+# the carry bit plus constants, which is no longer a window of the increment
 
 # Adding a non-unit constant is not an increment: the wrap test would be a
 # comparison rather than an AND reduction
