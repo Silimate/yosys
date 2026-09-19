@@ -10,7 +10,10 @@
 # resetting while another loads would feed the cut a mix the single surviving
 # register could not reproduce, so the net and polarity are compared. The
 # values are then folded together: two registers resetting to 8'h03 and 8'h04
-# on the same net merge into one resetting to 8'h07.
+# on the same net merge into one resetting to 8'h07. The section that pins the
+# net comparison passes -no-lower-controls to get the refusal, since the move
+# is otherwise made by lowering the resets into muxes; that path is checked in
+# opt_retime_lower_controls.ys.
 #
 # They also add a case init values never reach. The single-bit cells spell the
 # value they reset to into the type name, so folding it can change which cell
@@ -226,7 +229,7 @@ endmodule
 EOF
 hierarchy -top rstmix
 check -assert
-opt_retime -flop fa -cut a0 -forward
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different sync reset net than flop fa."
 design -reset

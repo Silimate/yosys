@@ -2259,6 +2259,87 @@ void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
 			"at %s.\n", GetSize(targets), net.c_str(), depth, log_id(cut_name));
 }
 
+// Every register a forward move would have to merge: whatever flop drives a
+// data input of a cell on the path. Read off the driver index rather than
+// asked of describe_operand, which declines to describe exactly the
+// mismatching registers this is here to find.
+pool<Cell *> path_sources(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		const std::vector<ChainStep> &chain)
+{
+	pool<Cell *> sources;
+	for (auto &step : chain)
+		for (auto port : data_inputs(step.cell))
+			for (auto bit : sigmap(step.cell->getPort(port))) {
+				auto it = drivers.find(bit);
+				if (it != drivers.end() && it->second.cell->is_builtin_ff())
+					sources.insert(it->second.cell);
+			}
+	return sources;
+}
+
+// Lower the synchronous controls of every register the move would merge, so
+// that registers disagreeing on an enable or a sync reset can still move
+// forward. Each one keeps its state and its next value becomes a mux the cut
+// can read, which is what the merge could not do: a single register left
+// behind has nowhere to hold the operand that was not updating. The move then
+// inserts a register on the cut output rather than folding the old ones away,
+// paying one register for a cut the controls would otherwise pin in place.
+//
+// False when no lowering would change the answer, so the caller can report the
+// refusal the plain move already gave.
+bool lower_path_controls(Module *module, Cell *flop, Cell *cut)
+{
+	SigMap sigmap(module);
+	FfInitVals initvals(&sigmap, module);
+	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
+
+	if (!flop->is_builtin_ff() || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
+		return false;
+	FfData whole(&initvals, flop);
+	if (!whole.has_clk)
+		return false;
+
+	// The same slice and chain the move itself works on, so the registers
+	// found below are the ones it would have tried to merge.
+	std::vector<int> bits = slice_forward_for_cut(module, sigmap, drivers, initvals,
+			whole, flop, cut);
+	FfData ref = GetSize(bits) != whole.width ? whole.slice(bits) : whole;
+	std::vector<ChainStep> chain = collect_chain(module, sigmap, drivers, initvals, ref,
+			flop, ref.sig_q, cut);
+
+	pool<Cell *> sources = path_sources(sigmap, drivers, chain);
+	sources.insert(flop);
+
+	// Only a disagreement in the synchronous controls is worth lowering. An
+	// async reset or load reaches Q between edges, so a register reading a
+	// next value cannot follow it, and a clock of its own is not something
+	// combinational logic can express at all.
+	bool mismatched = false;
+	for (auto cell : sources) {
+		FfData ff(&initvals, cell);
+		if (!ff.has_clk || ff.has_arst || ff.has_aload || ff.has_sr)
+			return false;
+		if (sigmap(ff.sig_clk) != sigmap(ref.sig_clk) || ff.pol_clk != ref.pol_clk)
+			return false;
+		if (mismatch_reason(sigmap, ref, ff))
+			mismatched = true;
+	}
+	if (!mismatched)
+		return false;
+
+	// Emitting replaces the cell, so no pointer collected above survives this
+	// loop and the caller looks the flop and the cut up again by name.
+	for (auto cell : sources) {
+		FfData ff(&initvals, cell);
+		if (!ff.has_ce && !ff.has_srst)
+			continue;
+		log("Lowering the controls of flop %s into logic.\n", log_id(cell));
+		ff.unmap_ce_srst();
+		ff.emit();
+	}
+	return true;
+}
+
 void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 {
 	if (!flop->is_builtin_ff())
@@ -2637,7 +2718,10 @@ struct OptRetimePass : public Pass {
 		log("\n");
 		log("    -forward\n");
 		log("        move the register downstream past -cut. Other operand\n");
-		log("        registers are merged in (same clock, enable, and reset net).\n");
+		log("        registers are merged in (same clock, enable, and reset net),\n");
+		log("        or, where their synchronous controls disagree, those\n");
+		log("        controls are lowered into muxes and the operand registers\n");
+		log("        are kept: see -no-lower-controls.\n");
 		log("        The flop keeps its name and takes the cut's output width.\n");
 		log("        A cell holding several registers is taken apart first: the\n");
 		log("        run of Q whose readers lead to -cut is moved under the\n");
@@ -2669,6 +2753,19 @@ struct OptRetimePass : public Pass {
 		log("        with -backward, move every register capturing the same net.\n");
 		log("        All-or-nothing. No -forward form.\n");
 		log("\n");
+		log("    -no-lower-controls\n");
+		log("        with -forward, refuse a move whose operand registers\n");
+		log("        disagree on an enable or a sync reset, rather than lowering\n");
+		log("        those controls into muxes and moving anyway.\n");
+		log("        Lowering keeps each operand register, so the cut reads their\n");
+		log("        next values and the move inserts a register on the cut\n");
+		log("        output instead of merging them away. That costs one register\n");
+		log("        and takes the lowered registers out of reach of clockgate,\n");
+		log("        which groups by enable, so a flow that gates later may want\n");
+		log("        the refusal instead. Only the registers on this move's path\n");
+		log("        are lowered, and only when the move then succeeds. Async\n");
+		log("        controls and unequal clocks are refused either way.\n");
+		log("\n");
 		log("The selection is where the two named cells are looked up, and both\n");
 		log("have to be in it. The cells between them travel with the move.\n");
 		log("\n");
@@ -2684,7 +2781,7 @@ struct OptRetimePass : public Pass {
 
 		std::string flop, cut_cell;
 		bool forward = false, backward = false;
-		bool all_fanouts = false;
+		bool all_fanouts = false, lower_controls = true;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -2708,6 +2805,10 @@ struct OptRetimePass : public Pass {
 				all_fanouts = true;
 				continue;
 			}
+			if (args[argidx] == "-no-lower-controls") {
+				lower_controls = false;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -2722,6 +2823,8 @@ struct OptRetimePass : public Pass {
 			log_cmd_error("Missing required -forward or -backward option.\n");
 		if (all_fanouts && !backward)
 			log_cmd_error("-all-fanouts only applies to -backward moves.\n");
+		if (!lower_controls && !forward)
+			log_cmd_error("-no-lower-controls only applies to -forward moves.\n");
 
 		Module *module = nullptr;
 		Cell *flop_cell = nullptr;
@@ -2761,6 +2864,35 @@ struct OptRetimePass : public Pass {
 			refused = try_move([&] { apply_backward_move(module, flop_cell, cut); });
 		else
 			refused = try_move([&] { apply_forward_move(module, flop_cell, cut); });
+
+		// Lowering rewrites the registers before the move is known to be
+		// legal, which a refusal has no way to take back, so the whole thing
+		// is rehearsed on a copy of the module and only repeated here once it
+		// has worked. The reason kept on failure is the one the plain move
+		// gave, since that is the move the caller asked for.
+		if (!refused.empty() && lower_controls) {
+			IdString flop_name = flop_cell->name, cut_name = cut->name;
+			auto lowered_move = [&](Module *mod) {
+				return try_move([&] {
+					if (!lower_path_controls(mod, mod->cell(flop_name), mod->cell(cut_name)))
+						refuse("Lowering the controls would not change this move.\n");
+					apply_forward_move(mod, mod->cell(flop_name), mod->cell(cut_name));
+				});
+			};
+			Design *rehearsal = new Design;
+			rehearsal->add(module->clone());
+			bool works;
+			{
+				// Muted the way tee -q is, so the rehearsal does not narrate a
+				// move the caller is about to see made for real.
+				auto quiet = logger().sink_scope();
+				logger().clear();
+				works = lowered_move(rehearsal->module(module->name)).empty();
+			}
+			delete rehearsal;
+			if (works)
+				refused = lowered_move(module);
+		}
 
 		// What happened, for a caller that cannot read the log: opt_retime.moved
 		// is the answer and opt_retime.refusal is the reason when it is false.

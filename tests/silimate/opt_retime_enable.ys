@@ -12,7 +12,10 @@
 # input held while another updated, the cut would see a mix of old and new
 # operands, and the single register left behind could not reproduce it. Both
 # halves of that are pinned here: matching enables move, and a mismatch of
-# either the net or the polarity refuses.
+# either the net or the polarity refuses. That refusal is asked for with
+# -no-lower-controls, since the move is otherwise made by lowering the
+# enables into muxes, which is a different thing to check and lives in
+# opt_retime_lower_controls.ys.
 #
 # $dffe across a $buf already worked before enables were supported, because
 # the value-preservation guard only ever consulted non-$buf chain cells. What
@@ -104,6 +107,6 @@ EOF
 hierarchy -top enmix
 check -assert
 select -assert-count 2 t:$dffe
-opt_retime -flop fa -cut a0 -forward
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has an enable of the opposite polarity to flop fa."

@@ -6,6 +6,13 @@
 # same way init values are, which is why the checks below are all about nets
 # and polarities and never about a stored constant.
 #
+# Disagreeing on a synchronous control is not the end of the move: the pass
+# lowers those controls into muxes and keeps the operand registers instead,
+# which opt_retime_lower_controls.ys covers. The sections here are about the
+# comparison itself, so the ones a lowering would rescue ask for the refusal
+# with -no-lower-controls. The async and clock reasons need no such flag,
+# since nothing lowers them.
+#
 # Each reason is reported separately rather than as one "incompatible flops",
 # because a net and a polarity look nothing alike to someone reading a
 # netlist: a different net is visible in a picture, while a polarity lives in
@@ -98,7 +105,7 @@ hierarchy -top ennet
 check -assert
 # one register holding while the other updates feeds the adder a mix of old
 # and new, and a single register left behind cannot reproduce that
-opt_retime -flop fa -cut a0 -forward
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different enable net than flop fa."
 design -reset
@@ -125,7 +132,7 @@ hierarchy -top srstpol
 check -assert
 # same reset values, so the fold has nothing to disagree about, and the move
 # is still refused: they never reset on the same cycle
-opt_retime -flop fa -cut a0 -forward
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a sync reset of the opposite polarity to flop fa."
 design -reset
@@ -256,7 +263,7 @@ check -assert
 # value, and the same set of controls: every other check in this file passes.
 # fa resets while held, fb does not, and the merged register can only do one
 # of those, so it would silently give fb's bits fa's answer.
-opt_retime -flop fa -cut a0 -forward
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different priority between enable and sync reset than flop fa."
 design -reset
