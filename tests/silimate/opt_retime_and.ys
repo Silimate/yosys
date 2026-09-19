@@ -1,0 +1,158 @@
+# Backward across $and and $or, the first cuts whose inverse is not unique.
+#
+# x & c = y has many solutions when c has a zero bit, and none at all when y
+# wants a bit that c masks away. A backward move needs neither uniqueness nor
+# a full inverse: it only has to leave the flop holding some value the cut
+# turns back into the old one on the first cycle. y itself is that value, and
+# the pass proves it by running the cut forward on the candidate.
+#
+# A clone of the flop is what an $and does with a live other operand, and it
+# starts at all ones so the path flop can keep the old value unchanged.
+
+# ---------------------------------------------------------------------------
+log -header "Backward: \$and against a constant, init inside the mask"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module andc(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(8'hf0), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top andc
+setattr -set init 8'hb0 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut a0 -backward
+check -assert
+select -assert-count 1 t:$dff
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:a0 %x:+[Y] w:q %i
+# 8'hb0 fits under 8'hf0, so the flop keeps the value it already held
+select -assert-count 1 w:y a:init=8'hb0 %i
+rename andc gate
+design -import orig -as gold
+setattr -set init 8'hb0 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: \$or against a constant, init covering the set bits"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module orc(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $or #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    o0 (.A(a), .B(8'h0f), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top orc
+setattr -set init 8'h3f w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut o0 -backward
+check -assert
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:o0 %x:+[Y] w:q %i
+# 8'h3f already has every bit 8'h0f forces, so it is its own preimage
+select -assert-count 1 w:y a:init=8'h3f %i
+rename orc gate
+design -import orig -as gold
+setattr -set init 8'h3f gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: clone onto a live operand of \$and, starting at ones"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module andlive(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] y;
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(b), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top andlive
+setattr -set init 8'h5a w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut a0 -backward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:f_B %x:+[D] w:b %i
+select -assert-count 1 c:a0 %x:+[Y] w:q %i
+# the clone holds the identity of the cut, so the flop keeps 8'h5a as it was
+select -assert-count 1 w:y a:init=8'h5a %i
+select -assert-count 1 w:f_B_q a:init=8'hff %i
+rename andlive gate
+design -import orig -as gold
+setattr -set init 8'h5a gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The $and in opt_retime_cmp.v, where both operands are live combinational
+# cones. This is the move the design's header calls out as needing fc to go
+# first in the forward direction; backward it needs nothing to go first.
+log -header "Backward: fq across the \$and of retime_cmp, cloning onto B"
+log -push
+design -reset
+read_verilog -icells opt_retime_cmp.v
+hierarchy -top retime_cmp
+check -assert
+select -assert-count 4 t:$dff
+design -save orig
+opt_retime -flop fq -cut g0 -backward
+check -assert
+# fq samples the comparator, a clone samples the reduction, the buf drives q
+select -assert-count 5 t:$dff
+select -assert-count 1 c:fq %x:+[D] w:e %i
+select -assert-count 1 c:fq_B %x:+[D] w:r %i
+select -assert-count 1 c:bg %x:+[Y] w:q %i
+rename retime_cmp gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# 8'h0f asks for bits 8'hf0 clears, so no input to the $and produces it and
+# there is nothing to leave the flop holding.
+log -header "Refused: a stored bit the mask clears has no preimage"
+design -reset
+read_verilog -icells <<EOF
+module andmask(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(8'hf0), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top andmask
+setattr -set init 8'h0f w:q
+check -assert
+opt_retime -flop f -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cell a0 has no input on A that produces 8'00001111, so a backward move has no stored value to leave behind."

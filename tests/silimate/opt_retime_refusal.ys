@@ -1,0 +1,182 @@
+# Design test for a refused move: it reports and carries on.
+#
+# A caller choosing moves on its own will propose illegal ones, and the answer
+# to an illegal proposal has to be an answer rather than the end of the script.
+# What is pinned is that a refused move leaves the module exactly as it was,
+# down to the individual connections. That holds because every refusal is
+# raised before the first rewrite, not because anything rolls back: once the
+# register has been rebuilt there is no putting it back, which is why the two
+# failures only visible mid-rewrite are log_error rather than refusals.
+#
+# retime_probe is f0 -> b0 -> b1 -> f1 -> b2 -> b3 -> f2. b3 is on f1's
+# after-path, so asking for it as a backward cut walks the before-path the other
+# way, stops at f0's Q, and never reaches b3.
+
+# ---------------------------------------------------------------------------
+log -header "Refused: the run survives and the design is untouched"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+design -save orig
+
+# b3 is downstream of f1, so it is not on the before-path at all: the walk back
+# from f1 passes b1 and b0 and stops at f0's Q, which is not a cell Y, so b3 is
+# never reached.
+opt_retime -flop f1 -cut b3 -backward
+
+# reaching this line at all is half the test
+log -header "Still running, so the refusal did not end the script."
+check -assert
+
+# the other half is being able to tell, without reading the log
+scratchpad -assert opt_retime.moved false
+scratchpad -assert-set opt_retime.refusal
+scratchpad -assert opt_retime.refusal "Cut b3 is not on the before-path of flop f1."
+
+# nothing added, nothing removed, nothing rewired
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+select -assert-count 1 c:f1 %x:+[D] w:n0 %i
+select -assert-count 1 c:f1 %x:+[Q] w:q1 %i
+select -assert-count 1 c:b2 %x:+[A] w:q1 %i
+select -assert-count 1 c:b0 %x:+[A] w:q0 %i
+
+# and it is still the design that was read in
+rename retime_probe gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 4 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Legal: the move still happens"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+design -save orig
+opt_retime -flop f1 -cut b2 -forward
+check -assert
+scratchpad -assert opt_retime.moved true
+# unset rather than emptied on success, so no earlier reason can be mistaken
+# for this call's
+scratchpad -assert-unset opt_retime.refusal
+scratchpad -assert opt.did_something true
+select -assert-count 3 t:$dff
+# f1 hopped b2: the buffer now reads f1's old D and drives the link the
+# register captures
+select -assert-count 1 c:b2 %x:+[A] w:n0 %i
+select -assert-count 1 c:b2 %x:+[Y] w:q1 %i
+select -assert-count 1 c:f1 %x:+[D] w:q1 %i
+select -assert-count 1 c:f1 %x:+[Q] w:m1 %i
+rename retime_probe gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 4 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused twice over, then a legal move on the same design"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+# a refusal leaves nothing behind for the next command to trip over, so they
+# can be proposed one after another and a real move still lands afterwards.
+# This is the shape a move-picking driver runs in.
+opt_retime -flop f1 -cut b3 -backward
+scratchpad -assert opt_retime.moved false
+opt_retime -flop f1 -cut b3 -backward
+scratchpad -assert opt_retime.moved false
+select -assert-count 3 t:$dff
+select -assert-count 1 c:f1 %x:+[D] w:n0 %i
+# the refusals set no did_something, so a driver looping on it terminates
+scratchpad -assert-unset opt.did_something
+opt_retime -flop f1 -cut b2 -forward
+check -assert
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt.did_something true
+select -assert-count 3 t:$dff
+select -assert-count 1 c:f1 %x:+[Q] w:m1 %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A net two cells drive has no driver the pass can name, and answering with
+# either of them is how a rewrite lands on a circuit nobody described. Both
+# designs below are ill-formed - yosys's own check calls the net a conflict,
+# which is why these two sections run it without -assert - and being handed one
+# is not a licence to pick a driver and go.
+log -header "Refused: the before-path net has two drivers"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module dual(input clk, en, in1, in2, in3, output res1);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $and #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    n0 (.A(in3), .B(in3), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(sum), .Q(res1));
+endmodule
+EOF
+hierarchy -top dual
+logger -expect warning "multiple conflicting drivers for dual\." 1
+check
+# Taking the adder for the whole before-path would slide f1 onto in1 and in2 and
+# leave the and-gate driving a net the register no longer reads.
+opt_retime -flop f1 -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "The before-path of flop f1 is not a unique cell Y at \sum."
+select -assert-count 1 t:$add
+select -assert-count 1 t:$and
+select -assert-count 1 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:sum %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Forward, the same ambiguity costs a register rather than a wire: a merged
+# operand flop is deleted, and q2 has an and-gate on it that would be left
+# driving the net alone with nothing registering it.
+log -header "Refused: an operand of the cut has two drivers"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module dualop(input clk, en, in1, in2, in3, output res1);
+  wire q1, q2;
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(in1), .Q(q1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en), .D(in2), .Q(q2));
+  $and #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    n0 (.A(in3), .B(in3), .Y(q2));
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(q1), .B(q2), .Y(res1));
+endmodule
+EOF
+hierarchy -top dualop
+logger -expect warning "multiple conflicting drivers for dualop\." 1
+check
+opt_retime -flop f1 -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input B of cell a0 is not driven by a flop or a constant, so flop f1 cannot move forward across it."
+# Both registers still there, so nothing was merged away.
+select -assert-count 2 t:$dffe
+select -assert-count 1 c:f1 %x:+[Q] %co c:a0 %i
+select -assert-count 1 c:f2 %x:+[Q] %co c:a0 %i
+design -reset
+log -pop

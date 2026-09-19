@@ -1,0 +1,193 @@
+# Forward when the cut reads only part of the register.
+#
+# One cell can hold several registers. Backward picks out the one the caller
+# meant by asking which run of D has a driver behind it; forward asks the
+# mirror question of Q, which run has the same readers in front of it, and the
+# -cut says which run was meant. That is the shape serv leaves behind: one
+# 5-bit register whose Q is {o_branch_op, o_mem_cmd, opcode[2:0]}, four of
+# whose bits reach a comparator and the fifth an inverter. No cut takes all
+# five, so the whole cell cannot move, and the run that reaches the cut can.
+#
+# The run that goes is renamed nothing -- it keeps the cell's name, as a
+# backward slice does -- and the rest comes back beside it as <name>_rest.
+
+# ---------------------------------------------------------------------------
+# opcode_reg's shape: equal_123 takes four bits, i129 takes the fifth, and
+# mux_148 takes all five, which is what keeps a copy of the moved run behind.
+log -header "Forward: four of five bits reach the cut"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module opcode(input clk, input [4:0] d, output eqy, lowbit, output [4:0] full);
+  (* init = 5'h09 *) wire [4:0] r;
+  $dff #(.WIDTH(5), .CLK_POLARITY(1'b1)) opcode_reg (.CLK(clk), .D(d), .Q(r));
+  $eq #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    equal_123 (.A(r[4:1]), .B(4'h9), .Y(eqy));
+  $not #(.A_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0)) i129 (.A(r[0]), .Y(lowbit));
+  $buf #(.WIDTH(5)) mux_148 (.A(r), .Y(full));
+endmodule
+EOF
+hierarchy -top opcode
+check -assert
+select -assert-count 1 t:$dff
+design -save orig
+opt_retime -flop opcode_reg -cut equal_123 -forward
+check -assert
+# the moved run keeps the name and takes the comparator's width; the other bit
+# is a register of its own, and mux_148 still reads all five bits from a copy
+select -assert-count 3 t:$dff
+select -assert-count 1 c:opcode_reg r:WIDTH=1 %i
+select -assert-count 1 c:opcode_reg_rest r:WIDTH=1 %i
+select -assert-count 1 c:opcode_reg_fanout r:WIDTH=4 %i
+select -assert-count 1 c:opcode_reg %x:+[Q] w:eqy %i
+select -assert-count 1 c:equal_123 %x:+[A] w:d %i
+select -assert-count 1 c:opcode_reg_fanout %x:+[D] w:d %i
+select -assert-count 1 c:opcode_reg_rest %x:+[D] w:d %i
+select -assert-count 1 c:i129 %x:+[A] w:r %i
+select -assert-count 1 c:mux_148 %x:+[A] w:r %i
+# r[4:1] is 4'h4 and the comparison is against 4'h9, so the moved register
+# comes up at 0, while the copy and the remainder keep the bits they held
+select -assert-count 1 w:eqy a:init=1'0 %i
+select -assert-count 1 w:r a:init=5'h09 %i
+rename opcode gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The low bit leaves the module rather than entering a cell, which splits it
+# off the run just as a second cell reader would, and nothing else reads the
+# four bits that move, so no copy is left behind.
+log -header "Forward: the run that moves has the cut to itself"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module slicelo(input clk, input [4:0] d, output eqy, lowbit);
+  (* init = 5'h09 *) wire [4:0] r;
+  $dff #(.WIDTH(5), .CLK_POLARITY(1'b1)) fr (.CLK(clk), .D(d), .Q(r));
+  $eq #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    e0 (.A(r[4:1]), .B(4'h4), .Y(eqy));
+  $buf #(.WIDTH(1)) b0 (.A(r[0]), .Y(lowbit));
+endmodule
+EOF
+hierarchy -top slicelo
+check -assert
+design -save orig
+opt_retime -flop fr -cut e0 -forward
+check -assert
+# two registers, no copy: the moved run had the cut to itself
+select -assert-count 2 t:$dff
+select -assert-count 1 c:fr r:WIDTH=1 %i
+select -assert-count 1 c:fr_rest r:WIDTH=1 %i
+select -assert-count 1 c:fr %x:+[Q] w:eqy %i
+select -assert-count 1 c:e0 %x:+[A] w:d %i
+# r[4:1] is 4'h4 and so is B, so this one comes up at 1
+select -assert-count 1 w:eqy a:init=1'1 %i
+rename slicelo gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# serv's o_cnt_r_reg: the cut reads all four bits at once, and bit 3 has a
+# second reader in add_72. That second reader tells bit 3 apart from the other
+# three, but it does not make the register two registers -- the plain whole-Q
+# move is still the move, and the second reader is served by a copy.
+log -header "Forward: a bit with a second reader does not split a register the cut reads whole"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module wholeq(input clk, input [3:0] d, b, output y, output [3:0] sum);
+  (* init = 4'h5 *) wire [3:0] r;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) o_cnt_r_reg (.CLK(clk), .D(d), .Q(r));
+  $reduce_or #(.A_WIDTH(4), .Y_WIDTH(1), .A_SIGNED(0)) reduce_or_5 (.A(r), .Y(y));
+  $add #(.A_WIDTH(4), .B_WIDTH(1), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    add_72 (.A(b), .B(r[3]), .Y(sum));
+endmodule
+EOF
+hierarchy -top wholeq
+check -assert
+design -save orig
+opt_retime -flop o_cnt_r_reg -cut reduce_or_5 -forward
+check -assert
+# no _rest register: the move took the register whole and left a copy for
+# add_72, which still reads the bit it always read
+select -assert-count 2 t:$dff
+select -assert-count 0 c:o_cnt_r_reg_rest
+select -assert-count 1 c:o_cnt_r_reg r:WIDTH=1 %i
+select -assert-count 1 c:o_cnt_r_reg_fanout r:WIDTH=4 %i
+select -assert-count 1 c:o_cnt_r_reg %x:+[Q] w:y %i
+select -assert-count 1 c:reduce_or_5 %x:+[A] w:d %i
+select -assert-count 1 c:add_72 %x:+[B] w:r %i
+# |4'h5 is 1, and the copy comes up holding 4'h5 as the register did
+select -assert-count 1 w:y a:init=1'1 %i
+select -assert-count 1 w:r a:init=4'h5 %i
+rename wholeq gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Both halves of the register reach a0, each through its own comparator, so
+# naming a0 as the cut does not say which of the two registers to move. The
+# same holds for a cut entered on two ports at once, which is two runs of Q
+# arriving at one cell.
+log -header "Refused: both runs of Q reach the cut"
+design -reset
+read_verilog -icells <<EOF
+module tworuns(input clk, input [3:0] d, output y);
+  wire [3:0] r;
+  wire t0, t1;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fr (.CLK(clk), .D(d), .Q(r));
+  $eq #(.A_WIDTH(2), .B_WIDTH(2), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    e0 (.A(r[1:0]), .B(2'h1), .Y(t0));
+  $eq #(.A_WIDTH(2), .B_WIDTH(2), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    e1 (.A(r[3:2]), .B(2'h2), .Y(t1));
+  $and #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(t0), .B(t1), .Y(y));
+endmodule
+EOF
+hierarchy -top tworuns
+check -assert
+opt_retime -flop fr -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fr is 2 registers sharing one cell and 2 of them reach cut a0, so opt_retime cannot tell which one to move."
+select -assert-count 1 t:$dff
+select -assert-count 1 c:fr %x:+[Q] w:r %i
+design -reset
+
+# ---------------------------------------------------------------------------
+# e0 reads three bits of the register on one port, and they are not one run:
+# r[2] is read by n0 as well, so it is a register of its own. Neither run
+# enters e0 whole, and neither does the register read whole, so the refusal
+# carries out what the whole register had to say about the cut.
+log -header "Refused: the cut's port takes bits from two runs"
+design -reset
+read_verilog -icells <<EOF
+module mixport(input clk, input [3:0] d, output y, output mid);
+  wire [3:0] r;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fr (.CLK(clk), .D(d), .Q(r));
+  $eq #(.A_WIDTH(3), .B_WIDTH(3), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    e0 (.A(r[2:0]), .B(3'h5), .Y(y));
+  $not #(.A_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0)) n0 (.A(r[2]), .Y(mid));
+endmodule
+EOF
+hierarchy -top mixport
+check -assert
+opt_retime -flop fr -cut e0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fr is 3 registers sharing one cell, none of which reaches cut e0 on its own, and read whole: Cut e0 is not on the after-path of flop fr."
+select -assert-count 1 t:$dff
+select -assert-count 1 c:fr %x:+[Q] w:r %i

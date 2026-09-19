@@ -1,0 +1,381 @@
+# -all-fanouts: one command moving every register that captures a shared cone,
+# instead of one command per register.
+#
+# opt_retime_shared_backward.ys is the same circuit moved a register at a time.
+# Doing it that way works, but the second command has to name the duplicate the
+# first one made, and that name is the pass's invention rather than anything the
+# script wrote down. -all-fanouts is the same sequence with the pass keeping
+# track of its own names.
+#
+# What it is not is a wider single move. Registers capturing one net on
+# different enables cannot become one register - that is the whole reason there
+# is more than one of them - so this stays a batch of ordinary backward moves,
+# and each register ends up with its own copy of the cone. The area is the
+# price: a shared cell otherwise pins every one of its readers in place, since
+# moving one of them back is what makes the copy necessary.
+
+# ---------------------------------------------------------------------------
+log -header "Two capture flops, one command"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module board(input clk, en1, en2, in1, in2, output res1, res2);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(sum), .Q(res2));
+endmodule
+EOF
+hierarchy -top board
+check -assert
+select -assert-count 1 t:$add
+design -save orig
+# f2 is never named: it is found by capturing the same net as f1.
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
+check -assert
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+
+# Both adders now sit after the registers, each feeding one output. Every
+# operand got a clone, so four registers where there were two.
+select -assert-count 2 t:$add
+select -assert-count 4 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 c:f2 %x:+[D] w:in1 %i
+select -assert-count 1 c:f2_B %x:+[D] w:in2 %i
+# Each pair holds together, so no adder ever sees a mixed pair of operands.
+select -assert-count 1 c:f1 %x:+[EN] w:en1 %i
+select -assert-count 1 c:f1_B %x:+[EN] w:en1 %i
+select -assert-count 1 c:f2 %x:+[EN] w:en2 %i
+select -assert-count 1 c:f2_B %x:+[EN] w:en2 %i
+select -assert-count 1 c:a0 %x:+[Y] w:res1 %i
+select -assert-count 1 c:a0_dup %x:+[Y] w:res2 %i
+
+rename board gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# en1 and en2 are free stimulus, so the proof covers every interleaving of the
+# two registers holding and updating.
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The copies are what each register needs to still see the undelayed cone, so
+# there is one cone per register and the count grows with the fanout. Three
+# readers, three adders.
+log -header "Three capture flops, so the cone is copied twice"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module board3(input clk, en1, en2, en3, in1, in2, output res1, res2, res3);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(sum), .Q(res2));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f3 (.CLK(clk), .EN(en3), .D(sum), .Q(res3));
+endmodule
+EOF
+hierarchy -top board3
+check -assert
+design -save orig
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
+check -assert
+select -assert-count 3 t:$add
+select -assert-count 6 t:$dffe
+rename board3 gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# With a chain rather than a single cell, the register that moves second does
+# not read the cut the command named: it reads a copy, under a name the pass
+# chose, at the far end of a copy of the whole chain. The batch finds it by
+# counting hops back from D, which is the one thing the siblings share once the
+# first move has run.
+log -header "Multi-hop: each sibling's cut is a copy of the named one"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module deep(input clk, en1, en2, in1, in2, in3, output res1, res2);
+  wire sum, mix;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $xor #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(sum), .B(in3), .Y(mix));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(mix), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(mix), .Q(res2));
+endmodule
+EOF
+hierarchy -top deep
+check -assert
+design -save orig
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
+check -assert
+# Both hops copied, and f2 moved across the copies rather than the originals.
+select -assert-count 2 t:$add
+select -assert-count 2 t:$xor
+select -assert-count 1 c:f2 %x:+[D] w:in1 %i
+select -assert-count 1 c:a0_dup %x:+[A] %ci c:f2 %i
+select -assert-count 1 c:x0_dup %x:+[Y] w:res2 %i
+rename deep gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Nothing else captures the net, so it is just the one move"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module lone(input clk, en1, in1, in2, output res1);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+endmodule
+EOF
+hierarchy -top lone
+check -assert
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
+check -assert
+# Same result as the plain -backward move in opt_retime_shared_backward.ys:
+# nothing to copy, because nothing else was reading the adder.
+select -assert-count 1 t:$add
+select -assert-count 2 t:$dffe
+select -assert-count 1 c:a0 %x:+[Y] w:res1 %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The moves are applied one after another, so a sibling that cannot move would
+# strand the ones already moved. Every move is asked before any of it is made -
+# a sibling against the cut the command named, standing in for the copy it will
+# really cross - so the batch is declined whole and the module is left
+# exactly as it was.
+log -header "A sibling that cannot move refuses the batch before it starts"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module blocked(input clk, en1, set2, clr2, in1, in2, output res1, res2);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffsr #(.WIDTH(1), .CLK_POLARITY(1'b1), .SET_POLARITY(1'b1), .CLR_POLARITY(1'b1))
+    f2 (.CLK(clk), .SET(set2), .CLR(clr2), .D(sum), .Q(res2));
+endmodule
+EOF
+hierarchy -top blocked
+check -assert
+# A set/reset arrives on a net and stores no value the chain could fold, so f2
+# has nothing to move with.
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
+check -assert
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "-all-fanouts would have to move register f2, which captures the same net as flop f1, and cannot: Flop f2 cannot move across cell a0 because it has a set/reset, which the move would have to push through the cell."
+# Untouched: one adder, both registers still reading it.
+select -assert-count 1 t:$add
+select -assert-count 1 t:$dffe
+select -assert-count 1 t:$dffsr
+select -assert-count 1 c:f1 %x:+[D] w:sum %i
+select -assert-count 1 c:f2 %x:+[D] w:sum %i
+
+# f2 blocks the batch, not f1: asked for the one move, f1 still goes, and f2
+# keeps reading a copy of the adder where it used to read the original.
+opt_retime -flop f1 -cut a0 -backward
+check -assert
+scratchpad -assert opt_retime.moved true
+select -assert-count 2 t:$add
+select -assert-count 1 c:f2 %x:+[D] %ci c:a0_dup %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Not every reason a sibling can refuse is a property of the register on its
+# own: this one is about where it reads the cone. f2 holds on in2, which is an
+# operand of the adder, so moving f2 back would put a register between in2 and
+# the enable that is supposed to be sampling alongside it. A single -backward
+# move on f1 does not care, because f1's own enable is clear of the cone, so
+# nothing short of asking f2's whole move finds this.
+log -header "A sibling refusing over the cone, not over itself"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module tangled(input clk, en1, in1, in2, output res1, res2);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(in2), .D(sum), .Q(res2));
+endmodule
+EOF
+hierarchy -top tangled
+check -assert
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
+check -assert
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "-all-fanouts would have to move register f2, which captures the same net as flop f1, and cannot: Flop f2 control EN uses a data wire being retimed."
+# Refused before the first move, so f1 did not go either.
+select -assert-count 1 t:$add
+select -assert-count 2 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:sum %i
+select -assert-count 1 c:f2 %x:+[D] w:sum %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Every case above starts from an undefined init, so the batch never folds a
+# stored value. Each register in the batch carries its own, and each has to be
+# folded through its own copy of the cone: the siblings share the cone but not
+# the value, so one fold cannot stand in for the other. $mul against an odd
+# constant is the fold worth checking, being the one that runs the modular
+# inverse rather than returning the value unchanged.
+log -header "-all-fanouts folds each sibling's own init"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module batchinit(input clk, en1, en2, input [7:0] a, output [7:0] res1, res2);
+  wire [7:0] p;
+  $mul #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A(a), .B(8'd3), .Y(p));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(p), .Q(res1));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(p), .Q(res2));
+endmodule
+EOF
+hierarchy -top batchinit
+# 3 * 0x39 = 0xab and 3 * 0x11 = 0x33, both mod 256, so the two siblings fold
+# to different preimages and neither is the identity
+setattr -set init 8'hab w:res1
+setattr -set init 8'h33 w:res2
+check -assert
+design -save orig
+opt_retime -flop f1 -cut m0 -backward -all-fanouts
+check -assert
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+select -assert-count 2 t:$mul
+select -assert-count 2 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:a %i
+select -assert-count 1 c:f2 %x:+[D] w:a %i
+# Each register keeps its own preimage: 0xab / 3 = 0x39, 0x33 / 3 = 0x11
+select -assert-count 1 w:p a:init=8'h39 %i
+select -assert-count 1 w:m0_dup_y a:init=8'h11 %i
+
+rename batchinit gate
+design -import orig -as gold
+setattr -set init 8'hab gold/w:res1
+setattr -set init 8'h33 gold/w:res2
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A hop with two live inputs leads to the cut on one of them and somewhere else
+# entirely on the other, and which is which is not something the shape of a
+# copy can be asked about later: a backward move would land on either. So the
+# batch replays the inputs the named flop's chain was found on rather than
+# choosing again, and the sibling crosses the copy of the adder instead of the
+# and-gate sitting beside it on the same xor.
+log -header "Multi-hop: the sibling follows the input the named flop did"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module twoway(input clk, en1, en2, in1, in2, in3, in4, output res1, res2);
+  wire sum, other, mix;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $and #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    n0 (.A(in3), .B(in4), .Y(other));
+  $xor #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(other), .B(sum), .Y(mix));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(mix), .Q(res1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(mix), .Q(res2));
+endmodule
+EOF
+hierarchy -top twoway
+check -assert
+design -save orig
+opt_retime -flop f1 -cut a0 -backward -all-fanouts
+check -assert
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+# The xor and the adder are the chain, so both are copied. The and-gate is not
+# on it: the one there was stays where it was, now read by the clone each
+# register grew on the xor's other input.
+select -assert-count 2 t:$xor
+select -assert-count 2 t:$add
+select -assert-count 1 t:$and
+select -assert-count 2 t:$dffe c:n0 %x:+[Y] %co %i
+# Both registers came to rest on the adder's operands, f2 on its own copy.
+select -assert-count 6 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 c:f2 %x:+[D] w:in1 %i
+select -assert-count 1 c:f2_B %x:+[D] w:in2 %i
+select -assert-count 1 c:a0_dup %x:+[A] %ci c:f2 %i
+select -assert-count 1 c:x0_dup %x:+[Y] w:res2 %i
+
+rename twoway gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to come last.
+# A forward move merges the registers on the other operands into the one that
+# moves, so it collapses fanin rather than fanning out to readers, and there is
+# nothing for -all-fanouts to mean.
+log -header "Refused: -all-fanouts is a backward-only idea"
+design -reset
+read_verilog -icells <<EOF
+module fwd(input clk, en1, in1, in2, output res1);
+  wire [0:0] q1, q2;
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(in1), .Q(q1));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en1), .D(in2), .Q(q2));
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(q1), .B(q2), .Y(res1));
+endmodule
+EOF
+hierarchy -top fwd
+check -assert
+logger -expect error "-all-fanouts only applies to -backward moves." 1
+opt_retime -flop f1 -cut a0 -forward -all-fanouts

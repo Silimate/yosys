@@ -1,0 +1,307 @@
+# Forward moves that lowering the controls rescues, and the ones it cannot.
+#
+# A forward move merges every operand register into the single one it leaves
+# behind, so those registers have to agree on when they update. Where they do
+# not, the move lowers their synchronous controls into muxes and keeps the
+# registers instead of refusing, which is what this file covers;
+# opt_retime_mismatch.ys pins the comparison that decides it, asking for the
+# refusal with -no-lower-controls.
+#
+# What lowering changes is where the held value lives. A register holding
+# while its neighbour updates feeds the cut a mix of old and new, and the one
+# register a merge leaves behind has nowhere to keep the stale operand. Lower
+# the enable into the mux it already means, though, and the operand registers
+# stay where they are: each one keeps its own state, its next value becomes a
+# net the cut can read, and the move inserts a register on the cut output
+# rather than folding the old ones away. The cut leaves the fanout cone, which
+# is the point of the move, and the bill is one register.
+#
+# So lowering trades area for a move that was refused, and it only pays that
+# bill when it has to: a move whose controls already agree is made the cheap
+# way, merging as always, and the sections below check that too. A caller that
+# would rather have the refusal, because it means to gate those enables later,
+# asks with -no-lower-controls.
+#
+# The line it does not cross is asynchronous. An async reset or load reaches Q
+# between clock edges, so a register fed the next value cannot follow it, and
+# two clocks are not something logic can reconcile at all. Both stay refused,
+# with the reason the plain move gave, and with the design untouched: the
+# lowering is rehearsed on a copy of the module precisely so that a move that
+# turns out to be illegal leaves nothing behind.
+
+# ---------------------------------------------------------------------------
+# The shape the lowering exists for. Two operand registers on two enable
+# nets, an adder between them and the port, and nothing downstream to absorb
+# anything.
+log -header "Moved: two enables that cannot merge are lowered instead"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module ennet(input clk, e1, e2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(e1), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(e2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+EOF
+hierarchy -top ennet
+check -assert
+design -save orig
+
+# opted out, this is the refusal opt_retime_mismatch.ys pins
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different enable net than flop fa."
+
+design -load orig
+opt_retime -flop fa -cut a0 -forward
+check -assert
+# two enables became two muxes, and the registers they controlled are plain
+select -assert-count 0 t:$dffe
+select -assert-count 2 t:$mux
+# three registers where there were two: both operands kept their state, and
+# the moved flop is the one that landed on the cut output under its own name
+select -assert-count 3 t:$dff
+select -assert-count 1 c:fa %x:+[Q] w:q %i
+select -assert-count 1 c:fb
+select -assert-count 1 c:fa_fanout
+# the adder reads the next values rather than the registers, which is the
+# whole of why the operands no longer have to update together
+select -assert-count 0 c:a0 %x:+[A] w:ra %i
+select -assert-count 0 c:a0 %x:+[B] w:rb %i
+
+rename ennet gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# e1 and e2 are both free stimulus, so the proof covers the cycles where one
+# operand updates and the other holds, which is exactly what a merge could
+# not have reproduced
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The inserted register starts where the cut would have started, so its init
+# is the fold of both operands' inits and not a zero anyone has to assume.
+# Proven here without -set-init-zero, which is what makes the point.
+log -header "Moved: the inserted register inits to the fold of both operands"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module eninit(input clk, e1, e2, input [7:0] a, b, output [7:0] q);
+  (* init = 8'h05 *) wire [7:0] ra;
+  (* init = 8'h03 *) wire [7:0] rb;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(e1), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(e2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+EOF
+hierarchy -top eninit
+check -assert
+design -save orig
+
+opt_retime -flop fa -cut a0 -forward
+check -assert
+# 8'h05 + 8'h03 on the net the cut used to drive combinationally
+select -assert-count 1 w:q a:init=8'h08 %i
+
+rename eninit gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Not an enable-only trick: any synchronous control lowers the same way, and
+# the two registers here disagree on the reset net and on the value as well.
+log -header "Moved: different sync resets to different values"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module srstmix(input clk, e1, e2, r1, r2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb;
+  $sdffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1),
+           .SRST_VALUE(8'h11)) fa (.CLK(clk), .EN(e1), .SRST(r1), .D(a), .Q(ra));
+  $sdffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1),
+           .SRST_VALUE(8'h22)) fb (.CLK(clk), .EN(e2), .SRST(r2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+EOF
+hierarchy -top srstmix
+check -assert
+design -save orig
+
+opt_retime -flop fa -cut a0 -forward
+check -assert
+# enable and reset each became a mux, for both registers
+select -assert-count 0 t:$sdffe
+select -assert-count 4 t:$mux
+select -assert-count 3 t:$dff
+
+rename srstmix gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# r1 and r2 are free, so the proof covers one operand resetting while the
+# other holds or updates
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Lowering is a fallback, not a mode: a move that was always legal is still
+# made by merging, which costs a register rather than adding one.
+log -header "Unchanged: controls that already agree still merge"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module ensame(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(en), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(en), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+EOF
+hierarchy -top ensame
+check -assert
+design -save orig
+
+opt_retime -flop fa -cut a0 -forward
+check -assert
+# one register left, still enabled, and nothing was lowered on the way
+select -assert-count 1 t:$dffe
+select -assert-count 0 t:$dff
+select -assert-count 0 t:$mux
+
+rename ensame gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# An async reset is where lowering stops: rst reaches rb between edges, so no
+# register reading a next value can produce what the adder produced. The
+# refusal is the one the plain move gives, and the rehearsal that establishes
+# it leaves nothing of itself in the design.
+log -header "Refused: an async reset cannot be lowered"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module arstmix(input clk, e1, rst, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(e1), .D(a), .Q(ra));
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h00))
+    fb (.CLK(clk), .ARST(rst), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+EOF
+hierarchy -top arstmix
+check -assert
+
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different set of controls than flop fa."
+check -assert
+# the design as it was read: the enable was not lowered on the way to the no
+select -assert-count 1 t:$dffe
+select -assert-count 1 t:$adff
+select -assert-count 0 t:$mux
+select -assert-count 0 t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Two clocks, which no amount of logic reconciles. Refused with the design
+# intact, for the same reason as above.
+log -header "Refused: two clocks cannot be lowered"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module twoclk(input clka, clkb, e1, e2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clka), .EN(e1), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clkb), .EN(e2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+EOF
+hierarchy -top twoclk
+check -assert
+
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different clock net than flop fa."
+check -assert
+select -assert-count 2 t:$dffe
+select -assert-count 0 t:$mux
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Opting out, which is what a flow that gates these enables later wants: the
+# registers it would gate are the ones the lowering would dissolve, and
+# clockgate groups by enable, so it can only gate what is still a $dffe.
+log -header "Opted out: -no-lower-controls keeps the refusal and the enables"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module gateme(input clk, e1, e2, en, input [7:0] a, b, c, output [7:0] q, r);
+  wire [7:0] ra, rb;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(e1), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(e2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fc (.CLK(clk), .EN(en), .D(c), .Q(r));
+endmodule
+EOF
+hierarchy -top gateme
+check -assert
+design -save orig
+
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different enable net than flop fa."
+check -assert
+select -assert-count 3 t:$dffe
+select -assert-count 0 t:$mux
+clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
+# three enables, three gates: nothing was lowered out of clockgate's reach
+select -assert-count 3 t:$icg
+
+# and the default, for contrast: the move is made, and only the two registers
+# on its path stop being gateable
+design -load orig
+opt_retime -flop fa -cut a0 -forward
+check -assert
+select -assert-count 1 t:$dffe
+clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
+select -assert-count 1 t:$icg
+design -reset
+log -pop

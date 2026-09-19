@@ -1,0 +1,394 @@
+# Backward across $mux, the first cut with a third operand.
+#
+# reg(S ? B : A) is (reg S) ? (reg B) : (reg A): the identity behind every
+# backward move never cared how many operands the cell has. What the third one
+# costs is cycle 0, and the select is what pays for it. Pin the cloned select
+# at the constant that picks the port the path came in on and the mux is that
+# port, so the path flop keeps the value it already held and the other data
+# clone can start at x.
+#
+# That also makes a clone narrower than the flop, the select being one bit
+# while the flop is WIDTH, and it is the only port allowed to be.
+#
+# A live select at every level is what used to stop a chain at one mux. Clones
+# are placed at every hop here, not just at the cut, so a whole mux tree walks
+# back in a single move.
+#
+# The select is also a landing, and the last one the pass will take: a data port
+# costs nothing extra, while landing on the select puts a clone of the flop's
+# full width on every live data port. Where the data ports are constants there
+# are no clones to place and the landing is the best move on offer, a register
+# of WIDTH bits becoming the one bit that picks between two constants.
+
+# ---------------------------------------------------------------------------
+log -header "Backward: \$mux, path on A, cloning the select and B"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module muxa(input clk, input [7:0] a, b, input s, output [7:0] q);
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(a), .B(b), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top muxa
+setattr -set init 8'h5a w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut u0 -backward
+check -assert
+# the flop and two clones, one of them a single bit
+select -assert-count 3 t:$dff
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:f_B %x:+[D] w:b %i
+select -assert-count 1 c:f_S %x:+[D] w:s %i
+select -assert-count 1 c:u0 %x:+[Y] w:q %i
+# a mux is its own inverse once the select picks the path, so the flop keeps
+# 8'h5a; the select clone starts at 0 to pick A and B's clone is a don't-care
+select -assert-count 1 w:y a:init=8'h5a %i
+select -assert-count 1 w:f_S_q a:init=1'0 %i
+rename muxa gate
+design -import orig -as gold
+setattr -set init 8'h5a gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: \$mux, path on B, so the select clone starts at 1"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module muxb(input clk, input [7:0] b, input s, output [7:0] q);
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(8'hc3), .B(b), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top muxb
+setattr -set init 8'h5a w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut u0 -backward
+check -assert
+# A stays constant, so only the select is cloned
+select -assert-count 2 t:$dff
+select -assert-count 1 c:f %x:+[D] w:b %i
+select -assert-count 1 c:f_S %x:+[D] w:s %i
+select -assert-count 1 w:y a:init=8'h5a %i
+select -assert-count 1 w:f_S_q a:init=1'1 %i
+rename muxb gate
+design -import orig -as gold
+setattr -set init 8'h5a gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The move the single-clone-at-the-cut rule could not make: every level of a
+# mux tree has a live select, so a chain that only allowed a clone at the cut
+# stopped after one level no matter how deep the tree was.
+log -header "Backward: two levels of a mux tree in one move"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module muxtree(input clk, input [7:0] a, b, c, d, input s0, s1, s2, output [7:0] q);
+  wire [7:0] m0, m1, m2;
+  $mux #(.WIDTH(8)) u0 (.A(a),  .B(b),  .S(s0), .Y(m0));
+  $mux #(.WIDTH(8)) u1 (.A(c),  .B(d),  .S(s1), .Y(m1));
+  $mux #(.WIDTH(8)) u2 (.A(m0), .B(m1), .S(s2), .Y(m2));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(m2), .Q(q));
+endmodule
+EOF
+hierarchy -top muxtree
+setattr -set init 8'h5a w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut u0 -backward
+check -assert
+# f plus a clone on each operand the path missed, at both hops. A clone away
+# from the cut names its cell too, since every level clones a port called S.
+select -assert-count 5 t:$dff
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:f_B %x:+[D] w:b %i
+select -assert-count 1 c:f_S %x:+[D] w:s0 %i
+select -assert-count 1 c:f_u2_B %x:+[D] w:m1 %i
+select -assert-count 1 c:f_u2_S %x:+[D] w:s2 %i
+# u1 is untouched and still feeds the clone combinationally
+select -assert-count 1 c:u1 %x:+[Y] w:m1 %i
+select -assert-count 1 c:u2 %x:+[Y] w:q %i
+# both select clones pick A, the port the path runs through at both hops
+select -assert-count 1 w:f_S_q a:init=1'0 %i
+select -assert-count 1 w:f_u2_S_q a:init=1'0 %i
+rename muxtree gate
+design -import orig -as gold
+setattr -set init 8'h5a gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The clone inherits the enable and the reset net, and the reset value crosses
+# the mux the same way the init does.
+log -header "Backward: \$mux carrying an enable and a sync reset"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module muxrst(input clk, rst, en, input [3:0] a, b, input s, output [3:0] q);
+  wire [3:0] y;
+  $mux #(.WIDTH(4)) u0 (.A(a), .B(b), .S(s), .Y(y));
+  $sdffce #(.WIDTH(4), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1),
+            .SRST_POLARITY(1'b1), .SRST_VALUE(4'ha))
+    f (.CLK(clk), .EN(en), .SRST(rst), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top muxrst
+setattr -set init 4'h3 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut u0 -backward
+check -assert
+select -assert-count 3 t:$sdffce
+# the flop keeps both of its values; the select clone starts and resets at 0,
+# so a reset cycle still hands the mux the port the flop is holding. The SAT
+# proof below drives rst and en freely, which is what checks the reset value.
+select -assert-count 1 w:y a:init=4'h3 %i
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:f_S %x:+[D] w:s %i
+select -assert-count 1 w:f_S_q a:init=1'0 %i
+rename muxrst gate
+design -import orig -as gold
+setattr -set init 4'h3 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 10 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# With both data ports constant there is no data port to slide onto, and no
+# clone to place either: the register takes over the select, and what it holds
+# is the bit that picks the constant it used to hold. Eight flops become one.
+log -header "Backward: landing on the select, both data ports constant"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module selpath(input clk, input s, output [7:0] q);
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(8'haa), .B(8'h55), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top selpath
+setattr -set init 8'haa w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut u0 -backward
+check -assert
+# one register, one bit wide, on the select net
+select -assert-count 1 t:$dff
+select -assert-count 1 c:f r:WIDTH=1 %i
+select -assert-count 1 c:f %x:+[D] w:s %i
+select -assert-count 1 c:u0 %x:+[S] w:f_retimed %i
+select -assert-count 1 c:u0 %x:+[Y] w:q %i
+# 8'haa is A, so the bit that reproduces it is 0, and the old Q net is a
+# combinational output with no first-cycle value of its own any more
+select -assert-count 1 w:f_retimed a:init=1'0 %i
+select -assert-count 0 w:q a:init %i
+rename selpath gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Two registers on the same mux output, coming up at different constants, so
+# each lands on the select of its own copy of the mux holding a different bit.
+# Sixteen flops become two.
+log -header "Backward: -all-fanouts onto the select"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module afsel(input clk, input s, output [7:0] q1, q2);
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(8'haa), .B(8'h55), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(y), .Q(q1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f2 (.CLK(clk), .D(y), .Q(q2));
+endmodule
+EOF
+hierarchy -top afsel
+setattr -set init 8'haa w:q1
+setattr -set init 8'h55 w:q2
+check -assert
+design -save orig
+opt_retime -flop f1 -cut u0 -backward -all-fanouts
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 2 t:$mux
+select -assert-count 2 t:$dff r:WIDTH=1 %i
+select -assert-count 1 w:f1_retimed a:init=1'0 %i
+select -assert-count 1 w:f2_retimed a:init=1'1 %i
+rename afsel gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A already holds a register, which used to lose to the plain-wire select and
+# left the move refused. It wins now: landing there costs one narrow clone,
+# where the select would cost an eight-bit one.
+log -header "Backward: a registered data port beats the select"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module selff(input clk, input s, input [7:0] a, output [7:0] q);
+  (* init = 8'h0f *) wire [7:0] ra;
+  wire [7:0] y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $mux #(.WIDTH(8)) u0 (.A(ra), .B(8'h55), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top selff
+setattr -set init 8'h33 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut u0 -backward
+check -assert
+# fa, f on A, and the select clone; f keeps its width and its value
+select -assert-count 3 t:$dff
+select -assert-count 1 c:f %x:+[D] w:ra %i
+select -assert-count 1 c:u0 %x:+[A] w:y %i
+select -assert-count 1 c:u0 %x:+[Y] w:q %i
+select -assert-count 1 w:y a:init=8'h33 %i
+select -assert-count 1 w:f_S_q a:init=1'0 %i
+rename selff gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# B is part wire and part constant, which is a port a flop cannot take over but
+# can be cloned onto. So the landing is the select, and the clone on B has to
+# come up holding what the register held: a clone start that is the stored value
+# rather than a fixed identity, which is what a select landing asks for.
+log -header "Backward: select landing clones the mixed data port at the stored value"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module selmixed(input clk, input s, input [3:0] b, output [7:0] q);
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(8'haa), .B({4'h5, b}), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top selmixed
+setattr -set init 8'h3c w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut u0 -backward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 1 c:f r:WIDTH=1 %i
+select -assert-count 1 c:f %x:+[D] w:s %i
+select -assert-count 1 c:f_B %x:+[D] w:b %i
+select -assert-count 1 c:u0 %x:+[B] w:f_B_q %i
+# the clone comes up at 8'h3c and the select at 1 to pick it
+select -assert-count 1 w:f_B_q a:init=8'h3c %i
+select -assert-count 1 w:f_retimed a:init=1'1 %i
+rename selmixed gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The select picks between 8'haa and 8'h55, so those are the only two values
+# the register can reproduce on the first cycle. 8'h00 is not one of them, and
+# no select bit makes the mux hand it over.
+log -header "Refused: the stored value is neither of the mux constants"
+design -reset
+read_verilog -icells <<EOF
+module selnone(input clk, input s, output [7:0] q);
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(8'haa), .B(8'h55), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top selnone
+setattr -set init 8'h00 w:q
+check -assert
+opt_retime -flop f -cut u0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cell u0 has no input on S that produces 8'00000000, so a backward move has no stored value to leave behind."
+select -assert-count 1 t:$dff
+select -assert-count 1 c:f %x:+[D] w:y %i
+select -assert-count 1 w:q a:init=8'h00 %i
+design -reset
+
+# ---------------------------------------------------------------------------
+# Half the stored value says 8'haa and the other half says nothing, so which
+# constant the select should pick is not a question the design answered.
+log -header "Refused: the stored value is only partly defined"
+design -reset
+read_verilog -icells <<EOF
+module selpart(input clk, input s, output [7:0] q);
+  (* init = 8'b1010101x *) wire [7:0] r;
+  wire [7:0] y;
+  $mux #(.WIDTH(8)) u0 (.A(8'haa), .B(8'h55), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(r));
+  $buf #(.WIDTH(8)) b0 (.A(r), .Y(q));
+endmodule
+EOF
+hierarchy -top selpart
+check -assert
+opt_retime -flop f -cut u0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop f cannot move because its init value is only partly defined, so the inverse fold would be ambiguous."
+select -assert-count 1 t:$dff
+select -assert-count 1 c:f %x:+[D] w:y %i
+design -reset
+
+# ---------------------------------------------------------------------------
+# A \$pmux select is a bus of one bit per arm, and the cell is not one the pass
+# can invert, so the select landing does not reach it.
+log -header "Refused: a \$pmux is not a landing, select or otherwise"
+design -reset
+read_verilog -icells <<EOF
+module pmuxsel(input clk, input [1:0] s, output [7:0] q);
+  wire [7:0] y;
+  $pmux #(.WIDTH(8), .S_WIDTH(2)) u0 (.A(8'haa), .B({8'h55, 8'h33}), .S(s), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top pmuxsel
+check -assert
+opt_retime -flop f -cut u0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cut cell u0 has type $pmux, which opt_retime cannot move backward across yet."
+select -assert-count 1 t:$dff
+select -assert-count 1 c:f %x:+[D] w:y %i

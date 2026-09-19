@@ -1,0 +1,223 @@
+# Forward mid-path fanout: a tap on a hop between the flop and the cut.
+#
+# Extra readers of flop Q are a leftover copy, and extra readers of the cut Y
+# become the moved flop's Q. A tap on an intermediate Y is neither: rewriting
+# that hop from Q to D hands the tap the value a cycle early. So the hop keeps
+# a register holding the delayed value, which is the peel the flop's own Q
+# gets, one hop further down. The tap sees what it always saw; what moves is
+# the register, from before the hop to after it.
+#
+# A second cell reading the whole intermediate Y is not an ambiguity either:
+# at most one reader leads to the cut, and that is the one the move follows.
+# Both shapes are here, along with the two that stay refused -- a hop entered
+# on two ports of one cell, and a Y no single cell consumes whole. midcut is
+# the other side of the same chain: the tap sits on the cut, so a two-hop
+# move is still legal.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: tap on the cut Y, two hops, the tap becomes the new Q"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module midcut(input clk, input [7:0] a, output [7:0] q, tap);
+  (* init = 8'h00 *) wire [7:0] ra;
+  wire [7:0] t, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(t));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n2 (.A(t),  .Y(y));
+  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top midcut
+setattr -set init 8'h00 w:q
+check -assert
+select -assert-count 2 w:y %co c:* %i
+design -save orig
+opt_retime -flop fa -cut n2 -forward
+check -assert
+# n1 and n2 now sit in front of fa; the tap reads the new Q
+select -assert-count 2 t:$dff
+select -assert-count 1 c:n1 %x:+[A] w:a %i
+select -assert-count 1 c:n2 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+select -assert-count 1 c:bt %x:+[A] w:y %i
+rename midcut gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: n1.Y is also an output, so the cut has to be n1"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module midtap(input clk, input [7:0] a, output [7:0] q, tap);
+  (* init = 8'h00 *) wire [7:0] ra;
+  wire [7:0] y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(tap));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n2 (.A(tap), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top midtap
+setattr -set init 8'h00 w:q
+check -assert
+design -save orig
+opt_retime -flop fa -cut n1 -forward
+check -assert
+# n1 then fa; the output tap is now Q. n2 is untouched.
+select -assert-count 2 t:$dff
+select -assert-count 1 c:n1 %x:+[A] w:a %i
+select -assert-count 1 c:n1 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:tap %i
+select -assert-count 1 c:n2 %x:+[A] w:tap %i
+select -assert-count 1 w:tap a:init=8'hff %i
+rename midtap gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The same chain as the section above, cut one hop further down. n1.Y is a
+# module output, which is not a hop, so the move has to keep driving it with
+# the value it had: a register on that net, holding the fold of the flop's init
+# through n1.
+log -header "Forward: a cut past the output tap peels a register onto it"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module midtap(input clk, input [7:0] a, output [7:0] q, tap);
+  (* init = 8'h00 *) wire [7:0] ra;
+  wire [7:0] y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(tap));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n2 (.A(tap), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top midtap
+setattr -set init 8'h00 w:q
+check -assert
+design -save orig
+opt_retime -flop fa -cut n2 -forward
+check -assert
+# fa took the far end of the chain; the tap kept its value from a third
+# register, which resets to ~8'h00 the way the tap net used to
+select -assert-count 3 t:$dff
+select -assert-count 1 c:n1 %x:+[A] w:a %i
+select -assert-count 0 c:n1 %x:+[Y] w:tap %i
+select -assert-count 1 w:tap a:init=8'hff %i
+select -assert-count 1 c:n2 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+rename midtap gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# n3 reads the whole of n1.Y, so it is a hop by itself, but it leads nowhere
+# near the cut. The walk follows the reader that reaches n2 and peels n1.Y for
+# the other one.
+log -header "Forward: a hop read by two cells, the move follows the one that reaches the cut"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module branchy(input clk, input [7:0] a, output [7:0] q, tap);
+  (* init = 8'h00 *) wire [7:0] ra;
+  wire [7:0] t, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(t));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n2 (.A(t), .Y(y));
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    n3 (.A(t), .B(8'h0f), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top branchy
+setattr -set init 8'h00 w:q
+check -assert
+select -assert-count 2 w:t %co c:* %i
+design -save orig
+opt_retime -flop fa -cut n2 -forward
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 1 c:n1 %x:+[A] w:a %i
+# t is now a register output, so n3 reads it unchanged and n2 reads the
+# undelayed value n1 moved onto a fresh net
+select -assert-count 1 c:n3 %x:+[A] w:t %i
+select -assert-count 1 w:t a:init=8'hff %i
+select -assert-count 0 c:n2 %x:+[A] w:t %i
+select -assert-count 1 c:n2 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+rename branchy gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Both operands of a0 are the same net, so the path enters it twice and there
+# is no single port the register lands on.
+log -header "Refused: the cut is entered on two ports of one cell"
+design -reset
+read_verilog -icells <<EOF
+module twoport(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] ra, t, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(t));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(t), .B(t), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top twoport
+check -assert
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cut a0 is reachable from flop fa on more than one path."
+select -assert-count 2 t:$dff
+select -assert-count 1 c:n1 %x:+[A] w:ra %i
+
+# ---------------------------------------------------------------------------
+# Two readers, neither of them a hop: each takes half of n1.Y, so nothing
+# consumes it whole and the after-path stops at n1. The refusal says so rather
+# than blaming the cut for not being downstream, which it is.
+log -header "Refused: no single cell consumes the whole of n1.Y"
+design -reset
+read_verilog -icells <<EOF
+module nohop(input clk, input [7:0] a, output [3:0] lo, hi);
+  wire [7:0] ra, t;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(t));
+  $not #(.A_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0)) n2 (.A(t[3:0]), .Y(lo));
+  $not #(.A_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0)) n3 (.A(t[7:4]), .Y(hi));
+endmodule
+EOF
+hierarchy -top nohop
+check -assert
+opt_retime -flop fa -cut n2 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Y of cell n1 is read by 2 cells, so the after-path of flop fa ends there and never reaches cut n2."
+select -assert-count 1 t:$dff
+select -assert-count 1 c:n1 %x:+[A] w:ra %i

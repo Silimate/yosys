@@ -1,0 +1,278 @@
+# A register in a hold loop, moving backward through the mux tree that feeds it.
+#
+# This is the shape every write-enabled accumulator has, and the one the sha256
+# digest registers sit in: a flop whose D comes back through a reset mux, an
+# enable mux that holds by feeding Q straight back, and an update path through
+# an adder. The init mux takes a constant, the way a round constant enters the
+# real design, which is what lets a backward chain walk past it and reach the
+# adder.
+#
+#   digest -> add_70 -> mux_78 -> mux_13.B -\
+#   digest ------------------> mux_13.A -----> mux_32.A -> H1 -> digest
+#   i86 (we) ----------------> mux_13.S -/
+#
+# Backward moves place the flop on one data input of the cut cell and clone it
+# onto every other live input, so walking back through this tree clones onto
+# mux_13.A, which is the flop's own Q, and entering add_70 lands the flop on a
+# path input that is the flop's own Q bit for bit. Neither is a second register
+# in the loop. The commit points the first hop's Y at the old Q net, and that
+# hop computes at t what it used to compute at t-1, which is what the register
+# held at t: Q keeps its value on every cycle while ceasing to be a register,
+# the clone reading it becomes the one register on the feedback arm, and every
+# loop comes out with the register count it went in with. digest stops being a
+# flop output and the clones rebuild its value, so the port behaviour does not
+# change.
+#
+# Each section proves its own move. The last one repeats the two interesting
+# results as hand-written netlists, so the move is checked against a reference
+# somebody can read rather than only against the pass that produced it.
+
+# ---------------------------------------------------------------------------
+log -header "Backward across the reset mux"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module holdloop(input clk, rst, we, upd, input [7:0] b_in,
+                output [7:0] digest);
+  wire [7:0] b_reg, sum, h_new, held, nxt;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    add_70 (.A(digest), .B(b_reg), .Y(sum));
+  $mux #(.WIDTH(8)) mux_78 (.A(8'h5a),  .B(sum),   .S(upd), .Y(h_new));
+  $mux #(.WIDTH(8)) mux_13 (.A(digest), .B(h_new), .S(we),  .Y(held));
+  $mux #(.WIDTH(8)) mux_32 (.A(held),   .B(8'h00), .S(rst), .Y(nxt));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) H1  (.CLK(clk), .D(nxt),  .Q(digest));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) b_f (.CLK(clk), .D(b_in), .Q(b_reg));
+endmodule
+EOF
+hierarchy -top holdloop
+check -assert
+select -assert-count 2 t:$dff
+design -save orig
+
+# A is the only live wire input, so the flop slides onto it and the constant 0
+# on B stays put; the select is cloned so cycle 0 still sees the registered rst.
+opt_retime -flop H1 -cut mux_32 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+# one clone for the select, and digest is now driven by the mux
+select -assert-count 3 t:$dff
+select -assert-count 1 c:H1_S %x:+[D] w:rst %i
+select -assert-count 1 c:mux_32 %x:+[Y] w:digest %i
+rename holdloop gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+flatten
+opt_clean
+sat -tempinduct -seq 16 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The clone on mux_13.A is the one that used to be refused: its D is the flop's
+# own Q. It is the only register left on the hold arm once the flop has moved
+# onto mux_13.B, so the arm still carries one register and not two.
+log -header "Backward across the enable mux, cloning onto the hold arm"
+log -push
+design -load orig
+opt_retime -flop H1 -cut mux_13 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+# the flop plus three clones, beside the untouched b_f
+select -assert-count 5 t:$dff
+select -assert-count 1 c:H1 %x:+[D] w:h_new %i
+select -assert-count 1 c:H1_A %x:+[D] w:digest %i
+select -assert-count 1 c:H1_S %x:+[D] w:we %i
+select -assert-count 1 c:H1_mux_32_S %x:+[D] w:rst %i
+select -assert-count 1 c:b_f %x:+[D] w:b_in %i
+# the flop's Q feeds the arm it moved onto, and the reset mux drives digest
+select -assert-count 1 c:mux_13 %x:+[A] c:H1_A %x:+[Q] %i
+select -assert-count 1 c:mux_13 %x:+[B] c:H1 %x:+[Q] %i
+select -assert-count 1 c:mux_32 %x:+[Y] w:digest %i
+rename holdloop gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+flatten
+opt_clean
+sat -tempinduct -seq 16 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# sha256 names i86, the 1-bit mux that produces the enable. That cell is on
+# the before-path, but only as mux_13.S: a walk that followed H1_new would run
+# off the flop's own Q at digest and refuse a missing cell Y. The flop cannot
+# slide onto a 1-bit cut, so the move lands on mux_13, clones the select, and
+# is the same retiming as the section above.
+log -header "Backward: named cut is the 1-bit enable mux, land on the data mux"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module holdloop_we(input clk, rst, init, upd, input [7:0] b_in,
+                   output [7:0] digest);
+  wire we;
+  wire [7:0] b_reg, sum, h_new, held, nxt;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    add_70 (.A(digest), .B(b_reg), .Y(sum));
+  $mux #(.WIDTH(8)) mux_78 (.A(8'h5a),  .B(sum),   .S(upd), .Y(h_new));
+  $mux #(.WIDTH(1)) i86    (.A(init),   .B(1'b1),  .S(upd), .Y(we));
+  $mux #(.WIDTH(8)) mux_13 (.A(digest), .B(h_new), .S(we),  .Y(held));
+  $mux #(.WIDTH(8)) mux_32 (.A(held),   .B(8'h00), .S(rst), .Y(nxt));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) H1  (.CLK(clk), .D(nxt),  .Q(digest));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) b_f (.CLK(clk), .D(b_in), .Q(b_reg));
+endmodule
+EOF
+hierarchy -top holdloop_we
+check -assert
+select -assert-count 2 t:$dff
+design -save origwe
+opt_retime -flop H1 -cut i86 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 5 t:$dff
+select -assert-count 1 c:H1 %x:+[D] w:h_new %i
+select -assert-count 1 c:H1_A %x:+[D] w:digest %i
+select -assert-count 1 c:H1_S %x:+[D] w:we %i
+select -assert-count 1 c:H1_mux_32_S %x:+[D] w:rst %i
+select -assert-count 1 c:b_f %x:+[D] w:b_in %i
+select -assert-count 1 c:mux_13 %x:+[A] c:H1_A %x:+[Q] %i
+select -assert-count 1 c:mux_13 %x:+[B] c:H1 %x:+[Q] %i
+select -assert-count 1 c:mux_13 %x:+[S] c:H1_S %x:+[Q] %i
+select -assert-count 1 c:i86 %x:+[Y] w:we %i
+select -assert-count 1 c:mux_32 %x:+[Y] w:digest %i
+rename holdloop_we gate
+design -import origwe -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+flatten
+opt_clean
+sat -tempinduct -seq 16 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# One hop further back. The init mux contributes only a select clone, because
+# its A is the round constant and a constant needs no register.
+log -header "Backward across the init mux"
+log -push
+design -load orig
+opt_retime -flop H1 -cut mux_78 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 6 t:$dff
+select -assert-count 1 c:H1 %x:+[D] w:sum %i
+select -assert-count 1 c:H1_S %x:+[D] w:upd %i
+select -assert-count 1 c:H1_mux_13_A %x:+[D] w:digest %i
+select -assert-count 1 c:H1_mux_13_S %x:+[D] w:we %i
+select -assert-count 1 c:H1_mux_32_S %x:+[D] w:rst %i
+# the constant arm was not cloned: a clone there would be named for it
+select -assert-count 0 c:H1_mux_78_A
+select -assert-count 0 c:H1_A
+rename holdloop gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+flatten
+opt_clean
+sat -tempinduct -seq 16 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# All the way back to the adder. Both operands are registered, so there is no
+# unregistered input to prefer and the flop lands on A, which is its own Q. The
+# other operand takes a clone, which delays b_reg by the same cycle the whole
+# chain slid.
+log -header "Backward across the adder, landing on the flop's own Q"
+log -push
+design -load orig
+opt_retime -flop H1 -cut add_70 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 7 t:$dff
+select -assert-count 1 c:H1 %x:+[D] w:digest %i
+select -assert-count 1 c:H1_B %x:+[D] w:b_reg %i
+select -assert-count 1 c:H1_mux_78_S %x:+[D] w:upd %i
+select -assert-count 1 c:H1_mux_13_A %x:+[D] w:digest %i
+select -assert-count 1 c:H1_mux_13_S %x:+[D] w:we %i
+select -assert-count 1 c:H1_mux_32_S %x:+[D] w:rst %i
+select -assert-count 1 c:add_70 %x:+[A] c:H1 %x:+[Q] %i
+select -assert-count 1 c:add_70 %x:+[B] c:H1_B %x:+[Q] %i
+select -assert-count 1 c:mux_32 %x:+[Y] w:digest %i
+rename holdloop gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+flatten
+opt_clean
+sat -tempinduct -seq 16 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The two interesting results again, written out by hand. These are what the
+# pass produces for the mux_13 and add_70 cuts, cell for cell, so a change that
+# quietly rewires a clone fails here as well as in the sections above.
+log -header "The same two results as hand-written references"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module moved13(input clk, rst, we, upd, input [7:0] b_in,
+               output [7:0] digest);
+  wire [7:0] b_reg, sum, h_new, held, q_path, q_hold;
+  wire q_we, q_rst;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    add_70 (.A(digest), .B(b_reg), .Y(sum));
+  $mux #(.WIDTH(8)) mux_78 (.A(8'h5a), .B(sum), .S(upd), .Y(h_new));
+  // the flop, now on mux_13.B
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) H1   (.CLK(clk), .D(h_new),  .Q(q_path));
+  // the clone on the hold arm: its D is the flop's old Q
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) H1_A (.CLK(clk), .D(digest), .Q(q_hold));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) H1_S (.CLK(clk), .D(we),     .Q(q_we));
+  $mux #(.WIDTH(8)) mux_13 (.A(q_hold), .B(q_path), .S(q_we), .Y(held));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) H1_R (.CLK(clk), .D(rst),    .Q(q_rst));
+  $mux #(.WIDTH(8)) mux_32 (.A(held), .B(8'h00), .S(q_rst), .Y(digest));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) b_f  (.CLK(clk), .D(b_in),   .Q(b_reg));
+endmodule
+EOF
+hierarchy -top moved13
+check -assert
+rename moved13 gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+flatten
+opt_clean
+sat -tempinduct -seq 16 -set-init-zero -prove-asserts -verify
+
+design -reset
+read_verilog -icells <<EOF
+module moved70(input clk, rst, we, upd, input [7:0] b_in,
+               output [7:0] digest);
+  wire [7:0] b_reg, sum, h_new, held, q_a, q_b, q_hold;
+  wire q_upd, q_we, q_rst;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) H1   (.CLK(clk), .D(digest), .Q(q_a));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) H1_B (.CLK(clk), .D(b_reg),  .Q(q_b));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    add_70 (.A(q_a), .B(q_b), .Y(sum));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) H1_U (.CLK(clk), .D(upd),    .Q(q_upd));
+  $mux #(.WIDTH(8)) mux_78 (.A(8'h5a), .B(sum), .S(q_upd), .Y(h_new));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) H1_A (.CLK(clk), .D(digest), .Q(q_hold));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) H1_S (.CLK(clk), .D(we),     .Q(q_we));
+  $mux #(.WIDTH(8)) mux_13 (.A(q_hold), .B(h_new), .S(q_we), .Y(held));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) H1_R (.CLK(clk), .D(rst),    .Q(q_rst));
+  $mux #(.WIDTH(8)) mux_32 (.A(held), .B(8'h00), .S(q_rst), .Y(digest));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) b_f  (.CLK(clk), .D(b_in),   .Q(b_reg));
+endmodule
+EOF
+hierarchy -top moved70
+check -assert
+rename moved70 gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+flatten
+opt_clean
+sat -tempinduct -seq 16 -set-init-zero -prove-asserts -verify
+log -pop

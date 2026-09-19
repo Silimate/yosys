@@ -1,0 +1,222 @@
+# Constant operands on a cut.
+#
+# A constant needs no register to merge, because it is already time invariant:
+# reg(c) is c on every cycle, so f(reg(x), c) equals reg(f(x, c)) for the same
+# reason the rule holds when every input is registered. The move folds nothing
+# away on that port and leaves the constant wired where it sits, which is why
+# the register count here drops by zero even though a move happened.
+#
+# The initial state is the part worth care. A constant makes it easy to get
+# wrong: an $and against a mask keeps the all-zero state at zero, but an $add
+# against a constant does not, since 0 + c is c. So this section maps the
+# initial state through each cell rather than using -set-init-zero, and the
+# $add register starts at the constant.
+#
+# A mixed operand is classified bit by bit: a concatenation of a constant
+# nibble and a register nibble merges the register bits and leaves the
+# constant ones. Both operands constant is a different story, and that is
+# pinned at the end of the file: a backward move has nothing to slide onto.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: constant operands on \$add and \$and"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module constops(input clk, input [7:0] a, b, output [7:0] qinc, qmask);
+  wire [7:0] ra, rb, yinc, ymask;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a_inc (.A(ra), .B(8'd1), .Y(yinc));
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a_mask (.A(rb), .B(8'h0f), .Y(ymask));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqi (.CLK(clk), .D(yinc),  .Q(qinc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqm (.CLK(clk), .D(ymask), .Q(qmask));
+endmodule
+EOF
+hierarchy -top constops
+check -assert
+select -assert-count 4 t:$dff
+design -save orig
+opt_retime -flop fa -cut a_inc -forward
+opt_retime -flop fb -cut a_mask -forward
+check -assert
+# Nothing merged and nothing resized: both cuts keep their width and their
+# constant operand, so all four registers survive at 8 bits. The only change
+# is which side of the cut each one sits on.
+select -assert-count 4 t:$dff
+select -assert-count 1 c:a_inc %x:+[A] w:a %i
+select -assert-count 1 c:a_mask %x:+[A] w:b %i
+# the constants are still wired straight to the cuts, untouched by the move
+select -assert-count 1 c:a_inc %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:yinc %i
+select -assert-count 1 c:a_mask %x:+[Y] w:rb %i
+select -assert-count 1 c:fb %x:+[Q] w:ymask %i
+rename constops gate
+# 0 + 1 is 1, so the incrementer's register starts at the constant. The mask
+# leaves zero alone, so that one starts at zero like its gold counterpart;
+# it shares this section only because one sat call covers both.
+setattr -set init 8'd1 gate/w:yinc
+setattr -set init 8'h00 gate/w:ymask
+setattr -set init 8'h00 gate/w:qinc
+setattr -set init 8'h00 gate/w:qmask
+design -import orig -as gold
+setattr -set init 8'h00 gold/w:ra
+setattr -set init 8'h00 gold/w:rb
+setattr -set init 8'h00 gold/w:qinc
+setattr -set init 8'h00 gold/w:qmask
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A constant operand on a cut whose output is wider than its input, so the
+# register resizes even though nothing merges. This is opt_retime_shift.v's
+# s_const, the move that motivated constant support: reg(d) << 3 equals
+# reg(d << 3), and 0 << 3 is 0, so the ordinary zero-init proof is fair here.
+log -header "Forward: constant shift amount, widening the register"
+log -push
+design -reset
+read_verilog -icells opt_retime_shift.v
+hierarchy -top retime_shift
+check -assert
+design -save orig
+# rd feeds both shifters: named fd moves, a leftover copy keeps rd for s_var
+opt_retime -flop fd -cut s_const -forward
+check -assert
+# fd widens 8 bits to 11 and merges nothing, the amount being a constant, and
+# the leftover copy is a fifth register
+select -assert-count 5 t:$dff
+select -assert-count 1 c:fd_fanout
+select -assert-count 1 c:s_const %x:+[A] w:d %i
+select -assert-count 1 c:s_const %x:+[Y] w:fd_retimed %i
+select -assert-count 1 c:fd %x:+[Q] w:sl %i
+select -assert-count 1 c:s_var %x:+[A] w:rd %i
+select -assert-count 1 c:fd_fanout %x:+[Q] w:rd %i
+rename retime_shift gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Half a constant is enough. {4'h0, rb[3:0]} is classified bit by bit: the
+# constant nibble stays, fb's low nibble merges, and fa hops onto Y. fb has
+# no other readers, so the whole cell goes even though its high nibble never
+# fed the cut.
+log -header "Forward: half register, half constant on one operand"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module halfconst(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B({4'h0, rb[3:0]}), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top halfconst
+check -assert
+select -assert-count 3 t:$dff
+design -save orig
+opt_retime -flop fa -cut a0 -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+rename halfconst gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A backward move asks less of the operands it clones than of the one it slides
+# onto. The path port has to be a net the register can take over in full, but a
+# clone's D is just a signal, so it carries constant bits alongside its wires
+# the same way the forward classification does. Here A is a nibble of register
+# and a nibble of constant: it cannot be the path, and B can, so B takes the
+# register and A takes the clone with its constant bits intact.
+log -header "Backward: a mixed constant operand takes a clone"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module mixedback(input clk, input [7:0] b, input [3:0] a, output [7:0] q);
+  wire [7:0] y;
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A({4'h5, a}), .B(b), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top mixedback
+setattr -set init 8'h00 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut x0 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+# One register slid onto B, one clone on the mixed A, and x0 still computes y.
+select -assert-count 2 t:$dff
+select -assert-count 1 c:f %x:+[D] w:b %i
+select -assert-count 1 c:x0 %x:+[Y] w:q %i
+# The clone's D keeps the constant nibble, and xor folds init 0 to its identity.
+select -assert-count 1 c:f_A %x:+[D] w:a %i
+select -assert-count 1 w:f_A_q a:init=8'h00 %i
+rename mixedback gate
+design -import orig -as gold
+setattr -set init 8'h00 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Both operands constant: a backward move has no live port to slide onto.
+log -header "Refused: backward across a cell whose every input is constant"
+design -reset
+read_verilog -icells <<EOF
+module allconst(input clk, output [7:0] q);
+  wire [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(8'd1), .B(8'd2), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top allconst
+check -assert
+opt_retime -flop f -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Every data input of cell a0 is constant, so flop f has nothing to slide onto."
+
+# ---------------------------------------------------------------------------
+# Mixed on every live port: nothing left that the register can slide onto.
+log -header "Refused: backward when the only live input is partly constant"
+design -reset
+read_verilog -icells <<EOF
+module allmixed(input clk, input [3:0] a, output [7:0] q);
+  wire [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A({4'h5, a}), .B(8'd2), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top allmixed
+check -assert
+opt_retime -flop f -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input A of cell a0 is only partly a wire, so flop f cannot move backward onto it."
