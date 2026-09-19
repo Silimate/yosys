@@ -316,23 +316,28 @@ log -pop
 # ---------------------------------------------------------------------------
 # A declared range like [8:4] gives the port wire a nonzero start_offset, but a
 # SigBit's offset is its index within the wire and stays zero-based, so the
-# parent connection is indexed by the same number either way. The pair below is
-# what would catch it if that ever stopped being true: reading the wrong parent
-# bit, or reading past the connection, supplies arrival 0, and the margin here
-# is one level, so the rewrite in the first block would go missing.
-log -header "Port with a nonzero start offset resolves to the right parent bit"
+# parent connection is indexed by the same number either way.
+#
+# The child reads one port bit and only one, and just that bit's parent is late,
+# so the arrival depends on which bit the lookup lands on rather than on the
+# connection as a whole. The two blocks differ only in where the late signal
+# sits: on p[6] the rewrite happens, one bit over it does not. An off-by-one, a
+# permutation, and reading past the end of the connection all land in the second
+# block's answer.
+log -header "Nonzero start offset: the late parent bit is the one p[6] reads"
 log -push
 design -reset
 read_verilog -sv <<VERILOG
-module lateop(input [8:4] p, input [8:4] q, output [4:0] y);
-  assign y = p ^ q;
+module lateop(input [8:4] p, input [4:0] q, output [4:0] y);
+  assign y = q ^ {4'b0, p[6]};
 endmodule
 
 module cs(input [31:0] a0, input [31:0] a1, input [4:0] c0, input [4:0] c1,
           input [4:0] c2, output [31:0] y);
-  wire [31:0] a = a0 ^ a1;
+  wire [31:0] a = a0 ^ a1;            // wide operand is one level in
+  wire [4:0] slow = (c0 ^ c1) ^ c2;   // two, so only this one clears it
   wire [4:0] cause;
-  lateop u0(.p((c0 ^ c1) ^ c2), .q(c1), .y(cause));
+  lateop u0(.p({c0[4], c0[3], slow[2], c0[1], c0[0]}), .q(c1), .y(cause));
   assign y = a + cause;
 endmodule
 VERILOG
@@ -345,19 +350,21 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-log -header "Negative: same nonzero-offset port, fed early -> no rewrite"
+log -header "Negative: the late parent bit moved one over -> no rewrite"
 log -push
 design -reset
 read_verilog -sv <<VERILOG
-module lateop(input [8:4] p, input [8:4] q, output [4:0] y);
-  assign y = p ^ q;
+module lateop(input [8:4] p, input [4:0] q, output [4:0] y);
+  assign y = q ^ {4'b0, p[6]};
 endmodule
 
 module cs(input [31:0] a0, input [31:0] a1, input [4:0] c0, input [4:0] c1,
-          output [31:0] y);
+          input [4:0] c2, output [31:0] y);
   wire [31:0] a = a0 ^ a1;
+  wire [4:0] slow = (c0 ^ c1) ^ c2;
   wire [4:0] cause;
-  lateop u0(.p(c0), .q(c1), .y(cause));
+  // slow now sits on p[7]; p[6] is fed straight off c0 and arrives with a
+  lateop u0(.p({c0[4], slow[3], c0[2], c0[1], c0[0]}), .q(c1), .y(cause));
   assign y = a + cause;
 endmodule
 VERILOG
