@@ -1676,15 +1676,28 @@ void VerificImporter::recurse_mem_dimensions(RTLIL::Module *module, RTLIL::Memor
 	auto left = typeRange->LeftRangeBound();
 	auto right = typeRange->RightRangeBound();
 	bool is_up = left < right;
+
+	// This dimension always occupies the same address bit field, so the number of low index
+	// bits truncated away, and hence the index step per iteration, is loop-invariant.
+	int max_bits = max_bits_in_addr - prefix.size();
+	int extra_bits = int(typeRange->NumBits()) - max_bits; // NumBits() is unsigned; must go negative here
+	int step = extra_bits > 0 ? (1 << extra_bits) : 1;
+	auto last = is_up ? left + (right - left) / step * step : left - (left - right) / step * step;
+
+	// Enumerating every word is only needed to hand out initdata one word at a time. Without
+	// initdata the walk just locates the min/max address, and a non-negative index encodes
+	// monotonically into this dimension's field, so both extremes sit at the first or last
+	// index. Visiting only those turns an O(words) walk into O(2^dimensions): a 2**28-word
+	// RAM took ~8 min here, almost all of it building per-word SigSpecs that were discarded.
+	bool ends_only = ascii_initdata == nullptr && left >= 0 && right >= 0;
+
 	for (auto i = left; is_up ? i <= right : i >= right; is_up ? i++ : i--) {
 		// TODO verific can do u64
-		auto max_bits = max_bits_in_addr - prefix.size();
+		auto i_start = i; // the extra_bits fixup below moves i off this iteration's index
 		auto next_sig = SigSpec(Const(i, typeRange->NumBits()));
-		auto extra_bits = next_sig.size() - max_bits;
 		if (extra_bits > 0) {
 			next_sig = next_sig.extract_end(extra_bits);
-			auto extra_inc = (1 << extra_bits) - 1;
-			i = is_up ? i + extra_inc : i - extra_inc;
+			i = is_up ? i + (step - 1) : i - (step - 1);
 		}
 		next_sig.append(prefix);
 		if (nextRange != nullptr && extra_bits < 0) {
@@ -1723,6 +1736,12 @@ void VerificImporter::recurse_mem_dimensions(RTLIL::Module *module, RTLIL::Memor
 			memory->start_offset = min(memory->start_offset, next_idx);
 			memory->size = max(memory->size, next_idx);
 		}
+
+		// Jump to the final index; the words in between only ever mattered for initdata.
+		// Every level does this independently, so all 2^dimensions address corners -- and
+		// with them the true min and max -- are still visited.
+		if (ends_only && i_start != last)
+			i = is_up ? last - 1 : last + 1;
 	}
 }
 

@@ -1,0 +1,30 @@
+# Importing a 2**28-word RAM used to take minutes: recurse_mem_dimensions enumerated every
+# word just to find the address bounds. Guards both the resulting dimensions and, by way of
+# the suite timeout, that the importer no longer walks the array word by word.
+verific -cfg veri_extract_multiport_rams 1
+verific -sv <<EOT
+module ram_large #(
+	parameter integer WORDS = 2**28
+) (
+	input clk,
+	input [3:0] wen,
+	input [21:0] addr,
+	input [31:0] wdata,
+	output reg [31:0] rdata
+);
+	reg [31:0] mem [0:WORDS-1];
+
+	always @(posedge clk) begin
+		rdata <= mem[addr];
+		if (wen[0]) mem[addr][ 7: 0] <= wdata[ 7: 0];
+		if (wen[1]) mem[addr][15: 8] <= wdata[15: 8];
+		if (wen[2]) mem[addr][23:16] <= wdata[23:16];
+		if (wen[3]) mem[addr][31:24] <= wdata[31:24];
+	end
+endmodule
+EOT
+verific -import ram_large
+
+# Byte-granular write ports narrow the word to 8 bits, so this imports as 2**30 words
+dump -o ram_large_import.out ram_large
+!grep -qF 'memory width 8 size 1073741824 \mem' ram_large_import.out
