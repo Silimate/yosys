@@ -130,6 +130,6 @@ hierarchy -top fine
 check -assert
 opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fa is a single-bit cell and cannot widen to 2 bits."
+scratchpad -assert opt_retime.refusal "Flop fa is a single-bit cell and cannot widen to 2 bits (unsupported)."
 design -reset
 log -pop

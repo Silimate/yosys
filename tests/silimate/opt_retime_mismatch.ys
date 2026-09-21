@@ -56,7 +56,7 @@ check -assert
 # operand of the adder and not the other
 opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different set of controls than flop fa."
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different set of controls than flop fa (unsupported, needs extra logic)."
 design -reset
 log -pop
 
@@ -159,7 +159,7 @@ hierarchy -top arstnet
 check -assert
 opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different async reset net than flop fa."
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different async reset net than flop fa (unsupported, needs extra logic)."
 design -reset
 log -pop
 
@@ -184,7 +184,7 @@ hierarchy -top arstpol
 check -assert
 opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has an async reset of the opposite polarity to flop fa."
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has an async reset of the opposite polarity to flop fa (unsupported, needs extra logic)."
 design -reset
 log -pop
 
@@ -210,7 +210,7 @@ check -assert
 # the load values are constant and equal, so this is the net alone
 opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different async load net than flop fa."
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different async load net than flop fa (unsupported, needs extra logic)."
 design -reset
 log -pop
 
@@ -235,7 +235,7 @@ hierarchy -top aldpol
 check -assert
 opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has an async load of the opposite polarity to flop fa."
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has an async load of the opposite polarity to flop fa (unsupported, needs extra logic)."
 design -reset
 log -pop
 

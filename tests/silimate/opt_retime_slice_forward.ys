@@ -163,7 +163,7 @@ hierarchy -top tworuns
 check -assert
 opt_retime -flop fr -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fr is 2 registers sharing one cell and 2 of them reach cut a0, so opt_retime cannot tell which one to move."
+scratchpad -assert opt_retime.refusal "Flop fr is 2 registers sharing one cell and 2 of them reach cut a0, so opt_retime cannot tell which one to move (invalid request)."
 select -assert-count 1 t:$dff
 select -assert-count 1 c:fr %x:+[Q] w:r %i
 design -reset
@@ -188,6 +188,6 @@ hierarchy -top mixport
 check -assert
 opt_retime -flop fr -cut e0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fr is 3 registers sharing one cell, none of which reaches cut e0 on its own, and read whole: Cut e0 is not on the after-path of flop fr."
+scratchpad -assert opt_retime.refusal "Flop fr is 3 registers sharing one cell, none of which reaches cut e0 on its own, and read whole: Cut e0 is not on the after-path of flop fr (invalid request)."
 select -assert-count 1 t:$dff
 select -assert-count 1 c:fr %x:+[Q] w:r %i

@@ -344,7 +344,7 @@ setattr -set init 8'h00 w:q
 check -assert
 opt_retime -flop f -cut u0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cell u0 has no input on S that produces 8'00000000, so a backward move has no stored value to leave behind."
+scratchpad -assert opt_retime.refusal "Cell u0 has no input on S that produces 8'00000000, so a backward move has no stored value to leave behind (unsupported, needs extra logic)."
 select -assert-count 1 t:$dff
 select -assert-count 1 c:f %x:+[D] w:y %i
 select -assert-count 1 w:q a:init=8'h00 %i
@@ -368,7 +368,7 @@ hierarchy -top selpart
 check -assert
 opt_retime -flop f -cut u0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop f cannot move because its init value is only partly defined, so the inverse fold would be ambiguous."
+scratchpad -assert opt_retime.refusal "Flop f cannot move because its init value is only partly defined, so the inverse fold would be ambiguous (unsupported)."
 select -assert-count 1 t:$dff
 select -assert-count 1 c:f %x:+[D] w:y %i
 design -reset
@@ -389,6 +389,6 @@ hierarchy -top pmuxsel
 check -assert
 opt_retime -flop f -cut u0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cut cell u0 has type $pmux, which opt_retime cannot move backward across yet."
+scratchpad -assert opt_retime.refusal "Cut cell u0 has type $pmux, which opt_retime cannot move backward across (unsupported)."
 select -assert-count 1 t:$dff
 select -assert-count 1 c:f %x:+[D] w:y %i

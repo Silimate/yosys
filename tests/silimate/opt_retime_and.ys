@@ -155,4 +155,4 @@ setattr -set init 8'h0f w:q
 check -assert
 opt_retime -flop f -cut a0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cell a0 has no input on A that produces 8'00001111, so a backward move has no stored value to leave behind."
+scratchpad -assert opt_retime.refusal "Cell a0 has no input on A that produces 8'00001111, so a backward move has no stored value to leave behind (unsupported, needs extra logic)."

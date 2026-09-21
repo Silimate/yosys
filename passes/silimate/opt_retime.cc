@@ -48,6 +48,41 @@ template <typename... Args>
 	throw MoveRefused{fmt.format(args...)};
 }
 
+// What a refusal says about itself, written at the end of the reason so that a
+// caller sweeping candidate moves can sort them without parsing the sentence.
+//
+// The identity a move rests on, f(reg(x1), .., reg(xn)) = reg(f(x1, .., xn)),
+// holds for every pure f on every graph shape as long as the inputs share a
+// clock and an update condition. So a refusal is only about what is possible
+// when one of those genuinely fails: an operand is not registered, the
+// registers do not share a clock, or a stored value cannot be reproduced.
+// Everything else that gives out is this pass's walk, its type lists or its
+// widths, and says so.
+//
+// A reason that ends in another reason - the -all-fanouts sibling, the forward
+// read-whole fallback - inherits the inner marker by quoting it, so those
+// carry no marker of their own, and neither does a final no.
+//
+// Passed as the last argument of the reason rather than pasted into the format
+// string, so the literal a reader sees is the sentence and the marker is one
+// named thing rather than three spellings of it.
+namespace mark {
+	// A move exists and needs no cells beyond the register: a gap in this
+	// pass, such as a cell type missing from its lists or a width it does
+	// not resize.
+	constexpr const char *unsupported = " (unsupported)";
+	// A move exists but has to build logic or add a register, such as
+	// pushing an async load through a cell, or forcing cycle 0 where a
+	// stored value has no preimage.
+	constexpr const char *extra_logic = " (unsupported, needs extra logic)";
+	// The two cells do not name a move at all, so there is nothing to
+	// judge. Not a statement about retiming.
+	constexpr const char *invalid = " (invalid request)";
+	// The move is well-formed and no version of it preserves behaviour.
+	// The only "no" that is final, so it is the one that says nothing.
+	constexpr const char *none = "";
+}
+
 bool is_buf(Cell *cell)
 {
 	return cell->type.in(ID($buf), ID($_BUF_));
@@ -156,8 +191,21 @@ struct PortBit {
 // same way, and differ only in where the operands' copies are read from.
 enum class FoldKind { Init, Srst, Arst, Aload };
 
+// Why two registers cannot merge, and what kind of no that is. The two travel
+// together because the marker belongs to the reason rather than to the caller:
+// one sentence covers every control-set difference, and whether that is a wall
+// or a gap is decided where the difference is found and nowhere else.
+struct Mismatch {
+	// Null when the two registers can merge, so the whole answer reads as
+	// one condition like the plain reasons it sits beside.
+	const char *why = nullptr;
+	const char *marker = mark::none;
+
+	explicit operator bool() const { return why != nullptr; }
+};
+
 const char *unmovable_reason(FfData &ff);
-const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff);
+Mismatch mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff);
 bool describe_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		FfInitVals &initvals, FfData &ref, Cell *named,
 		Cell *cell, IdString port, const SigSpec &path_sig,
@@ -171,7 +219,8 @@ pool<SigBit> wire_bits(const SigSpec &sig)
 	pool<SigBit> bits;
 	for (auto bit : sig) {
 		if (!bit.is_wire())
-			refuse("Retiming signal %s contains a constant bit.\n", log_signal(sig));
+			refuse("Retiming signal %s contains a constant bit%s.\n",
+					log_signal(sig), mark::invalid);
 		bits.insert(bit);
 	}
 	return bits;
@@ -418,22 +467,23 @@ bool classify_off_path_bit(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 	// port and somewhere else; refuse rather than merge the flop with itself.
 	if (drv == named) {
 		if (error)
-			refuse("Input %s of cell %s is only partly driven by flop %s.\n",
-					log_id(port), log_id(cell), log_id(named));
+			refuse("Input %s of cell %s is only partly driven by flop %s%s.\n",
+					log_id(port), log_id(cell), log_id(named), mark::unsupported);
 		return false;
 	}
 
 	FfData ff(&initvals, drv);
-	if (const char *why = mismatch_reason(sigmap, ref, ff)) {
+	if (Mismatch bad = mismatch_reason(sigmap, ref, ff)) {
 		if (error)
-			refuse("Flop %s on input %s of cell %s has %s flop %s.\n",
-					log_id(drv), log_id(port), log_id(cell), why, log_id(named));
+			refuse("Flop %s on input %s of cell %s has %s flop %s%s.\n",
+					log_id(drv), log_id(port), log_id(cell), bad.why,
+					log_id(named), bad.marker);
 		return false;
 	}
 	if (const char *why = unmovable_reason(ff)) {
 		if (error)
-			refuse("Flop %s on input %s of cell %s cannot be merged because %s.\n",
-					log_id(drv), log_id(port), log_id(cell), why);
+			refuse("Flop %s on input %s of cell %s cannot be merged because %s%s.\n",
+					log_id(drv), log_id(port), log_id(cell), why, mark::extra_logic);
 		return false;
 	}
 	desc.push_back({PortBit::Flop, 0, drv, it->second.offset, State::S0});
@@ -551,9 +601,12 @@ Cell *next_on_path(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &d
 			found = hop.cell;
 			port = hop.port;
 		}
+	// Reconvergence is a limit of walking a single chain, not of the move: a
+	// register crossing a whole cone at once is the same identity, and is
+	// valid whenever the cone's other inputs are registered or constant.
 	if (hits > 1)
-		refuse("Cut %s is reachable from flop %s on more than one path.\n",
-				log_id(cut), log_id(named));
+		refuse("Cut %s is reachable from flop %s on more than one path%s.\n",
+				log_id(cut), log_id(named), mark::unsupported);
 	if (hits == 0) {
 		port = IdString();
 		return nullptr;
@@ -594,11 +647,12 @@ Cell *next_on_path(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &d
 		// a control -- or none of them with the cut behind it.
 		if (GetSize(cells) > 1)
 			refuse("Y of cell %s is read by %d cells, so the after-path of flop "
-					"%s ends there and never reaches cut %s.\n",
-					log_id(end), GetSize(cells), log_id(flop), log_id(cut));
+					"%s ends there and never reaches cut %s%s.\n",
+					log_id(end), GetSize(cells), log_id(flop), log_id(cut),
+					mark::unsupported);
 	}
-	refuse("The after-path of flop %s ends at cell %s and never reaches cut %s.\n",
-			log_id(flop), log_id(end), log_id(cut));
+	refuse("The after-path of flop %s ends at cell %s and never reaches cut %s%s.\n",
+			log_id(flop), log_id(end), log_id(cut), mark::invalid);
 }
 
 Const stored_bit(FfInitVals &initvals, Cell *flop, int offset, FoldKind kind)
@@ -681,10 +735,11 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 	if (paths == 0 && GetSize(starts) == 1)
 		refuse_off_path(module, sigmap, drivers, initvals, ref, flop, cut, starts[0].cell);
 	if (paths == 0)
-		refuse("Cut %s is not on the after-path of flop %s.\n", log_id(cut), log_id(flop));
+		refuse("Cut %s is not on the after-path of flop %s%s.\n",
+				log_id(cut), log_id(flop), mark::invalid);
 	if (paths > 1)
-		refuse("Cut %s is reachable from flop %s on more than one path.\n",
-				log_id(cut), log_id(flop));
+		refuse("Cut %s is reachable from flop %s on more than one path%s.\n",
+				log_id(cut), log_id(flop), mark::unsupported);
 
 	seen.insert(first.cell);
 	chain.push_back(first);
@@ -700,7 +755,8 @@ std::vector<ChainStep> collect_chain(Module *module, SigMap &sigmap,
 			break;
 
 		if (seen.count(next))
-			refuse("Cycle on the after-path of flop %s.\n", log_id(flop));
+			refuse("Cycle on the after-path of flop %s%s.\n",
+					log_id(flop), mark::invalid);
 		seen.insert(next);
 		chain.push_back({next, port});
 		if (next == cut)
@@ -780,6 +836,10 @@ Const fold_value(Module *, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 			else
 				ok = describe_operand(sigmap, drivers, initvals, ref, flop, step.cell, port,
 						desc, true);
+			// No marker: an operand that is not registered cannot be folded by
+			// anyone. Delaying only the moving register's input changes what
+			// the cell computes, and the compensating move belongs to
+			// whatever drives this port.
 			if (!ok)
 				refuse("Input %s of cell %s is not on the after-path of flop %s.\n",
 						log_id(port), log_id(step.cell), log_id(flop));
@@ -794,11 +854,14 @@ Const fold_value(Module *, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 			out = CellTypes::eval(step.cell, args[0], args[1], &err);
 		else
 			out = CellTypes::eval(step.cell, args[0], Const(), &err);
+		// A missing constant evaluator, not a missing move: the cell is one
+		// the pass otherwise crosses, and only the cycle-0 arithmetic is
+		// unavailable.
 		if (err)
 			refuse("Flop %s has a %s value that opt_retime cannot fold through "
-					"cell %s, because it cannot evaluate %s on constants.\n",
+					"cell %s, because it cannot evaluate %s on constants%s.\n",
 					log_id(flop), fold_kind_name(kind), log_id(step.cell),
-					log_id(step.cell->type));
+					log_id(step.cell->type), mark::unsupported);
 		cur = out;
 		path = sigmap(step.cell->getPort(ID::Y));
 	}
@@ -838,9 +901,13 @@ bool fold_through(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &dr
 		}
 		path = sigmap(step.cell->getPort(ID::Y));
 	}
+	// Marked a gap rather than a wall: an undefined bit is a don't-care, so a
+	// per-bit fold has an answer here. It is the whole-word eval that gives
+	// back x and loses what the defined side said.
 	if (any && !all)
 		refuse("Flop %s cannot move because the move would fold %s values together "
-				"and only some of them are defined.\n", log_id(flop), fold_kind_name(kind));
+				"and only some of them are defined%s.\n",
+				log_id(flop), fold_kind_name(kind), mark::unsupported);
 	// Folded even when no copy was defined, because a constant operand can
 	// still pin the result on its own: x & 0 is 0 whatever the register held.
 	Const out = fold_value(module, sigmap, drivers, initvals, ref, flop, chain, kind, start);
@@ -915,8 +982,23 @@ struct StoredValues {
 	}
 };
 
-const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
+Mismatch mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
 {
+	// Every reason below says what a merge would have to reconcile, and the
+	// marker says whether anything could. Synchronous disagreements are not
+	// marked at all: the pass already moves those by lowering the controls,
+	// so the only way to see one is to have asked for the refusal with
+	// -no-lower-controls, and calling that a gap would be false.
+	//
+	// An async disagreement is a gap rather than a wall. When one operand
+	// resets and the other does not, the merged register has to come up
+	// holding f(RSTVAL, other), and "other" is a runtime value, so the value
+	// is combinational logic instead of a constant. Buildable, just not built.
+	//
+	// Each answer names its own marker, and the ones that leave it out are
+	// the final noes, so reading a single return tells you what kind of no
+	// it is without tracing how the function got there.
+
 	// Compared as a set of controls rather than by cell type, because the
 	// single-bit cells spell their reset value into the type name and that
 	// value is exactly what a fold is allowed to change: $_SDFF_PP0_ and
@@ -924,27 +1006,42 @@ const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
 	if (ff.has_clk != ref.has_clk || ff.has_ce != ref.has_ce ||
 			ff.has_srst != ref.has_srst || ff.has_arst != ref.has_arst ||
 			ff.has_aload != ref.has_aload || ff.has_sr != ref.has_sr ||
-			ff.is_fine != ref.is_fine)
-		return "a different set of controls than";
+			ff.is_fine != ref.is_fine) {
+		// One sentence covers every shape of control-set difference, so the
+		// marker is what tells them apart. A register with no clock at all is
+		// not a register this move can reason about; an async control or a
+		// set/reset one side has and the other does not is logic nobody built;
+		// a synchronous one is lowered; and a fine cell differing from a word
+		// one is only a cell type.
+		const char *why = "a different set of controls than";
+		if (ff.has_clk != ref.has_clk)
+			return {why};
+		if (ff.has_arst != ref.has_arst || ff.has_aload != ref.has_aload ||
+				ff.has_sr != ref.has_sr)
+			return {why, mark::extra_logic};
+		if (ff.has_ce != ref.has_ce || ff.has_srst != ref.has_srst)
+			return {why};
+		return {why, mark::unsupported};
+	}
 	// The net and the polarity are reported separately throughout, because
 	// they look nothing alike to someone reading a netlist. A different net
 	// is visible in a picture; a polarity lives in a parameter and draws
 	// identically, so saying only "a different enable" of two registers
 	// sharing one enable net reads as a contradiction of what is on screen.
 	if (!ff.has_clk)
-		return "no clock to share with";
+		return {"no clock to share with"};
 	if (sigmap(ff.sig_clk) != sigmap(ref.sig_clk))
-		return "a different clock net than";
+		return {"a different clock net than"};
 	if (ff.pol_clk != ref.pol_clk)
-		return "a clock of the opposite edge to";
+		return {"a clock of the opposite edge to"};
 	// Enables must agree exactly across everything a move merges. One register
 	// holding while another updates feeds the cut a mix of old and new inputs,
 	// and the single register left behind has no way to reproduce that.
 	if (ff.has_ce) {
 		if (sigmap(ff.sig_ce) != sigmap(ref.sig_ce))
-			return "a different enable net than";
+			return {"a different enable net than"};
 		if (ff.pol_ce != ref.pol_ce)
-			return "an enable of the opposite polarity to";
+			return {"an enable of the opposite polarity to"};
 	}
 	// Resets have to agree on when they fire, for the same reason enables do,
 	// but deliberately not on what they load: the values are folded together
@@ -952,9 +1049,9 @@ const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
 	// values on the same net merge into one resetting to f of both.
 	if (ff.has_srst) {
 		if (sigmap(ff.sig_srst) != sigmap(ref.sig_srst))
-			return "a different sync reset net than";
+			return {"a different sync reset net than"};
 		if (ff.pol_srst != ref.pol_srst)
-			return "a sync reset of the opposite polarity to";
+			return {"a sync reset of the opposite polarity to"};
 	}
 	// $sdffe and $sdffce carry the same set of controls on the same nets and
 	// differ only in whether an inactive enable suppresses the reset, so the
@@ -962,22 +1059,24 @@ const char *mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
 	// the survivor one register's answer to "does this reset while held" and
 	// silently give the other register's bits the same one.
 	if (ff.has_ce && ff.has_srst && ff.ce_over_srst != ref.ce_over_srst)
-		return "a different priority between enable and sync reset than";
+		return {"a different priority between enable and sync reset than"};
 	if (ff.has_arst) {
 		if (sigmap(ff.sig_arst) != sigmap(ref.sig_arst))
-			return "a different async reset net than";
+			return {"a different async reset net than", mark::extra_logic};
 		if (ff.pol_arst != ref.pol_arst)
-			return "an async reset of the opposite polarity to";
+			return {"an async reset of the opposite polarity to",
+					mark::extra_logic};
 	}
 	if (ff.has_aload) {
 		if (sigmap(ff.sig_aload) != sigmap(ref.sig_aload))
-			return "a different async load net than";
+			return {"a different async load net than", mark::extra_logic};
 		if (ff.pol_aload != ref.pol_aload)
-			return "an async load of the opposite polarity to";
+			return {"an async load of the opposite polarity to",
+					mark::extra_logic};
 	}
 	// Widths are deliberately not compared: a $mux merges a 1-bit select
 	// register with its wide data registers.
-	return nullptr;
+	return {};
 }
 
 // A forward move across a multi-input cell folds every other data input into
@@ -1020,7 +1119,8 @@ void check_controls(FfData &ff, SigMap &sigmap, const pool<SigBit> &forbidden)
 {
 	auto check = [&](const SigSpec &sig, const char *what) {
 		if (touches(sigmap, forbidden, sig))
-			refuse("Flop %s control %s uses a data wire being retimed.\n", log_id(ff.cell), what);
+			refuse("Flop %s control %s uses a data wire being retimed%s.\n",
+					log_id(ff.cell), what, mark::unsupported);
 	};
 	if (ff.has_clk)
 		check(ff.sig_clk, "CLK");
@@ -1170,7 +1270,8 @@ IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 	}
 	if (live == 0)
 		refuse("Every data input of cell %s is constant, so flop %s has "
-				"nothing to slide onto.\n", log_id(cell), log_id(flop));
+				"nothing to slide onto%s.\n",
+				log_id(cell), log_id(flop), mark::invalid);
 	// An input that is already registered is not stacking, because the move
 	// does not leave a register behind on it: the flop slides off the net it
 	// was on, and whatever registered the input is then the only register on
@@ -1189,8 +1290,8 @@ IdString backward_path_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		path = select;
 	if (path == IdString())
 		refuse("Input %s of cell %s is only partly a wire, so flop %s "
-				"cannot move backward onto it.\n",
-				log_id(first_mixed), log_id(cell), log_id(flop));
+				"cannot move backward onto it%s.\n",
+				log_id(first_mixed), log_id(cell), log_id(flop), mark::unsupported);
 	return path;
 }
 
@@ -1289,16 +1390,16 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 				return Const(bit, 1);
 		}
 		refuse("Cell %s has no input on %s that produces %s, so a "
-				"backward move has no stored value to leave behind.\n",
-				log_id(cell), log_id(path_port), log_signal(y));
+				"backward move has no stored value to leave behind%s.\n",
+				log_id(cell), log_id(path_port), log_signal(y), mark::extra_logic);
 	}
 
 	int len = GetSize(cell->getPort(path_port));
 	if (GetSize(cell->getPort(ID::Y)) != len)
 		refuse("Cell %s has Y width %d and path port %s width %d; a "
-				"backward move cannot invert a width change yet.\n",
+				"backward move cannot invert a width change%s.\n",
 				log_id(cell), GetSize(cell->getPort(ID::Y)),
-				log_id(path_port), len);
+				log_id(path_port), len, mark::unsupported);
 	if (is_buf(cell))
 		return y;
 
@@ -1323,8 +1424,8 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 	else if (cell->type.in(ID($and), ID($or), ID($mux)))
 		x = y;
 	else
-		refuse("Cell %s has type %s, which opt_retime cannot invert yet.\n",
-				log_id(cell), log_id(cell->type));
+		refuse("Cell %s has type %s, which opt_retime cannot invert%s.\n",
+				log_id(cell), log_id(cell->type), mark::unsupported);
 
 	// Running the cell forward on the candidate is the whole argument that a
 	// lossy type is safe here, and it catches a mask or an x bit that leaves y
@@ -1339,10 +1440,14 @@ Const invert_step(Cell *cell, IdString path_port, Const y,
 	else
 		back = path_port == ID::A ? CellTypes::eval(cell, x, other, &err)
 				: CellTypes::eval(cell, other, x, &err);
+	// A preimage that does not exist is not the end of it: a first-cycle flag
+	// and a mux on the output reproduce cycle 0 whatever the register holds.
+	// That costs a register and a mux, which is why the move is declined
+	// rather than made, but it is a move.
 	if (err || back != y)
 		refuse("Cell %s has no input on %s that produces %s, so a "
-				"backward move has no stored value to leave behind.\n",
-				log_id(cell), log_id(path_port), log_signal(y));
+				"backward move has no stored value to leave behind%s.\n",
+				log_id(cell), log_id(path_port), log_signal(y), mark::extra_logic);
 	return x;
 }
 
@@ -1395,8 +1500,8 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 	SigSpec cur = sigmap(start);
 	Cell *first = unique_y_driver(drivers, sigmap, cur);
 	if (first == nullptr)
-		refuse("The before-path of flop %s is not a unique cell Y at %s.\n",
-				log_id(flop), log_signal(cur));
+		refuse("The before-path of flop %s is not a unique cell Y at %s%s.\n",
+				log_id(flop), log_signal(cur), mark::invalid);
 
 	// parent[cell] is the hop whose named port is driven by cell's Y, and the
 	// seed has none: it drives start. Breadth-first so the reconstructed path
@@ -1423,8 +1528,8 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 		}
 	}
 	if (!how.count(cut))
-		refuse("Cut %s is not on the before-path of flop %s.\n",
-				log_id(cut), log_id(flop));
+		refuse("Cut %s is not on the before-path of flop %s%s.\n",
+				log_id(cut), log_id(flop), mark::invalid);
 
 	std::vector<Cell *> path;
 	for (Cell *cell = cut; cell != nullptr; cell = how.at(cell).parent)
@@ -1450,11 +1555,11 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 	if (land < 0) {
 		if (path[0] == cut && !is_invertible_backward(cut))
 			refuse("Cut cell %s has type %s, which opt_retime cannot move "
-					"backward across yet.\n",
-					log_id(cut), log_id(cut->type));
+					"backward across%s.\n",
+					log_id(cut), log_id(cut->type), mark::unsupported);
 		refuse("Cut %s is on the before-path of flop %s but is not a legal "
 				"landing, and no invertible same-width cell on the path to it "
-				"is either.\n", log_id(cut), log_id(flop));
+				"is either%s.\n", log_id(cut), log_id(flop), mark::unsupported);
 	}
 	path.resize(land + 1);
 
@@ -1479,8 +1584,8 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 		for (auto &rd : others)
 			if (rd.cell == flop)
 				refuse("Flop %s reads Y of cell %s on port %s as well as on its "
-						"before-path, so it cannot move backward across it.\n",
-						log_id(flop), log_id(cell), log_id(rd.port));
+						"before-path, so it cannot move backward across it%s.\n",
+						log_id(flop), log_id(cell), log_id(rd.port), mark::unsupported);
 
 		chain.push_back({cell, path_port});
 		extra.push_back({others, drives_output});
@@ -1503,14 +1608,19 @@ void check_chain(FfData &ff, Cell *flop, const std::vector<ChainStep> &chain)
 {
 	for (auto &step : chain)
 		if (!step.cell->hasPort(ID::Y))
-			refuse("Cell %s is missing port Y.\n", log_id(step.cell));
+			refuse("Cell %s is missing port Y%s.\n", log_id(step.cell), mark::invalid);
 
+	// Pushing one of these through the cell means computing f of a net rather
+	// than folding a constant: the moved register would async-load f(AD) off a
+	// copy of the chain, and a set/reset would need a cell type with an AD
+	// port to load it into. Logic nobody built, rather than a value that
+	// cannot exist.
 	for (auto &step : chain)
 		if (!is_buf(step.cell))
 			if (const char *why = unmovable_reason(ff))
 				refuse("Flop %s cannot move across cell %s because %s, which the "
-						"move would have to push through the cell.\n",
-						log_id(flop), log_id(step.cell), why);
+						"move would have to push through the cell%s.\n",
+						log_id(flop), log_id(step.cell), why, mark::extra_logic);
 }
 
 // Which bits of flop are the register the caller meant. A wide cell can be
@@ -1576,11 +1686,11 @@ std::vector<int> slice_for_cut(Module *module, SigMap &sigmap,
 		return found;
 	if (reaching == 0)
 		refuse("Flop %s is %d registers sharing one cell, and the before-path of "
-				"none of them reaches cut %s.\n",
-				log_id(flop), GetSize(runs), log_id(cut));
+				"none of them reaches cut %s%s.\n",
+				log_id(flop), GetSize(runs), log_id(cut), mark::invalid);
 	refuse("Flop %s is %d registers sharing one cell and %d of them reach cut %s, "
-			"so opt_retime cannot tell which one to move.\n",
-			log_id(flop), GetSize(runs), reaching, log_id(cut));
+			"so opt_retime cannot tell which one to move%s.\n",
+			log_id(flop), GetSize(runs), reaching, log_id(cut), mark::invalid);
 }
 
 // The same question looking forward, and the same answer: which bits of the
@@ -1693,13 +1803,15 @@ std::vector<int> slice_forward_for_cut(Module *module, SigMap &sigmap,
 	// caller actually named is the whole of it, so its own answer is carried
 	// out rather than replaced: it is the one that knows about an unregistered
 	// operand or a path that gives out, which being split apart cannot explain.
+	// No marker of its own: the quoted reason is the register's own answer and
+	// brings its marker with it.
 	if (reaching == 0)
 		refuse("Flop %s is %d registers sharing one cell, none of which reaches "
 				"cut %s on its own, and read whole: %s",
 				log_id(flop), GetSize(runs), log_id(cut), whole.c_str());
 	refuse("Flop %s is %d registers sharing one cell and %d of them reach cut %s, "
-			"so opt_retime cannot tell which one to move.\n",
-			log_id(flop), GetSize(runs), reaching, log_id(cut));
+			"so opt_retime cannot tell which one to move%s.\n",
+			log_id(flop), GetSize(runs), reaching, log_id(cut), mark::invalid);
 }
 
 // The bits of a width-wide register that keep is not taking.
@@ -1725,8 +1837,8 @@ void refuse_if_shared(Cell *flop, const char *what)
 	int pieces = GetSize(flop->getPort(ID::D).chunks());
 	if (pieces > 1)
 		refuse("Flop %s is %d registers sharing one cell, which opt_retime can "
-				"take apart for a plain -backward move but not for %s yet.\n",
-				log_id(flop), pieces, what);
+				"take apart for a plain -backward move but not for %s%s.\n",
+				log_id(flop), pieces, what, mark::unsupported);
 }
 
 // dry_run asks the question and skips the answer: every refusal this move can
@@ -1736,19 +1848,22 @@ void refuse_if_shared(Cell *flop, const char *what)
 void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = false)
 {
 	if (!flop->is_builtin_ff())
-		refuse("Cell %s is not a built-in flip-flop.\n", log_id(flop));
+		refuse("Cell %s is not a built-in flip-flop%s.\n", log_id(flop), mark::invalid);
+	// A type list, not a law: the identity holds for any pure cell, and this
+	// pass runs on word-level IR, before splitcells.
 	if (data_inputs(cut).empty())
-		refuse("Cut cell %s has type %s, which opt_retime cannot move across yet.\n",
-				log_id(cut), log_id(cut->type));
+		refuse("Cut cell %s has type %s, which opt_retime cannot move across%s.\n",
+				log_id(cut), log_id(cut->type), mark::unsupported);
 	if (flop == cut)
-		refuse("Flop and cut must be different cells.\n");
+		refuse("Flop and cut must be different cells%s.\n", mark::invalid);
 
 	SigMap sigmap(module);
 	FfInitVals initvals(&sigmap, module);
 
 	FfData whole(&initvals, flop);
 	if (!whole.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
-		refuse("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
+		refuse("Cell %s is not a clocked flop with D and Q%s.\n",
+				log_id(flop), mark::invalid);
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
 
@@ -1771,8 +1886,8 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 	check_chain(ff, flop, chain);
 
 	if (chain.empty())
-		refuse("Cut %s is not on the before-path of flop %s.\n",
-				log_id(cut), log_id(flop));
+		refuse("Cut %s is not on the before-path of flop %s%s.\n",
+				log_id(cut), log_id(flop), mark::invalid);
 	// The named cut can sit on a select, or be a 1-bit cell driving one. The
 	// chain then ends at the last cell the flop can actually slide onto, and
 	// the rest of the move names that cell so clones and the path port match
@@ -1797,9 +1912,8 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 		for (auto &rd : extra[i].readers)
 			if (chain_cells.count(rd.cell))
 				refuse("Cell %s is on the before-path of flop %s and also reads "
-						"Y of %s off it, which opt_retime cannot duplicate "
-						"yet.\n", log_id(rd.cell), log_id(flop),
-						log_id(chain[i].cell));
+						"Y of %s off it, which opt_retime cannot duplicate%s.\n", log_id(rd.cell), log_id(flop),
+						log_id(chain[i].cell), mark::unsupported);
 		if (!extra[i].empty() && i < dup_from)
 			dup_from = i;
 	}
@@ -1834,8 +1948,9 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 	bool select_landing = cut->type == ID($mux) && path_port == ID::S;
 	if (GetSize(path_in) != GetSize(q) && !select_landing)
 		refuse("Backward move across %s would resize flop %s from %d to %d "
-				"bits, which is not supported yet.\n",
-				log_id(cut), log_id(flop), GetSize(q), GetSize(path_in));
+				"bits%s.\n",
+				log_id(cut), log_id(flop), GetSize(q), GetSize(path_in),
+				mark::unsupported);
 
 	// A $mux select is one bit while the flop is WIDTH, so that one clone is
 	// allowed to come out narrower than the flop. FfData carries the width per
@@ -1853,10 +1968,9 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 			if (cell->type == ID($mux) && port == ID::S && n == 1)
 				continue;
 			refuse("Backward move across %s would clone flop %s onto "
-					"input %s of %s of width %d, from %d bits, which is "
-					"not supported yet.\n",
+					"input %s of %s of width %d, from %d bits%s.\n",
 					log_id(cut), log_id(flop), log_id(port),
-					log_id(cell), n, GetSize(q));
+					log_id(cell), n, GetSize(q), mark::unsupported);
 		}
 
 	// A path input or a clone that reads the flop's own Q used to be refused as
@@ -1899,8 +2013,8 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 			return false;
 		if (!start.is_fully_def())
 			refuse("Flop %s cannot move because its %s value is only partly "
-					"defined, so the inverse fold would be ambiguous.\n",
-					log_id(flop), fold_kind_name(kind));
+					"defined, so the inverse fold would be ambiguous%s.\n",
+					log_id(flop), fold_kind_name(kind), mark::unsupported);
 		Const cur = start;
 		for (int i = 0; i < GetSize(chain); i++) {
 			hop_stored[i][kind] = cur;
@@ -2155,14 +2269,14 @@ Cell *cut_on_route(Module *module, Cell *flop, const std::vector<IdString> &rout
 		IdString y_port;
 		cell = unique_full_driver(drivers, sigmap, cur, y_port);
 		if (cell == nullptr || y_port != ID::Y)
-			refuse("The before-path of flop %s is not a unique cell Y at %s.\n",
-					log_id(flop), log_signal(cur));
+			refuse("The before-path of flop %s is not a unique cell Y at %s%s.\n",
+					log_id(flop), log_signal(cur), mark::invalid);
 		if (i == GetSize(route))
 			break;
 		if (!cell->hasPort(route[i]))
 			refuse("Cell %s on the before-path of flop %s has no port %s, so it "
-					"is not a copy of the chain the move crossed.\n",
-					log_id(cell), log_id(flop), log_id(route[i]));
+					"is not a copy of the chain the move crossed%s.\n",
+					log_id(cell), log_id(flop), log_id(route[i]), mark::invalid);
 		cur = sigmap(cell->getPort(route[i]));
 	}
 	return cell;
@@ -2176,7 +2290,7 @@ Cell *cut_on_route(Module *module, Cell *flop, const std::vector<IdString> &rout
 void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
 {
 	if (!flop->is_builtin_ff() || !flop->hasPort(ID::D))
-		refuse("Cell %s is not a built-in flip-flop.\n", log_id(flop));
+		refuse("Cell %s is not a built-in flip-flop%s.\n", log_id(flop), mark::invalid);
 
 	SigMap sigmap(module);
 
@@ -2210,6 +2324,8 @@ void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
 		try {
 			apply_backward_move(module, cell, cut, true);
 		} catch (const MoveRefused &refused) {
+			// No marker of its own: the sibling's reason is quoted whole and
+			// its marker is what this batch is refused on.
 			refuse("-all-fanouts would have to move register %s, which captures "
 					"the same net as flop %s, and cannot: %s",
 					log_id(cell), log_id(flop), refused.reason.c_str());
@@ -2343,12 +2459,12 @@ bool lower_path_controls(Module *module, Cell *flop, Cell *cut)
 void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 {
 	if (!flop->is_builtin_ff())
-		refuse("Cell %s is not a built-in flip-flop.\n", log_id(flop));
+		refuse("Cell %s is not a built-in flip-flop%s.\n", log_id(flop), mark::invalid);
 	if (data_inputs(cut).empty())
-		refuse("Cut cell %s has type %s, which opt_retime cannot move across yet.\n",
-				log_id(cut), log_id(cut->type));
+		refuse("Cut cell %s has type %s, which opt_retime cannot move across%s.\n",
+				log_id(cut), log_id(cut->type), mark::unsupported);
 	if (flop == cut)
-		refuse("Flop and cut must be different cells.\n");
+		refuse("Flop and cut must be different cells%s.\n", mark::invalid);
 
 	// A shared cell whose D arrives in several pieces has no unique cell behind
 	// any of them, so a forward move of one run would leave the rest reading a
@@ -2361,7 +2477,8 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 
 	FfData whole(&initvals, flop);
 	if (!whole.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
-		refuse("Cell %s is not a clocked flop with D and Q.\n", log_id(flop));
+		refuse("Cell %s is not a clocked flop with D and Q%s.\n",
+				log_id(flop), mark::invalid);
 
 	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
 
@@ -2418,8 +2535,8 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	if (peel && signal_reaches(module, sigmap, map_y, map_d))
 		refuse("Flop %s cannot move across %s: other readers need a copy left "
 				"behind, but the flop's D depends on the cut, so that copy would "
-				"not keep its original input.\n",
-				log_id(flop), log_id(cut));
+				"not keep its original input%s.\n",
+				log_id(flop), log_id(cut), mark::unsupported);
 
 	std::vector<Merge> merges = collect_merges(module, sigmap, drivers, initvals, flop, ff, chain);
 
@@ -2466,9 +2583,13 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	// different size has nowhere to put the result. The natural place for this
 	// is the resize below, but by then a peeled copy has been added to the
 	// module, and a refusal has no way to take it back out.
+	//
+	// Marked a gap, because the move itself is fine and only the cell type is
+	// in the way: emitting a word-level $dff instead of the fine cell is the
+	// step nobody wrote.
 	if (GetSize(y) != GetSize(q) && ff.is_fine)
-		refuse("Flop %s is a single-bit cell and cannot widen to %d bits.\n",
-				log_id(flop), GetSize(y));
+		refuse("Flop %s is a single-bit cell and cannot widen to %d bits%s.\n",
+				log_id(flop), GetSize(y), mark::unsupported);
 	// The registers left on the way have the same problem, at the width of the
 	// hop they sit on rather than of the cut.
 	if (ff.is_fine)
@@ -2479,7 +2600,8 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 			if (n != 1)
 				refuse("Flop %s is a single-bit cell, so it cannot leave a %d-bit "
 						"register on Y of cell %s for the readers off the "
-						"after-path.\n", log_id(flop), n, log_id(chain[i].cell));
+						"after-path%s.\n",
+						log_id(flop), n, log_id(chain[i].cell), mark::unsupported);
 		}
 
 	// The register keeps its name, so the caller can still find the flop it
@@ -2745,9 +2867,11 @@ struct OptRetimePass : public Pass {
 		log("        picks what it used to hold, and any live data port gets a\n");
 		log("        clone starting at that same value.\n");
 		log("        The moved flop feeds the cut, so its init has to be a\n");
-		log("        cut-input that yields the old Q. Types with no such input\n");
-		log("        ($mul of an even constant by an odd stored value), or that\n");
-		log("        also change width ($eq, $reduce_*), cannot.\n");
+		log("        cut-input that yields the old Q. A type with no such input\n");
+		log("        ($mul of an even constant by an odd stored value) would\n");
+		log("        need logic to force cycle 0, which is not built. Types\n");
+		log("        that also change width ($eq, $reduce_*) have such an input\n");
+		log("        but no inverse written for them.\n");
 		log("\n");
 		log("    -all-fanouts\n");
 		log("        with -backward, move every register capturing the same net.\n");
@@ -2769,7 +2893,31 @@ struct OptRetimePass : public Pass {
 		log("The selection is where the two named cells are looked up, and both\n");
 		log("have to be in it. The cells between them travel with the move.\n");
 		log("\n");
-		log("A refused move is reported and leaves the design unchanged.\n");
+		log("A refused move is reported and leaves the design unchanged. The\n");
+		log("reason ends in a marker saying what kind of no it is, so a caller\n");
+		log("picking moves can sort them without reading the sentence:\n");
+		log("\n");
+		log("    (unsupported)\n");
+		log("        a move exists and needs no cells beyond the register.\n");
+		log("        A gap in this pass, such as a cell type with no entry in\n");
+		log("        its lists or a width it does not resize.\n");
+		log("\n");
+		log("    (unsupported, needs extra logic)\n");
+		log("        a move exists but has to build logic or add a register,\n");
+		log("        such as pushing an async load through a cell or forcing\n");
+		log("        cycle 0 where a stored value has no preimage.\n");
+		log("\n");
+		log("    (invalid request)\n");
+		log("        the two cells do not name a move at all, so there is\n");
+		log("        nothing to judge. Not a statement about retiming.\n");
+		log("\n");
+		log("    no marker\n");
+		log("        the move is well-formed and no version of it preserves\n");
+		log("        behaviour: an operand that is not registered, registers\n");
+		log("        that do not share a clock, a stored value that cannot be\n");
+		log("        reproduced. Also a move -no-lower-controls declined,\n");
+		log("        which the pass would otherwise have made.\n");
+		log("\n");
 		log("Scratchpad: opt_retime.moved, opt_retime.refusal (unset on\n");
 		log("success), and opt.did_something when a move is made.\n");
 		log("\n");

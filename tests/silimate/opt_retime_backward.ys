@@ -220,4 +220,4 @@ hierarchy -top backwide
 check -assert
 opt_retime -flop fq -cut a0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Backward move across a0 would resize flop fq from 9 to 8 bits, which is not supported yet."
+scratchpad -assert opt_retime.refusal "Backward move across a0 would resize flop fq from 9 to 8 bits (unsupported)."

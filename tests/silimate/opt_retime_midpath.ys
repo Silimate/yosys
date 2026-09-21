@@ -195,7 +195,7 @@ hierarchy -top twoport
 check -assert
 opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cut a0 is reachable from flop fa on more than one path."
+scratchpad -assert opt_retime.refusal "Cut a0 is reachable from flop fa on more than one path (unsupported)."
 select -assert-count 2 t:$dff
 select -assert-count 1 c:n1 %x:+[A] w:ra %i
 
@@ -218,6 +218,6 @@ hierarchy -top nohop
 check -assert
 opt_retime -flop fa -cut n2 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Y of cell n1 is read by 2 cells, so the after-path of flop fa ends there and never reaches cut n2."
+scratchpad -assert opt_retime.refusal "Y of cell n1 is read by 2 cells, so the after-path of flop fa ends there and never reaches cut n2 (unsupported)."
 select -assert-count 1 t:$dff
 select -assert-count 1 c:n1 %x:+[A] w:ra %i

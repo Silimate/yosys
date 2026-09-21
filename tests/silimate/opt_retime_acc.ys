@@ -19,4 +19,4 @@ select -assert-count 2 w:acc %co c:* %i
 select -assert-count 2 w:cnt %co c:* %i
 opt_retime -flop f_acc -cut a_acc -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop f_acc cannot move across a_acc: other readers need a copy left behind, but the flop's D depends on the cut, so that copy would not keep its original input."
+scratchpad -assert opt_retime.refusal "Flop f_acc cannot move across a_acc: other readers need a copy left behind, but the flop's D depends on the cut, so that copy would not keep its original input (unsupported)."

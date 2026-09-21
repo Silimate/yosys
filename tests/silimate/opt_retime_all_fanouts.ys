@@ -196,7 +196,7 @@ check -assert
 opt_retime -flop f1 -cut a0 -backward -all-fanouts
 check -assert
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "-all-fanouts would have to move register f2, which captures the same net as flop f1, and cannot: Flop f2 cannot move across cell a0 because it has a set/reset, which the move would have to push through the cell."
+scratchpad -assert opt_retime.refusal "-all-fanouts would have to move register f2, which captures the same net as flop f1, and cannot: Flop f2 cannot move across cell a0 because it has a set/reset, which the move would have to push through the cell (unsupported, needs extra logic)."
 # Untouched: one adder, both registers still reading it.
 select -assert-count 1 t:$add
 select -assert-count 1 t:$dffe
@@ -240,7 +240,7 @@ check -assert
 opt_retime -flop f1 -cut a0 -backward -all-fanouts
 check -assert
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "-all-fanouts would have to move register f2, which captures the same net as flop f1, and cannot: Flop f2 control EN uses a data wire being retimed."
+scratchpad -assert opt_retime.refusal "-all-fanouts would have to move register f2, which captures the same net as flop f1, and cannot: Flop f2 control EN uses a data wire being retimed (unsupported)."
 # Refused before the first move, so f1 did not go either.
 select -assert-count 1 t:$add
 select -assert-count 2 t:$dffe

@@ -327,7 +327,7 @@ setattr -set init 8'h0b w:q
 check -assert
 opt_retime -flop f -cut m0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cell m0 has no input on A that produces 8'00001011, so a backward move has no stored value to leave behind."
+scratchpad -assert opt_retime.refusal "Cell m0 has no input on A that produces 8'00001011, so a backward move has no stored value to leave behind (unsupported, needs extra logic)."
 
 # ---------------------------------------------------------------------------
 # $div used to sit here as a type left out of the allowlist; it is a forward
@@ -351,4 +351,4 @@ hierarchy -top gatecut
 check -assert
 opt_retime -flop fa -cut g0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cut cell g0 has type $_AND_, which opt_retime cannot move across yet."
+scratchpad -assert opt_retime.refusal "Cut cell g0 has type $_AND_, which opt_retime cannot move across (unsupported)."

@@ -35,7 +35,7 @@ check -assert
 # the other half is being able to tell, without reading the log
 scratchpad -assert opt_retime.moved false
 scratchpad -assert-set opt_retime.refusal
-scratchpad -assert opt_retime.refusal "Cut b3 is not on the before-path of flop f1."
+scratchpad -assert opt_retime.refusal "Cut b3 is not on the before-path of flop f1 (invalid request)."
 
 # nothing added, nothing removed, nothing rewired
 select -assert-count 3 t:$dff
@@ -140,7 +140,7 @@ check
 # leave the and-gate driving a net the register no longer reads.
 opt_retime -flop f1 -cut a0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "The before-path of flop f1 is not a unique cell Y at \sum."
+scratchpad -assert opt_retime.refusal "The before-path of flop f1 is not a unique cell Y at \sum (invalid request)."
 select -assert-count 1 t:$add
 select -assert-count 1 t:$and
 select -assert-count 1 t:$dffe

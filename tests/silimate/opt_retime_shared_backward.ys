@@ -245,7 +245,7 @@ check -assert
 opt_retime -flop fq -cut a0 -backward
 check -assert
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cell x0 is on the before-path of flop fq and also reads Y of a0 off it, which opt_retime cannot duplicate yet."
+scratchpad -assert opt_retime.refusal "Cell x0 is on the before-path of flop fq and also reads Y of a0 off it, which opt_retime cannot duplicate (unsupported)."
 # nothing duplicated, nothing cloned, nothing rewired
 select -assert-count 1 t:$add
 select -assert-count 1 t:$xor

@@ -222,7 +222,7 @@ check -assert
 
 opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different set of controls than flop fa."
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different set of controls than flop fa (unsupported, needs extra logic)."
 check -assert
 # the design as it was read: the enable was not lowered on the way to the no
 select -assert-count 1 t:$dffe
@@ -337,7 +337,7 @@ opt_retime -flop fa -cut a0 -backward
 check -assert
 # the backward reason, and not the enable mismatch a forward move reports
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cut a0 is not on the before-path of flop fa."
+scratchpad -assert opt_retime.refusal "Cut a0 is not on the before-path of flop fa (invalid request)."
 # nothing lowered on the way to the no: both enables still on their own cells
 select -assert-count 2 t:$dffe
 select -assert-count 0 t:$mux

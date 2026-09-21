@@ -201,7 +201,7 @@ hierarchy -top allconst
 check -assert
 opt_retime -flop f -cut a0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Every data input of cell a0 is constant, so flop f has nothing to slide onto."
+scratchpad -assert opt_retime.refusal "Every data input of cell a0 is constant, so flop f has nothing to slide onto (invalid request)."
 
 # ---------------------------------------------------------------------------
 # Mixed on every live port: nothing left that the register can slide onto.
@@ -219,4 +219,4 @@ hierarchy -top allmixed
 check -assert
 opt_retime -flop f -cut a0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Input A of cell a0 is only partly a wire, so flop f cannot move backward onto it."
+scratchpad -assert opt_retime.refusal "Input A of cell a0 is only partly a wire, so flop f cannot move backward onto it (unsupported)."

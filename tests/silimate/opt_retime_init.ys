@@ -255,7 +255,7 @@ hierarchy -top bufmixdef
 check -assert
 opt_retime -flop f -cut b0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop f cannot move because the move would fold init values together and only some of them are defined."
+scratchpad -assert opt_retime.refusal "Flop f cannot move because the move would fold init values together and only some of them are defined (unsupported)."
 design -reset
 log -pop
 
@@ -311,4 +311,4 @@ hierarchy -top aloadnet
 check -assert
 opt_retime -flop fa -cut n0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fa cannot move across cell n0 because it has an async load from a net, which the move would have to push through the cell."
+scratchpad -assert opt_retime.refusal "Flop fa cannot move across cell n0 because it has an async load from a net, which the move would have to push through the cell (unsupported, needs extra logic)."

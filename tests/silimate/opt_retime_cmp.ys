@@ -244,6 +244,6 @@ hierarchy -top mixinit
 check -assert
 opt_retime -flop fa -cut a0 -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fa cannot move because the move would fold init values together and only some of them are defined."
+scratchpad -assert opt_retime.refusal "Flop fa cannot move because the move would fold init values together and only some of them are defined (unsupported)."
 design -reset
 log -pop

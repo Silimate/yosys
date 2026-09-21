@@ -143,7 +143,7 @@ select -assert-count 3 t:$add
 # far drives a module output, not the register, so neither word can get to it
 opt_retime -flop r -cut far -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, and the before-path of none of them reaches cut far."
+scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, and the before-path of none of them reaches cut far (invalid request)."
 # A refusal is not allowed to take the cell apart on its way out: the slice is
 # a value and nothing is built from it until the last refusal is behind us.
 check -assert
@@ -175,7 +175,7 @@ select -assert-count 1 t:$dff
 # guessed at.
 opt_retime -flop r -cut shared -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell and 2 of them reach cut shared, so opt_retime cannot tell which one to move."
+scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell and 2 of them reach cut shared, so opt_retime cannot tell which one to move (invalid request)."
 check -assert
 select -assert-count 1 t:$dff
 design -reset
@@ -205,11 +205,11 @@ select -assert-count 1 t:$dff
 # places, so there is no cut to pick between them the way -backward has.
 opt_retime -flop r -cut after -forward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, which opt_retime can take apart for a plain -backward move but not for -forward yet."
+scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, which opt_retime can take apart for a plain -backward move but not for -forward (unsupported)."
 select -assert-count 1 t:$dff
 opt_retime -flop r -cut w0 -backward -all-fanouts
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, which opt_retime can take apart for a plain -backward move but not for -all-fanouts yet."
+scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, which opt_retime can take apart for a plain -backward move but not for -all-fanouts (unsupported)."
 check -assert
 select -assert-count 1 t:$dff
 design -reset

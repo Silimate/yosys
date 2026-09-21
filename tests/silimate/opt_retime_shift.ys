@@ -289,4 +289,4 @@ hierarchy -top signedshift
 check -assert
 opt_retime -flop fq -cut s0 -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cut cell s0 has type $sshr, which opt_retime cannot move backward across yet."
+scratchpad -assert opt_retime.refusal "Cut cell s0 has type $sshr, which opt_retime cannot move backward across (unsupported)."
