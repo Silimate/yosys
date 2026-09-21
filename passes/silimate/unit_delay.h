@@ -215,6 +215,13 @@ struct DelayTiming : NetlistIndex
 	// this to whatever else it refuses to reason through.
 	virtual bool is_start_point(RTLIL::Cell *cell) { return cell->is_builtin_ff(); }
 
+	// Arrival credited to a bit the walk has no driver for: a constant, an input
+	// port, or the output of a start point. Zero by default, which is what every
+	// caller assumed before this hook existed. A subclass that knows a module's
+	// ports arrive late (because it looked at the parent) overrides this, so the
+	// whole walk sees those arrivals rather than each guard patching its own.
+	virtual Delay start_arrival(RTLIL::SigBit) { return 0; }
+
 	// Every rewrite invalidates the cached levels, so the next guard rebuilds.
 	// Connectivity is separate: call build_connectivity() alongside this.
 	void reset_timing()
@@ -264,8 +271,10 @@ struct DelayTiming : NetlistIndex
 					continue;
 				for (auto &in_bit : sigmap(conn.second)) {
 					RTLIL::Cell *drv = driver_of(in_bit);
-					if (drv == nullptr)
-						continue; // start point, contributes 0
+					if (drv == nullptr) {
+						latest = std::max(latest, start_arrival(in_bit));
+						continue; // start point: 0 unless a subclass seeded it
+					}
 					auto it = cell_arrival.find(drv);
 					if (it != cell_arrival.end())
 						latest = std::max(latest, it->second);
@@ -287,7 +296,11 @@ struct DelayTiming : NetlistIndex
 		return cell_arrival.at(cell);
 	}
 
-	Delay arrival_bit(RTLIL::SigBit bit) { return arrival_of(driver_of(bit)); }
+	Delay arrival_bit(RTLIL::SigBit bit)
+	{
+		RTLIL::Cell *drv = driver_of(bit);
+		return drv == nullptr ? start_arrival(bit) : arrival_of(drv);
+	}
 
 	Delay arrival(const RTLIL::SigSpec &sig)
 	{
