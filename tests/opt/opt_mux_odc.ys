@@ -429,13 +429,13 @@ hierarchy -top miter
 sat -verify -prove trigger 0 miter
 log -pop
 
-# E4: one candidate feeding several arms on the same select. No fold is possible
-# -- a sibling mux is not in the target arm's cone, so exclusivity rejects every
-# pairing -- and that is what bounds the grouped forward walk: it shares one
-# `seen` budget across the whole select, which is only sound because a candidate
-# whose fold is acceptable reaches exactly one arm and so stays inside that
-# arm's cone. Guards against the shared budget ever suppressing a real fold.
-log -header "E4: candidate feeding several arms on one select (no fold)"
+# E4: one candidate feeding several arms on the same select. Under the other
+# select value every one of those muxes drives its opposite arm, so none of them
+# passes the candidate on and the fold is sound -- even though no single arm's
+# cone contains all three sites. Matching one mux at a time cannot see that; the
+# forward walk decides exclusivity over the whole select at once, which is
+# exactly what this case is here to pin down.
+log -header "E4: candidate feeding several arms on one select"
 log -push
 design -reset
 read_verilog -sv <<EOF
@@ -452,7 +452,94 @@ module top (input wire v, input wire [7:0] f, input wire [3:0] x,
 endmodule
 EOF
 prep -top top
+design -save gold_e4
+select -assert-min 1 t:$eq
+opt_mux_odc
+opt_clean
+select -assert-count 0 t:$eq
+log -pop
+
+log -header "E4m: output equivalence of the E4 fold"
+log -push
+design -load gold_e4
+rename top gate
+opt_mux_odc
+opt_clean
+design -save gate_e4
+design -load gold_e4
+design -copy-from gate_e4 -as gate gate
+miter -equiv -flatten top gate miter
+hierarchy -top miter
+sat -verify -prove trigger 0 miter
+log -pop
+
+# E5: the dual of E4. One of the sibling muxes on the select takes the candidate
+# on its *opposite* arm, so under the other select value that mux does pass it
+# on -- and straight to a port. The walk has to cross the mux rather than stop
+# at it, which is the only reason it sees the escape at all.
+log -header "E5: candidate on a sibling mux's opposite arm (no fold)"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input wire v, input wire [7:0] f, input wire [3:0] x,
+            input wire [3:0] byp, input wire [3:0] alt,
+            output wire [3:0] y, output wire [3:0] z);
+  wire h = v | (f == 8'd10) | (f == 8'd20);
+  wire [3:0] r = h ? (x + 4'd1) : (x + 4'd2);
+  assign y = v ? r : byp;
+  assign z = v ? alt : {3'b0, h};
+endmodule
+EOF
+prep -top top
 opt_mux_odc
 opt_clean
 select -assert-min 1 t:$eq
+log -pop
+
+# ============================================================================
+# Group F: the wires the rewrite may not touch, and the search limits
+# ============================================================================
+
+# F1: a `keep` wire is observable by construction, whatever the select does, so
+# the gate driving it must survive.
+log -header "F1: candidate drives a keep wire (no fold)"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input wire v, input wire [7:0] f, input wire [3:0] x,
+            input wire [3:0] byp, output wire [3:0] y);
+  (* keep *) wire hit = v | (f == 8'd10);
+  wire [3:0] res = hit ? (x + 4'd1) : (x + 4'd2);
+  assign y = v ? res : byp;
+endmodule
+EOF
+prep -top top
+opt_mux_odc
+opt_clean
+select -assert-min 1 t:$eq
+log -pop
+
+# F2: the per-module walk budget cuts the search short. It may only lose folds,
+# so the A1 shape -- which folds with the default budget -- must come through
+# untouched when the budget is too small to reach a verdict.
+log -header "F2: the walk budget skips candidates instead of mis-folding"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module top (input wire v, input wire [7:0] f, input wire [3:0] x,
+            input wire [3:0] byp, output wire [3:0] y);
+  wire hit = v | (f == 8'd10) | (f == 8'd20);
+  wire [3:0] res = hit ? (x + 4'd1) : (x + 4'd2);
+  assign y = v ? res : byp;
+endmodule
+EOF
+prep -top top
+design -save gold_f2
+opt_mux_odc -walk-budget 1
+opt_clean
+select -assert-min 1 t:$eq
+design -load gold_f2
+opt_mux_odc
+opt_clean
+select -assert-count 0 t:$eq
 log -pop
