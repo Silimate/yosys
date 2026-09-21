@@ -305,3 +305,63 @@ clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
 select -assert-count 1 t:$icg
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+# Lowering is a forward mechanism, and -no-lower-controls is rejected for
+# anything else, so the flag cannot be what keeps it out of a backward move:
+# asked backward, lowering is still switched on. The direction has to be
+# checked on its own, and the design below is where forgetting to shows. fa
+# moves forward across a0 by lowering, exactly as the first section of this
+# file does, while a0 is nowhere on its before-path, so a backward request has
+# one right answer and one tempting wrong one sitting next to it.
+log -header "Refused: a backward request is not answered with a forward move"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module bwdask(input clk, e1, e2, a, b, output q);
+  wire ra, rb, na;
+  $not #(.A_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0)) n0 (.A(a), .Y(na));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(e1), .D(na), .Q(ra));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(e2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+EOF
+hierarchy -top bwdask
+check -assert
+design -save orig
+
+opt_retime -flop fa -cut a0 -backward
+check -assert
+# the backward reason, and not the enable mismatch a forward move reports
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Cut a0 is not on the before-path of flop fa."
+# nothing lowered on the way to the no: both enables still on their own cells
+select -assert-count 2 t:$dffe
+select -assert-count 0 t:$mux
+select -assert-count 0 t:$dff
+
+# The refusal is not vacuous. Asked forward, this flop and cut do move, by
+# lowering, and that is the move the backward request must not be given.
+design -load orig
+opt_retime -flop fa -cut a0 -forward
+check -assert
+scratchpad -assert opt_retime.moved true
+select -assert-count 2 t:$mux
+select -assert-count 3 t:$dff
+
+# And backward still moves this same flop when the cut really is behind it, so
+# what the direction check refuses is the wrong answer rather than every one.
+design -load orig
+opt_retime -flop fa -cut n0 -backward
+check -assert
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+select -assert-count 2 t:$dffe
+select -assert-count 0 t:$mux
+select -assert-count 1 c:fa %x:+[D] w:a %i
+select -assert-count 1 c:n0 %x:+[Y] %co c:a0 %i
+design -reset
+log -pop

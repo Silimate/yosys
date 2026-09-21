@@ -2870,7 +2870,7 @@ struct OptRetimePass : public Pass {
 		// is rehearsed on a copy of the module and only repeated here once it
 		// has worked. The reason kept on failure is the one the plain move
 		// gave, since that is the move the caller asked for.
-		if (!refused.empty() && lower_controls) {
+		if (!refused.empty() && forward && lower_controls) {
 			IdString flop_name = flop_cell->name, cut_name = cut->name;
 			auto lowered_move = [&](Module *mod) {
 				return try_move([&] {
