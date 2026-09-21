@@ -123,11 +123,13 @@ struct OptMuxOdcWorker
 	// One per-module work limit, shared across the sweeps in run(): a step is a
 	// cell visited, a reader examined, a candidate tested, or -- from the second
 	// sweep on, since the first index is unavoidable -- a cell re-indexed. Every
-	// loop that can grow with the netlist charges it, so the pass cannot run
-	// longer than the limit allows however the design is shaped. Memory needs no
-	// separate limit: the memo, the DFS stack and the index are all bounded by
-	// the module's own cell and pin counts. Running out skips the candidates
-	// that are left, which can lose a fold but never change one.
+	// loop that can grow with the netlist both charges it and checks it as it
+	// goes, so a single high-fanout net or select cannot carry the search far
+	// past the limit. Memory needs no separate limit: the memo, the DFS stack
+	// and the index are all bounded by the module's own cell and pin counts.
+	// Running out skips the candidates that are left, which can lose a fold but
+	// never change one -- provided nothing is decided from the partial state a
+	// bail-out leaves behind, which is what scan_aborted and `indexed` are for.
 	int64_t walk_budget = 20000000;
 	int max_hier_depth = 16;
 	int skipped = 0;
@@ -198,12 +200,17 @@ struct OptMuxOdcWorker
 		std::vector<Cell *> readers;
 	};
 	CellScan scan;
+	// Set when a scan stopped early on the budget. Its reader list is then
+	// partial, and a missing reader is exactly what a wrong "gated" verdict
+	// would be built on, so the cell must be left without one.
+	bool scan_aborted = false;
 
 	void scan_cell(Cell *cell)
 	{
 		scan.observed = false;
 		scan.reaches = false;
 		scan.readers.clear();
+		scan_aborted = false;
 		for (auto &conn : cell->connections()) {
 			if (!cell->output(conn.first))
 				continue;
@@ -216,7 +223,12 @@ struct OptMuxOdcWorker
 					return;
 				}
 				for (auto reader : consumers.at(bit, no_cells)) {
-					walk_budget--;
+					// Checked per reader, not per cell: one high-fanout net
+					// would otherwise run the budget arbitrarily far past zero.
+					if (--walk_budget <= 0) {
+						scan_aborted = true;
+						return;
+					}
 					// A mux on this select that takes the bit only on the arm
 					// being specialized is driving its other arm under the
 					// other select value, so the difference stops here.
@@ -270,6 +282,8 @@ struct OptMuxOdcWorker
 			// them; the second one finds their verdicts in and combines.
 			bool expanding = open.insert(cell).second;
 			scan_cell(cell);
+			if (scan_aborted)
+				return OVER_BUDGET;
 			if (!scan.observed && expanding) {
 				bool pending = false;
 				for (auto reader : scan.readers)
@@ -380,10 +394,14 @@ struct OptMuxOdcWorker
 
 		dict<Cell *, bool> folds;
 		for (auto &sel_muxes : muxes_by_sel) {
+			// Nothing below is free, so an exhausted budget has to stop the
+			// scan here rather than at the next walk.
+			if (walk_budget <= 0)
+				break;
 			sel = sel_muxes.first;
 
 			// $mux drives B when S is 1 and A when S is 0.
-			for (int arm = 0; arm < 2; arm++) {
+			for (int arm = 0; arm < 2 && walk_budget > 0; arm++) {
 				IdString arm_port = arm ? ID::B : ID::A;
 				IdString other_port = arm ? ID::A : ID::B;
 				bool value = arm != 0;
@@ -391,9 +409,12 @@ struct OptMuxOdcWorker
 				// A cell can only be forced by the select if the select is one
 				// of its own inputs, so the candidates come straight off the
 				// index -- and if there are none, the arm costs nothing.
+				// A short candidate list is safe -- it only means fewer folds
+				// are considered -- so this one may stop where it stands.
 				std::vector<Cell *> candidates;
 				for (auto cand : consumers.at(sel, no_cells)) {
-					walk_budget--;
+					if (--walk_budget <= 0)
+						break;
 					// The walk spans the whole module, so a partial selection
 					// must not have its unselected cells rewritten.
 					if (selected.count(cand) && !folds.count(cand) &&
@@ -403,9 +424,18 @@ struct OptMuxOdcWorker
 				if (candidates.empty() || walk_budget <= 0)
 					continue;
 
+				// This index has to be complete before it is used: a missing
+				// entry in other_readers would let the walk stop at an arm that
+				// in fact takes the bit on both sides. So an exhausted budget
+				// abandons the arm rather than classifying against a partial one.
 				arm_readers.clear();
 				other_readers.clear();
+				bool indexed = true;
 				for (auto mux : sel_muxes.second) {
+					if (walk_budget <= 0) {
+						indexed = false;
+						break;
+					}
 					for (auto bit : sigmap(mux->getPort(arm_port))) {
 						walk_budget--;
 						arm_readers[bit].insert(mux);
@@ -414,6 +444,10 @@ struct OptMuxOdcWorker
 						walk_budget--;
 						other_readers[bit].insert(mux);
 					}
+				}
+				if (!indexed) {
+					skipped += GetSize(candidates);
+					continue;
 				}
 				memo.clear();
 
