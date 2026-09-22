@@ -88,3 +88,15 @@ select -assert-count 1 other/t:$and
 opt_hier -max_iter 0
 select -assert-none leaf/t:$and
 select -assert-count 1 other/t:$and
+design -reset
+
+# The cap is parsed strictly: 0 means no limit, so a malformed value must be an error
+# rather than read as 0.
+read_verilog <<EOT
+module top(input a, output y);
+	assign y = a;
+endmodule
+EOT
+hierarchy -top top
+logger -expect error "-max_iter expects a non-negative integer, got 'typo'" 1
+opt_hier -max_iter typo

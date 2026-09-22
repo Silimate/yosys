@@ -523,9 +523,14 @@ struct OptHierPass : Pass {
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-max_iter" && argidx + 1 < args.size()) {
-				max_iter = atoi(args[++argidx].c_str());
-				if (max_iter < 0)
-					log_cmd_error("-max_iter must not be negative\n");
+				// Parsed strictly: 0 means no limit, so a value atoi would read as 0
+				// ("-max_iter typo") must not quietly remove the cap.
+				const std::string &value = args[++argidx];
+				char *end = nullptr;
+				long parsed = strtol(value.c_str(), &end, 10);
+				if (value.empty() || *end != '\0' || parsed < 0 || parsed > INT_MAX)
+					log_cmd_error("-max_iter expects a non-negative integer, got '%s'.\n", value.c_str());
+				max_iter = int(parsed);
 				continue;
 			}
 			if (args[argidx] == "-full") {
