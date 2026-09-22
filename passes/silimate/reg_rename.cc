@@ -451,6 +451,61 @@ struct RegRenameInstance {
 		cell->set_string_attribute(ID(rtl_bind_status), rtl_bind_status_compress(words));
 	}
 
+	// Stamp a bind verdict on each inferred clock gate, from its enable.
+	//
+	// An ICG has no RTL object of its own to decode: it is synthesised from the gating logic,
+	// and its GCLK output is computed by resim rather than dumped, so no waveform can carry it.
+	// Its enable decides the verdict, and the question there is whether the enable is
+	// determined, not whether it was dumped under a name -- gating logic is internal, so an
+	// enable is rarely a dumped signal and would otherwise read as absent almost everywhere.
+	//
+	// So an enable counts when the waveform holds it, when a constant fixes it, or when logic
+	// inside this module drives it, since resim then computes it from a fanin the registers
+	// above have already bound. It is absent only when nothing determines it: an input port
+	// that no lookup resolved. Runs after process_registers so those Q wires already carry
+	// their dumped names.
+	void stamp_icgs(const dict<std::string, std::vector<DumpLeaf>> &objects, BindStats &stats)
+	{
+		pool<SigBit> driven; // filled on the first ICG, since most modules have none
+		bool have_driven = false;
+
+		for (auto cell : module->cells()) {
+			if (cell->type != ID($icg) || !cell->hasPort(ID::EN))
+				continue;
+			SigSpec en = cell->getPort(ID::EN);
+			std::vector<int> status(1, KIND_UNWIRED);
+			if (GetSize(en) != 1) {
+				note(stats, status, cell, 0, 1, KIND_UNWIRED);
+				stamp_status(stats, cell, status);
+				continue;
+			}
+			if (!have_driven) {
+				for (auto other : module->cells())
+					for (auto &conn : other->connections())
+						if (other->output(conn.first))
+							for (auto bit : conn.second)
+								driven.insert(bit);
+				for (auto &conn : module->connections())
+					for (auto bit : conn.first)
+						driven.insert(bit);
+				have_driven = true;
+			}
+
+			SigBit bit = en[0];
+			std::string name = bit.is_wire() ? RTLIL::unescape_id(bit.wire->name) : "";
+			bool bound = !bit.is_wire() || driven.count(bit) ||
+					bit.wire->has_attribute(ID(sim_src)) ||
+					bit.wire->has_attribute(ID(sim_const)) ||
+					objects.count(vcd_scope + "." + object_root(name));
+			note(stats, status, cell, 0, 1, bound ? KIND_BOUND : KIND_ABSENT,
+					bound ? "" : name, 1);
+			stamp_status(stats, cell, status);
+			if (debug)
+				log("ICG %s.%s enable %s: %s\n", vcd_scope.c_str(), log_id(cell->name),
+						name.c_str(), bound ? "bound" : "absent");
+		}
+	}
+
 	// Rename each flop's Q wire to the signal the waveform dumped it under.
 	void process_registers(const dict<std::string, std::vector<DumpLeaf>> &objects,
 			       BindStats &stats)
@@ -766,6 +821,7 @@ struct RegRenameInstance {
 	{
 		bind_packed_inputs(objects, fst);
 		process_registers(objects, stats);
+		stamp_icgs(objects, stats);
 		for (auto &it : children)
 			it.second->process_all(objects, stats, fst);
 	}
