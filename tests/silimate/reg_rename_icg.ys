@@ -1,0 +1,64 @@
+# reg_rename stamps each $icg from its enable: bound when the waveform or the logic driving it
+# settles it, absent when it rests on an input the dump does not carry.
+#
+#   cell        EN                                   expected
+#   icg_dumped  dup (dumped)                         bound
+#   icg_logic   en_w, an alias of ~dup               bound
+#   icg_absent  dup & en_in (en_in not dumped)       absent
+
+read_rtlil <<EOT
+module \top
+  wire input 1 \clk
+  wire input 2 \en_in
+  wire \dup
+  wire \n
+  wire \en_w
+  wire \en_x
+  wire output 3 \g1
+  wire output 4 \g2
+  wire output 5 \g3
+  cell $icg \icg_dumped
+    connect \CLK \clk
+    connect \EN \dup
+    connect \SE 1'0
+    connect \GCLK \g1
+  end
+  cell $not \inv
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \dup
+    connect \Y \n
+  end
+  connect \en_w \n
+  cell $icg \icg_logic
+    connect \CLK \clk
+    connect \EN \en_w
+    connect \SE 1'0
+    connect \GCLK \g2
+  end
+  cell $and \mix
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \dup
+    connect \B \en_in
+    connect \Y \en_x
+  end
+  cell $icg \icg_absent
+    connect \CLK \clk
+    connect \EN \en_x
+    connect \SE 1'0
+    connect \GCLK \g3
+  end
+end
+EOT
+hierarchy -top top
+
+reg_rename -waveform reg_rename_status.vcd -scope tb.dut
+
+select -assert-count 1 c:icg_dumped a:rtl_bind_status=bound %i
+select -assert-count 1 c:icg_logic a:rtl_bind_status=bound %i
+select -assert-count 1 c:icg_absent a:rtl_bind_status=absent %i
