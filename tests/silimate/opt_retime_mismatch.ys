@@ -1,0 +1,270 @@
+# Control mismatches that stop two registers from merging.
+#
+# A forward move folds every other operand's register into the single one it
+# leaves behind, so those registers have to agree on when they update. They do
+# not have to agree on what they store: reset and load values are folded the
+# same way init values are, which is why the checks below are all about nets
+# and polarities and never about a stored constant.
+#
+# Disagreeing on a synchronous control is not the end of the move: the pass
+# lowers those controls into muxes and keeps the operand registers instead,
+# which opt_retime_lower_controls.ys covers. The sections here are about the
+# comparison itself, so the ones a lowering would rescue ask for the refusal
+# with -no-lower-controls. The async and clock reasons need no such flag,
+# since nothing lowers them.
+#
+# Each reason is reported separately rather than as one "incompatible flops",
+# because a net and a polarity look nothing alike to someone reading a
+# netlist: a different net is visible in a picture, while a polarity lives in
+# a parameter and draws identically. The wording is part of what a caller sees
+# when it proposes a move it cannot have, so it is asserted here in full.
+#
+# One design per reason, each differing from a legal merge in exactly one
+# control. The matching cases all move, and live with their cell types:
+# $dffe in opt_retime_enable.ys, $sdff and $adff and $aldff in
+# opt_retime_reset.ys. Three reasons are already pinned elsewhere and are not
+# repeated here: a different clock net and an enable of the opposite polarity
+# in opt_retime_clockgate.ys, and a different sync reset net in
+# opt_retime_reset.ys.
+#
+# The last section is the odd one out: every other reason is visible in the
+# ports or parameters two registers disagree on, while $sdffe and $sdffce
+# disagree on neither and are told apart only by which control wins.
+#
+# The remaining branch, "no clock to share with", is unreachable: the named
+# flop is refused up front unless it is clocked, and the control-set check
+# above it already requires the operand to match on has_clk.
+
+# ---------------------------------------------------------------------------
+log -header "Refused: a plain register and one with an async reset"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module ctlset(input clk, rst, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $dff  #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h00))
+    fb (.CLK(clk), .ARST(rst), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top ctlset
+check -assert
+# the reset has nowhere to go: the merged register would have to reset one
+# operand of the adder and not the other
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different set of controls than flop fa (unsupported, needs extra logic)."
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: registers on opposite edges of one clock"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module clkedge(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b0)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top clkedge
+check -assert
+# the same net, so a check on the clock net alone would let this through: the
+# two registers still update half a cycle apart
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a clock of the opposite edge to flop fa."
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: registers held by different enables"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module ennet(input clk, e1, e2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(e1), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(e2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fq (.CLK(clk), .EN(e1), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top ennet
+check -assert
+# one register holding while the other updates feeds the adder a mix of old
+# and new, and a single register left behind cannot reproduce that
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different enable net than flop fa."
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: sync resets that fire on opposite polarities"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module srstpol(input clk, rst, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h00))
+    fa (.CLK(clk), .SRST(rst), .D(a), .Q(ra));
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b0), .SRST_VALUE(8'h00))
+    fb (.CLK(clk), .SRST(rst), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $sdff #(.WIDTH(8), .CLK_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h00))
+    fq (.CLK(clk), .SRST(rst), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top srstpol
+check -assert
+# same reset values, so the fold has nothing to disagree about, and the move
+# is still refused: they never reset on the same cycle
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a sync reset of the opposite polarity to flop fa."
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: async resets on different nets"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module arstnet(input clk, r1, r2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h00))
+    fa (.CLK(clk), .ARST(r1), .D(a), .Q(ra));
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h00))
+    fb (.CLK(clk), .ARST(r2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h00))
+    fq (.CLK(clk), .ARST(r1), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top arstnet
+check -assert
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different async reset net than flop fa (unsupported, needs extra logic)."
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: async resets that fire on opposite polarities"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module arstpol(input clk, rst, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h00))
+    fa (.CLK(clk), .ARST(rst), .D(a), .Q(ra));
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b0), .ARST_VALUE(8'h00))
+    fb (.CLK(clk), .ARST(rst), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $adff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ARST_POLARITY(1'b1), .ARST_VALUE(8'h00))
+    fq (.CLK(clk), .ARST(rst), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top arstpol
+check -assert
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has an async reset of the opposite polarity to flop fa (unsupported, needs extra logic)."
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: async loads on different nets"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module aldnet(input clk, l1, l2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
+    fa (.CLK(clk), .ALOAD(l1), .AD(8'h00), .D(a), .Q(ra));
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
+    fb (.CLK(clk), .ALOAD(l2), .AD(8'h00), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
+    fq (.CLK(clk), .ALOAD(l1), .AD(8'h00), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top aldnet
+check -assert
+# the load values are constant and equal, so this is the net alone
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different async load net than flop fa (unsupported, needs extra logic)."
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: async loads that fire on opposite polarities"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module aldpol(input clk, ald, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
+    fa (.CLK(clk), .ALOAD(ald), .AD(8'h00), .D(a), .Q(ra));
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b0))
+    fb (.CLK(clk), .ALOAD(ald), .AD(8'h00), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $aldff #(.WIDTH(8), .CLK_POLARITY(1'b1), .ALOAD_POLARITY(1'b1))
+    fq (.CLK(clk), .ALOAD(ald), .AD(8'h00), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top aldpol
+check -assert
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has an async load of the opposite polarity to flop fa (unsupported, needs extra logic)."
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: \$sdffe and \$sdffce, which differ only in who wins"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module cesrst(input clk, en, rst, input [7:0] a, b, output [7:0] q);
+  (* init = 8'h00 *) wire [7:0] ra, rb;
+  wire [7:0] s;
+  $sdffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h00))
+    fa (.CLK(clk), .EN(en), .SRST(rst), .D(a), .Q(ra));
+  $sdffce #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h00))
+    fb (.CLK(clk), .EN(en), .SRST(rst), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $sdffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1), .SRST_VALUE(8'h00))
+    fq (.CLK(clk), .EN(en), .SRST(rst), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top cesrst
+check -assert
+# same clock, same enable net and polarity, same reset net, polarity and
+# value, and the same set of controls: every other check in this file passes.
+# fa resets while held, fb does not, and the merged register can only do one
+# of those, so it would silently give fb's bits fa's answer.
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different priority between enable and sync reset than flop fa."
+design -reset
+log -pop

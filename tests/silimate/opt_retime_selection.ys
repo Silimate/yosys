@@ -1,0 +1,81 @@
+# What the trailing selection means to opt_retime.
+#
+# (Not opt_retime_select.ys, which is about the S port of $bmux and $demux.)
+#
+# The two cells are named rather than selected, so the selection is where those
+# names are looked up. A module can be in the selection without all of its
+# cells being, and then a name found in it is not necessarily a cell the caller
+# offered: both ends of the move are rewritten, so a cell left out of the
+# selection has to read as absent rather than as available.
+
+# ---------------------------------------------------------------------------
+# Both modules have a flop called f1 and an adder called a0, so which f1 is
+# meant is entirely down to the selection. beta is in it - one wire of it is -
+# and its cells are not, so there is still only one f1 on offer.
+log -header "A flop name in two modules, one of them only partly selected"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module alpha(input clk, en, in1, in2, output res);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(sum), .Q(res));
+endmodule
+module beta(input clk, en, in1, in2, output res);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(sum), .Q(res));
+endmodule
+EOF
+check -assert
+design -save orig
+opt_retime -flop f1 -cut a0 -backward alpha beta/w:clk
+check -assert
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+select -clear
+
+# alpha's register moved back onto the adder's operands, growing the clone a
+# backward move leaves on the other one.
+select -assert-count 1 alpha/c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 alpha/c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 alpha/c:a0 %x:+[Y] w:res %i
+# beta is as it was read in.
+select -assert-count 1 beta/t:$dffe
+select -assert-count 1 beta/c:f1 %x:+[D] w:sum %i
+select -assert-count 1 beta/c:a0 %x:+[Y] w:sum %i
+
+# alpha only: beta never moved, so comparing it against itself proves nothing.
+design -copy-from orig -as gold alpha
+rename alpha gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 4 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# logger -expect error exits yosys successfully, so this has to come last.
+# The cut is in the module the flop was found in, which is as far as looking it
+# up by name goes. Whether the caller offered it is a separate question, and a
+# cut that was held back is a move that was not asked for rather than a move
+# to make anyway.
+log -header "Error: the cut is in the module but not in the selection"
+design -reset
+read_verilog -icells <<EOF
+module gamma(input clk, en, in1, in2, output res);
+  wire sum;
+  $add #(.A_WIDTH(1), .B_WIDTH(1), .Y_WIDTH(1), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(1), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(sum), .Q(res));
+endmodule
+EOF
+check -assert
+logger -expect error "Cut cell 'a0' is in module gamma but not in the selection." 1
+opt_retime -flop f1 -cut a0 -backward gamma/* gamma/c:a0 %d

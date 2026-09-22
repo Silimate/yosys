@@ -1,0 +1,106 @@
+# Hand-written first moves on the retime_probe chain:
+#   f0 -> b0 -> b1 -> f1 -> b2 -> b3 -> f2
+#
+# Backward across b1 is legal: b1.A is combo. Backward across b0 is not: b0.A
+# is already f0, and stacking a second flop on q0 is the last section.
+log -header "Forward: push f1 across b2"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+opt_retime -flop f1 -cut b2 -forward
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+# b2 then f1: b2.A=n0, b2.Y=q1, f1.D=q1, f1.Q=m1
+select -assert-count 1 c:b2 %x:+[A] w:n0 %i
+select -assert-count 1 c:b2 %x:+[Y] w:q1 %i
+select -assert-count 1 c:f1 %x:+[D] w:q1 %i
+select -assert-count 1 c:f1 %x:+[Q] w:m1 %i
+design -reset
+log -pop
+
+# forward result: f0 -> b0 -> b1 -> b2 -> f1 -> b3 -> f2
+
+log -header "Forward: push f1 across b3 (two buffers)"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+opt_retime -flop f1 -cut b3 -forward
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+# b2 -> b3 -> f1: b2.A=n0, b3.Y=q1, f1.D=q1, f1.Q=n1
+select -assert-count 1 c:b2 %x:+[A] w:n0 %i
+select -assert-count 1 c:b2 %x:+[Y] w:m1 %i
+select -assert-count 1 c:b3 %x:+[A] w:m1 %i
+select -assert-count 1 c:b3 %x:+[Y] w:q1 %i
+select -assert-count 1 c:f1 %x:+[D] w:q1 %i
+select -assert-count 1 c:f1 %x:+[Q] w:n1 %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: pull f1 across b1"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+opt_retime -flop f1 -cut b1 -backward
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+# f1 then b1: f1.D=m0, f1.Q=n0, b1.A=n0, b1.Y=q1
+select -assert-count 1 c:f1 %x:+[D] w:m0 %i
+select -assert-count 1 c:f1 %x:+[Q] w:n0 %i
+select -assert-count 1 c:b1 %x:+[A] w:n0 %i
+select -assert-count 1 c:b1 %x:+[Y] w:q1 %i
+select -assert-count 1 c:b2 %x:+[A] w:q1 %i
+rename retime_probe gate
+read_verilog -icells opt_retime_buf.v
+rename retime_probe gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Backward past both buffers, onto a net another flop already drives. That is
+# not stacking: f1 leaves the net it was on, so f0 is still the only register
+# behind q0, and f1 samples q0 directly with the two buffers now after it. The
+# $buf chain is the plainest case of the rule, with no clone to place because a
+# $buf has one data input and it is the path.
+log -header "Backward onto q0, which f0 already drives"
+log -push
+design -reset
+read_verilog -icells opt_retime_buf.v
+hierarchy -top retime_probe
+check -assert
+design -save orig
+opt_retime -flop f1 -cut b0 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+# no clone, so the register count is unchanged
+select -assert-count 3 t:$dff
+select -assert-count 4 t:$buf
+# f1 hopped both buffers: it reads f0's Q and the buffers drive its old Q net
+select -assert-count 1 c:f1 %x:+[D] w:q0 %i
+select -assert-count 1 c:f1 %x:+[Q] w:n0 %i
+select -assert-count 1 c:b0 %x:+[A] w:n0 %i
+select -assert-count 1 c:b1 %x:+[Y] w:q1 %i
+rename retime_probe gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop

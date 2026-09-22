@@ -1,0 +1,193 @@
+# Forward moves across $neg, $pos and the four division cells, plus $pow.
+#
+# These add no new rule: each is a pure function of its data ports, so the move
+# is the same merge-and-resize $add and $mul get. What is worth testing is that
+# the fold reads the ports in the order CellTypes::eval expects, and that the
+# rounding rule of each division cell survives it. -7 / 2 is -3 truncating and
+# -4 flooring, and -7 % 2 is -1 truncating and 1 flooring, so all four cells
+# fold the same operands to four different values. A fold that reached for the
+# wrong one still looks like a successful move, which is why this file asserts
+# the folded init values directly rather than only proving equivalence.
+#
+# $pow is the one type here with no miter: satgen does not model $pow, so a
+# SAT proof of that section is not available at any price. Its section asserts
+# the folded value instead, which is what would catch a swapped port order.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$neg and \$pos, including a widening \$neg"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module signops(input clk, input [7:0] a, b, c, output [7:0] qn, qp, output [8:0] qw);
+  wire [7:0] ra, rb, rc, yn, yp;
+  wire [8:0] yw;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $neg #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(1)) n0 (.A(ra), .Y(yn));
+  $pos #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(1)) p0 (.A(rb), .Y(yp));
+  $neg #(.A_WIDTH(8), .Y_WIDTH(9), .A_SIGNED(1)) nw (.A(rc), .Y(yw));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqn (.CLK(clk), .D(yn), .Q(qn));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqp (.CLK(clk), .D(yp), .Q(qp));
+  $dff #(.WIDTH(9), .CLK_POLARITY(1'b1)) fqw (.CLK(clk), .D(yw), .Q(qw));
+endmodule
+EOF
+hierarchy -top signops
+check -assert
+select -assert-count 6 t:$dff
+design -save orig
+opt_retime -flop fa -cut n0 -forward
+opt_retime -flop fb -cut p0 -forward
+opt_retime -flop fc -cut nw -forward
+check -assert
+# All three are unary, so nothing merges and the register count stays at 6.
+# The two width-preserving moves reuse the old Q net as the link from the cut;
+# the widening one needs a fresh 9-bit wire, so 49 register bits become 50.
+select -assert-count 6 t:$dff
+select -assert-count 1 c:n0 %x:+[A] w:a %i
+select -assert-count 1 c:n0 %x:+[Y] w:ra %i
+select -assert-count 1 c:fa %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:yn %i
+select -assert-count 1 c:p0 %x:+[A] w:b %i
+select -assert-count 1 c:fb %x:+[Q] w:yp %i
+select -assert-count 1 c:nw %x:+[A] w:c %i
+select -assert-count 1 c:nw %x:+[Y] w:fc_retimed %i
+select -assert-count 1 c:fc %x:+[Q] w:yw %i
+rename signops gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# -0 is 0 at either width, so the all-zero state maps to itself and no init
+# mapping is needed.
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$div, \$mod, \$divfloor and \$modfloor, folding -7 and 2"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module divops(input clk, input [7:0] a, b, c, d, e, g, h, i,
+              output [7:0] qd, qm, qdf, qmf);
+  (* init = 8'hf9 *) wire [7:0] ra;
+  (* init = 8'h02 *) wire [7:0] rb;
+  (* init = 8'hf9 *) wire [7:0] rc;
+  (* init = 8'h02 *) wire [7:0] rd;
+  (* init = 8'hf9 *) wire [7:0] re;
+  (* init = 8'h02 *) wire [7:0] rg;
+  (* init = 8'hf9 *) wire [7:0] rh;
+  (* init = 8'h02 *) wire [7:0] ri;
+  wire [7:0] yd, ym, ydf, ymf;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fc (.CLK(clk), .D(c), .Q(rc));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fd (.CLK(clk), .D(d), .Q(rd));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fe (.CLK(clk), .D(e), .Q(re));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(clk), .D(g), .Q(rg));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fh (.CLK(clk), .D(h), .Q(rh));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fi (.CLK(clk), .D(i), .Q(ri));
+  $div #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(1))
+    c_div (.A(ra), .B(rb), .Y(yd));
+  $mod #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(1))
+    c_mod (.A(rc), .B(rd), .Y(ym));
+  $divfloor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(1))
+    c_divf (.A(re), .B(rg), .Y(ydf));
+  $modfloor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(1), .B_SIGNED(1))
+    c_modf (.A(rh), .B(ri), .Y(ymf));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqd  (.CLK(clk), .D(yd),  .Q(qd));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqm  (.CLK(clk), .D(ym),  .Q(qm));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqdf (.CLK(clk), .D(ydf), .Q(qdf));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fqmf (.CLK(clk), .D(ymf), .Q(qmf));
+endmodule
+EOF
+hierarchy -top divops
+# miter -make_assert compares cycle 0, and two undefined registers are
+# independent free variables that need not agree there, so the observing
+# registers need a defined start as well. Set before the save, so gold and
+# gate get the same one.
+setattr -set init 8'h00 w:qd
+setattr -set init 8'h00 w:qm
+setattr -set init 8'h00 w:qdf
+setattr -set init 8'h00 w:qmf
+check -assert
+select -assert-count 12 t:$dff
+design -save orig
+opt_retime -flop fa -cut c_div -forward
+opt_retime -flop fc -cut c_mod -forward
+opt_retime -flop fe -cut c_divf -forward
+opt_retime -flop fh -cut c_modf -forward
+check -assert
+# each cut merged its divisor away: 12 registers become 8
+select -assert-count 8 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 0 c:fd
+select -assert-count 0 c:fg
+select -assert-count 0 c:fi
+# 8'hf9 and 8'h02 as signed 8-bit are -7 and 2. Truncating division rounds
+# toward zero and flooring division rounds down, so the four cells fold the
+# same pair to four different values. Reading the operands in the wrong
+# order would give 2 / -7 rather than -7 / 2, and an unsigned fold would give
+# 249 / 2; both are caught here.
+select -assert-count 1 w:yd  a:init=8'hfd %i
+select -assert-count 1 w:ym  a:init=8'hff %i
+select -assert-count 1 w:ydf a:init=8'hfc %i
+select -assert-count 1 w:ymf a:init=8'h01 %i
+select -assert-count 0 w:ra a:init %i
+select -assert-count 0 w:rb a:init %i
+select -assert-count 1 c:c_div %x:+[A] w:a %i
+select -assert-count 1 c:c_div %x:+[B] w:b %i
+select -assert-count 1 c:c_mod %x:+[A] w:c %i
+select -assert-count 1 c:c_mod %x:+[B] w:d %i
+select -assert-count 1 c:c_divf %x:+[A] w:e %i
+select -assert-count 1 c:c_divf %x:+[B] w:g %i
+select -assert-count 1 c:c_modf %x:+[A] w:h %i
+select -assert-count 1 c:c_modf %x:+[B] w:i %i
+rename divops gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# A zero divisor is undefined, but it is the same cell on both sides reading
+# the same operands one cycle apart, so the miter still closes.
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: \$pow, folding 3 ** 2 to 9"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module powops(input clk, input [3:0] a, b, output [7:0] q);
+  (* init = 4'd3 *) wire [3:0] ra;
+  (* init = 4'd2 *) wire [3:0] rb;
+  wire [7:0] y;
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $pow #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    p0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top powops
+check -assert
+select -assert-count 3 t:$dff
+opt_retime -flop fa -cut p0 -forward
+check -assert
+# fa merges fb and widens from 4 bits to 8
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 1 c:p0 %x:+[A] w:a %i
+select -assert-count 1 c:p0 %x:+[B] w:b %i
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+# 3 ** 2 is 9 and 2 ** 3 is 8, so this is the assertion that would fail if the
+# fold handed CellTypes::eval the operands the other way round. There is no
+# miter here: satgen lists $pow among the cell types it cannot import, so the
+# equivalence this file proves for every other type is not available for $pow.
+select -assert-count 1 w:y a:init=8'h09 %i
+select -assert-count 0 w:ra a:init %i
+select -assert-count 0 w:rb a:init %i
+design -reset
+log -pop

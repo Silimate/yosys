@@ -1,0 +1,223 @@
+# Backward: the capture flop slides onto a unique invertible chain.
+# f(reg(x), c) equals reg(f(x, c)), so a constant other operand is a meet
+# and no register is cloned. A live other operand gets a clone of the flop.
+# A unique live input that is already registered is still stacking, not
+# cloning, and is refused (opt_retime_buf.ys).
+#
+# Every cut here has one preimage per value. The cuts that have several, or
+# none, are in opt_retime_and.ys. Backward $mul is in opt_retime_mul.ys.
+
+# ---------------------------------------------------------------------------
+log -header "Backward: two \$buf from a port"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module inbufs(input clk, d, output q);
+  wire m, n;
+  $buf #(.WIDTH(1)) b0 (.A(d), .Y(m));
+  $buf #(.WIDTH(1)) b1 (.A(m), .Y(n));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(n), .Q(q));
+endmodule
+EOF
+hierarchy -top inbufs
+check -assert
+design -save orig
+opt_retime -flop f -cut b0 -backward
+check -assert
+select -assert-count 1 t:$dff
+# f samples the port; the buf chain drives the old Q
+select -assert-count 1 c:f %x:+[D] w:d %i
+select -assert-count 1 c:b0 %x:+[A] w:n %i
+select -assert-count 1 c:b1 %x:+[Y] w:q %i
+rename inbufs gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: \$not, folding init 0 to 1"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module invcap(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(a), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top invcap
+setattr -set init 8'h00 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut n0 -backward
+check -assert
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:n0 %x:+[Y] w:q %i
+# ~0 is all ones
+select -assert-count 1 w:y a:init=8'hff %i
+rename invcap gate
+design -import orig -as gold
+setattr -set init 8'h00 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: \$add against a constant, folding init 0 to -1"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module addc(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(8'd1), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top addc
+setattr -set init 8'h00 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut a0 -backward
+check -assert
+select -assert-count 1 t:$dff
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:a0 %x:+[Y] w:q %i
+# 0 - 1 wraps to 0xff
+select -assert-count 1 w:y a:init=8'hff %i
+rename addc gate
+design -import orig -as gold
+setattr -set init 8'h00 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: \$xor against a constant"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module xorc(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] y;
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(a), .B(8'h0f), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top xorc
+setattr -set init 8'h00 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut x0 -backward
+check -assert
+select -assert-count 1 c:f %x:+[D] w:a %i
+select -assert-count 1 c:x0 %x:+[Y] w:q %i
+# 0 ^ 8'h0f
+select -assert-count 1 w:y a:init=8'h0f %i
+rename xorc gate
+design -import orig -as gold
+setattr -set init 8'h00 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: \$sub, path on B, constant A"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module subb(input clk, input [7:0] b, output [7:0] q);
+  wire [7:0] y;
+  $sub #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    s0 (.A(8'h10), .B(b), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top subb
+setattr -set init 8'h00 w:q
+check -assert
+design -save orig
+opt_retime -flop f -cut s0 -backward
+check -assert
+select -assert-count 1 c:f %x:+[D] w:b %i
+select -assert-count 1 c:s0 %x:+[Y] w:q %i
+# 8'h10 - 0
+select -assert-count 1 w:y a:init=8'h10 %i
+rename subb gate
+design -import orig -as gold
+setattr -set init 8'h00 gold/w:q
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Backward: clone onto a live operand of \$add"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module unflopped(input clk, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(b), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top unflopped
+check -assert
+select -assert-count 2 t:$dff
+design -save orig
+opt_retime -flop fq -cut a0 -backward
+check -assert
+# fq slides onto B; a clone stacks after fa on A; the add drives q
+select -assert-count 3 t:$dff
+select -assert-count 1 c:fa
+select -assert-count 1 c:fq
+select -assert-count 1 c:fq_A
+select -assert-count 1 c:a0 %x:+[Y] w:q %i
+select -assert-count 1 c:fq %x:+[D] w:b %i
+select -assert-count 1 c:fq_A %x:+[D] w:ra %i
+select -assert-count 1 c:fa %x:+[Q] w:ra %i
+rename unflopped gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The capture flop is 9 bits and the live operand is 8; invert would have to
+# pick a preimage of a different width.
+log -header "Refused: backward does not invert a width change"
+design -reset
+read_verilog -icells <<EOF
+module backwide(input clk, input [7:0] a, output [8:0] q);
+  wire [8:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(9), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(a), .B(8'd1), .Y(y));
+  $dff #(.WIDTH(9), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top backwide
+check -assert
+opt_retime -flop fq -cut a0 -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Backward move across a0 would resize flop fq from 9 to 8 bits (unsupported)."

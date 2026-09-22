@@ -1,0 +1,458 @@
+# Retiming and clock gating, which are the same enable seen twice.
+#
+# A clock gate starts life as a clock enable on a register and ends up as a
+# gated clock net feeding a plain register, so a retiming move meets it in one
+# of two states depending on where in the flow it runs:
+#
+#   before gating   the enable is still a $dffe port, and it rides along with
+#                   the register (opt_retime_enable.ys is what pins that)
+#   after gating    the enable has become a $icg driving CLK, and the register
+#                   is a $dff that knows nothing about it
+#
+# Both states are here, because both happen. The first half retimes registers
+# that a later clockgate pass will gather into gates, and then runs that pass
+# to check the gating a flow would have inferred is still there to infer. The
+# second half retimes a netlist whose gates are already cells, which is what a
+# design carrying instantiated ICGs, or one that has been through infer_icg,
+# looks like.
+#
+# The answer either way is that the move goes through, and for the same
+# reason: a clone or a leftover copy is built from the moved register's whole
+# control set, so it lands on whatever the original was clocked by, gate
+# included. What clock gating does cost is a merge. A forward move folds the
+# other operands' registers into one, and it will only do that for registers
+# that agree on when they update. Before gating that agreement is one enable
+# net; after gating it is one gated clock net, which is a stricter thing to
+# ask, because two gates built from the same enable are two different nets.
+# The last section is that case.
+#
+# $icg has no SAT model, so the gated netlists here are checked structurally.
+# The proof they lean on is in the inferred half, whose registers are $dffe
+# and do go through the solver, plus the section showing a move lands in the
+# same netlist whether it runs before or after the gating pass.
+
+# ---------------------------------------------------------------------------
+# The plainest shape there is: one enabled register behind an adder it has to
+# itself. Retiming it backward slides it onto A and puts a clone on B, and the
+# clone is a copy of the register's controls, so it carries the same enable.
+# That is what keeps the gating: clockgate groups registers by clock and
+# enable, so two registers on one enable are one gate, and the move has handed
+# the gate a second register rather than asking for a second gate.
+log -header "Inferred: a backward move clones the enable, so one gate still covers both"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module dp(input clk, en, input [7:0] in1, in2, output [7:0] res);
+  wire [7:0] sum;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en), .D(sum), .Q(res));
+endmodule
+EOF
+hierarchy -top dp
+check -assert
+select -assert-count 1 t:$dffe
+design -save orig
+
+# the baseline: what the gating pass makes of the design as written, one gate
+# in front of the one enabled register. A real flow names a library ICG here;
+# $icg is the same cell with a port list the IR already knows, so the gated
+# netlist survives `check` without a blackbox model to go with it.
+clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
+check -assert
+select -assert-count 1 t:$icg
+select -assert-count 1 t:$dff
+select -assert-count 0 t:$dffe
+
+design -load orig
+opt_retime -flop f1 -cut a0 -backward
+check -assert
+select -assert-count 2 t:$dffe
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+# the clone's enable is the same net at the same polarity, which is the whole
+# reason the gating survives
+select -assert-count 1 c:f1 %x:+[EN] w:en %i
+select -assert-count 1 c:f1_B %x:+[EN] w:en %i
+select -assert-count 1 c:a0 %x:+[Y] w:res %i
+design -save retimed
+
+rename dp gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# en is free stimulus, so the proof covers the register and its clone holding
+# and updating together, which is the pair the shared gate will clock
+sat -seq 8 -set-init-zero -prove-asserts -verify
+
+design -load retimed
+clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
+check -assert
+# still one gate, now in front of two registers rather than one
+select -assert-count 1 t:$icg
+select -assert-count 2 t:$dff
+select -assert-count 0 t:$dffe
+select -assert-count 2 t:$icg %x:+[GCLK] %x:+[CLK] t:$dff %i
+# and the two of them are on one clock net, so nothing was split in two
+select -assert-count 1 c:f1 %x:+[CLK] c:f1_B %x:+[CLK] %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Two enables over one cone, which is the design opt_retime_shared_backward.ys
+# is built on: an RTL block with two independently enabled assignments to the
+# same expression. Retiming res1's register back across the adder duplicates
+# the adder for res2, which still wants the undelayed sum.
+#
+# Under gating that is two gates, one per enable, and the move has to leave
+# each of them holding the registers that belong to it: the moved register and
+# its clone on en1's gate, res2's register alone on en2's, reading the
+# duplicate. A clone that came out on the wrong enable would be a register
+# updating on cycles it has no business updating on, and nothing about "same
+# clock, same enable" would stop the gating pass from putting it on that gate
+# quite happily.
+log -header "Inferred: two enables, so two gates, and each keeps its own registers"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module dp2(input clk, en1, en2, input [7:0] in1, in2, output [7:0] res1, res2);
+  wire [7:0] sum;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(sum), .Q(res2));
+endmodule
+EOF
+hierarchy -top dp2
+check -assert
+design -save orig
+
+# before the move, two gates in front of one register each
+clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
+check -assert
+select -assert-count 2 t:$icg
+select -assert-count 2 t:$dff
+
+design -load orig
+opt_retime -flop f1 -cut a0 -backward
+check -assert
+select -assert-count 2 t:$add
+select -assert-count 3 t:$dffe
+select -assert-count 1 c:f1_B %x:+[EN] w:en1 %i
+select -assert-count 1 c:f2 %x:+[D] w:a0_dup_y %i
+select -assert-count 1 c:f2 %x:+[EN] w:en2 %i
+design -save retimed
+
+rename dp2 gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# en1 and en2 are both free, so the proof covers the two enables diverging,
+# which is what the duplicated adder is there for and what the gating turns
+# into two separately gated clocks
+sat -seq 8 -set-init-zero -prove-asserts -verify
+
+design -load retimed
+clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
+check -assert
+# still two gates: the clone joined en1's rather than asking for one of its own
+select -assert-count 2 t:$icg
+select -assert-count 3 t:$dff
+select -assert-count 3 t:$icg %x:+[GCLK] %x:+[CLK] t:$dff %i
+# f1 and its clone share a clock net; res2's register is on the other one
+select -assert-count 1 c:f1 %x:+[CLK] c:f1_B %x:+[CLK] %i
+select -assert-count 0 c:f1 %x:+[CLK] c:f2 %x:+[CLK] %i
+select -assert-count 1 c:f2 %x:+[D] w:a0_dup_y %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The same move on the same design, with the gating pass run first. It lands
+# on the same netlist: the clone is built from the moved register's controls,
+# and after gating those controls are a gated clock net, so it comes out on
+# the gate its original was already on.
+#
+# That is what carries the SAT proof above onto the gated netlists in the rest
+# of this file. $icg has no SAT model, so a gated miter cannot be solved; what
+# can be shown is that retiming a gated netlist reaches the same place as
+# retiming the ungated one and gating afterwards, and that one was proved.
+log -header "Inferred: gating first or retiming first, the netlist is the same"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module dp3(input clk, en1, en2, input [7:0] in1, in2, output [7:0] res1, res2);
+  wire [7:0] sum;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f1 (.CLK(clk), .EN(en1), .D(sum), .Q(res1));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    f2 (.CLK(clk), .EN(en2), .D(sum), .Q(res2));
+endmodule
+EOF
+hierarchy -top dp3
+check -assert
+clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
+check -assert
+select -assert-count 2 t:$icg
+select -assert-count 2 t:$dff
+# the register the move is named on is a plain $dff now, clocked by a gate
+select -assert-count 0 t:$dffe
+
+opt_retime -flop f1 -cut a0 -backward
+check -assert
+# cell for cell, this is the netlist the other order produced
+select -assert-count 2 t:$icg
+select -assert-count 3 t:$dff
+select -assert-count 2 t:$add
+select -assert-count 3 t:$icg %x:+[GCLK] %x:+[CLK] t:$dff %i
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 c:f1 %x:+[CLK] c:f1_B %x:+[CLK] %i
+select -assert-count 0 c:f1 %x:+[CLK] c:f2 %x:+[CLK] %i
+select -assert-count 1 c:f2 %x:+[D] w:a0_dup_y %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The same shape again with the gates written out as cells, which is what a
+# design with instantiated ICGs, or one that has been through infer_icg, hands
+# the pass. Nothing here went through clockgate: the registers are plain $dff
+# and the only trace of an enable is which clock net each one is on.
+#
+# The move does not treat that net as anything special. It is the flop's
+# clock, the clone copies it, and the duplicate the extra reader gets is wired
+# the same way it would have been on an ungated netlist.
+log -header "Explicit: a clone lands on the gate its original was on"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module gated(input clk, en1, en2, input [7:0] in1, in2, output [7:0] res1, res2);
+  wire [7:0] sum;
+  wire g1, g2;
+  $icg ic1 (.CLK(clk), .EN(en1), .SE(1'b0), .GCLK(g1));
+  $icg ic2 (.CLK(clk), .EN(en2), .SE(1'b0), .GCLK(g2));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(g1), .D(sum), .Q(res1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f2 (.CLK(g2), .D(sum), .Q(res2));
+endmodule
+EOF
+hierarchy -top gated
+check -assert
+select -assert-count 2 t:$icg
+select -assert-count 2 t:$dff
+opt_retime -flop f1 -cut a0 -backward
+check -assert
+# one adder became two and f1 gained a clone, exactly as ungated
+select -assert-count 2 t:$add
+select -assert-count 3 t:$dff
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 c:a0 %x:+[Y] w:res1 %i
+# the clone is on f1's gated clock, not on the ungated clk and not on the
+# other gate
+select -assert-count 1 c:f1 %x:+[CLK] w:g1 %i
+select -assert-count 1 c:f1_B %x:+[CLK] w:g1 %i
+select -assert-count 0 c:f1_B %x:+[CLK] w:clk w:g2 %u %i
+# res2 is untouched behind an undelayed copy of the adder, still on its gate
+select -assert-count 1 c:f2 %x:+[CLK] w:g2 %i
+select -assert-count 1 c:f2 %x:+[D] w:a0_dup_y %i
+select -assert-count 1 c:a0_dup %x:+[A] w:in1 %i
+select -assert-count 1 c:a0_dup %x:+[B] w:in2 %i
+# the gates themselves were not touched
+select -assert-count 1 c:ic1 %x:+[EN] w:en1 %i
+select -assert-count 1 c:ic2 %x:+[EN] w:en2 %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A gate whose enable is computed by the very cone being retimed, which is
+# ordinary enough: the condition an assignment is gated on is usually some
+# function of the same inputs the assignment reads.
+#
+# The move leaves the cone computing its value a cycle later than it used to,
+# so an enable taken off it would arrive a cycle late and the register would
+# update on the wrong cycles. It does not, because the gate's EN port is a
+# reader of the cone off the before-path like any other, and gets the
+# undelayed duplicate. Worth pinning on its own: it is the one reader here
+# that decides when the moved register updates rather than what it holds, so
+# getting it wrong would not show up as a wrong value anywhere in the cone.
+log -header "Explicit: the gate's own enable is served by the duplicate"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module gatedin(input clk, input [7:0] in1, in2, output [7:0] res1);
+  wire [7:0] sum;
+  wire nz, g1;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(in1), .B(in2), .Y(sum));
+  $reduce_or #(.A_WIDTH(8), .Y_WIDTH(1), .A_SIGNED(0)) r0 (.A(sum), .Y(nz));
+  $icg ic1 (.CLK(clk), .EN(nz), .SE(1'b0), .GCLK(g1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(g1), .D(sum), .Q(res1));
+endmodule
+EOF
+hierarchy -top gatedin
+check -assert
+# the adder feeds the register and the gate's enable logic
+select -assert-count 2 w:sum %co c:* %i
+opt_retime -flop f1 -cut a0 -backward
+check -assert
+select -assert-count 2 t:$add
+select -assert-count 2 t:$dff
+select -assert-count 1 c:f1 %x:+[D] w:in1 %i
+select -assert-count 1 c:f1_B %x:+[D] w:in2 %i
+select -assert-count 1 c:f1 %x:+[CLK] w:g1 %i
+select -assert-count 1 c:f1_B %x:+[CLK] w:g1 %i
+# the enable reads the duplicate, so the gate opens on the cycles it always did
+select -assert-count 1 c:r0 %x:+[A] w:a0_dup_y %i
+select -assert-count 1 c:ic1 %x:+[EN] w:nz %i
+# while the path itself is the delayed one
+select -assert-count 1 c:a0 %x:+[A] w:sum %i
+select -assert-count 1 c:a0 %x:+[Y] w:res1 %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A forward move, where gating has more to say. Merging is the forward move's
+# whole business: the register slides past the cut and the registers on the
+# cut's other operands are folded into it, which is only sound if all of them
+# update on the same cycles. Registers on one gated clock do, so this merges
+# just as the $dffe version would, and the gate ends up clocking one register
+# where it clocked two.
+log -header "Explicit: a forward merge across one gate"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module gatedfwd(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  wire g;
+  $icg ic (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(g));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(g), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(g), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(g), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top gatedfwd
+check -assert
+select -assert-count 3 t:$dff
+opt_retime -flop fa -cut a0 -forward
+check -assert
+# fb was folded into fa, and what is left is still on the gate
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fb
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:fa %x:+[CLK] w:g %i
+select -assert-count 1 c:fq %x:+[CLK] w:g %i
+select -assert-count 1 t:$icg
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# What gating does cost. A forward merge needs its registers to agree on when
+# they update, and it decides that by comparing control nets: same clock net,
+# same enable net. An enable is one net however many registers are on it, so
+# before gating the comparison is as coarse as the RTL was. A gated clock is
+# one net per gate cell, and a flow is free to build two gates off one enable,
+# one per hierarchy level or one per fanout budget, at which point two
+# registers that update on exactly the same cycles sit on two nets that the
+# pass has no reason to believe anything about.
+#
+# So the refusal below is not gating being a thing one cannot retime across.
+# It is a move that the same design, asked one pass earlier, would have made.
+# Both halves are here: the gated netlist refuses, the $dffe netlist it was
+# built from merges. A driver that wants both should retime before gating.
+#
+# Two genuinely different enables refuse for the same reason and are the case
+# where the refusal is the right answer, so that one is here too.
+log -header "Refused: a forward merge across two gates"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module twogates(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  wire g1, g2;
+  $icg ic1 (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(g1));
+  $icg ic2 (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(g2));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(g1), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(g2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(g1), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top twogates
+check -assert
+# one enable, two gate cells, two clock nets
+select -assert-count 1 c:ic1 %x:+[EN] w:en %i
+select -assert-count 1 c:ic2 %x:+[EN] w:en %i
+select -assert-count 0 c:fa %x:+[CLK] c:fb %x:+[CLK] %i
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different clock net than flop fa."
+# refused before anything was touched, as every refusal is
+check -assert
+select -assert-count 3 t:$dff
+select -assert-count 1 c:a0 %x:+[A] w:ra %i
+select -assert-count 1 c:a0 %x:+[B] w:rb %i
+design -reset
+
+# the same design one pass earlier: one enable, no gates yet, and the merge
+# goes through
+read_verilog -icells <<EOF
+module ungated(input clk, en, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(en), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(en), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fq (.CLK(clk), .EN(en), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top ungated
+check -assert
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 2 t:$dffe
+select -assert-count 0 c:fb
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+design -reset
+
+# two enables, two gates, and here the refusal is the answer: fb updates on
+# cycles fa does not, so no single register can stand in for both. What gets
+# this design retimed is the backward move, which duplicates rather than
+# merges, and that is the "Explicit" section above.
+read_verilog -icells <<EOF
+module twoenables(input clk, en1, en2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb, s;
+  wire g1, g2;
+  $icg ic1 (.CLK(clk), .EN(en1), .SE(1'b0), .GCLK(g1));
+  $icg ic2 (.CLK(clk), .EN(en2), .SE(1'b0), .GCLK(g2));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(g1), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(g2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(g1), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top twoenables
+check -assert
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different clock net than flop fa."
+select -assert-count 3 t:$dff
+design -reset
+log -pop

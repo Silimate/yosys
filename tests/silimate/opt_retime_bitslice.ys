@@ -1,0 +1,149 @@
+# Bit-sliced flops into a wide operator.
+#
+# Preqorsor dumps WIDTH=1 $dff/$sdff cells even when RTL is a vector, so a
+# $mul/$add's A port is a concat of many 1-bit Qs rather than one wide flop.
+# unique_reader used to treat that as a partial read and refuse the cut. A
+# forward move is still f(reg(x), reg(y)) = reg(f(x, y)) when every bit of
+# each operand is a sibling flop on the same clock, so the named flop is
+# resized to Y and the other bit-flops are merged.
+
+# ---------------------------------------------------------------------------
+log -header "Forward: bit-sliced \$add, named flop is the MSB of A"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module bitslice_add(input clk, input [3:0] a, b, output [3:0] q);
+  wire [3:0] ra, rb, y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa0 (.CLK(clk), .D(a[0]), .Q(ra[0]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa1 (.CLK(clk), .D(a[1]), .Q(ra[1]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa2 (.CLK(clk), .D(a[2]), .Q(ra[2]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa3 (.CLK(clk), .D(a[3]), .Q(ra[3]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb0 (.CLK(clk), .D(b[0]), .Q(rb[0]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb1 (.CLK(clk), .D(b[1]), .Q(rb[1]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb2 (.CLK(clk), .D(b[2]), .Q(rb[2]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb3 (.CLK(clk), .D(b[3]), .Q(rb[3]));
+  $add #(.A_WIDTH(4), .B_WIDTH(4), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(y));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top bitslice_add
+check -assert
+select -assert-count 9 t:$dff
+design -save orig
+opt_retime -flop fa3 -cut a0 -forward
+check -assert
+# eight 1-bit operand flops became one 4-bit register on Y; capture remains
+select -assert-count 2 t:$dff
+select -assert-count 1 c:fa3
+select -assert-count 0 c:fa0
+select -assert-count 0 c:fb0
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:fa3 %x:+[Q] w:y %i
+rename bitslice_add gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: bit-sliced \$mul, folding inits 3 * 2"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module bitslice_mul(input clk, input [1:0] a, b, output [3:0] q);
+  (* init = 1'b1 *) wire ra0;
+  (* init = 1'b1 *) wire ra1;
+  (* init = 1'b0 *) wire rb0;
+  (* init = 1'b1 *) wire rb1;
+  wire [3:0] y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa0 (.CLK(clk), .D(a[0]), .Q(ra0));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa1 (.CLK(clk), .D(a[1]), .Q(ra1));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb0 (.CLK(clk), .D(b[0]), .Q(rb0));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb1 (.CLK(clk), .D(b[1]), .Q(rb1));
+  $mul #(.A_WIDTH(2), .B_WIDTH(2), .Y_WIDTH(4), .A_SIGNED(0), .B_SIGNED(0))
+    m0 (.A({ra1, ra0}), .B({rb1, rb0}), .Y(y));
+  $dff #(.WIDTH(4), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top bitslice_mul
+setattr -set init 4'h0 w:q
+check -assert
+select -assert-count 5 t:$dff
+design -save orig
+opt_retime -flop fa0 -cut m0 -forward
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 0 c:fa1
+select -assert-count 0 c:fb0
+# 2'b11 * 2'b10 = 4'h6
+select -assert-count 1 w:y a:init=4'h6 %i
+rename bitslice_mul gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Forward: bit-sliced B bit kept for a tap"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module bitslice_tap(input clk, input [1:0] a, b, output [1:0] q, output tap);
+  wire [1:0] ra, rb, y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa0 (.CLK(clk), .D(a[0]), .Q(ra[0]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa1 (.CLK(clk), .D(a[1]), .Q(ra[1]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb0 (.CLK(clk), .D(b[0]), .Q(rb[0]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fb1 (.CLK(clk), .D(b[1]), .Q(rb[1]));
+  $add #(.A_WIDTH(2), .B_WIDTH(2), .Y_WIDTH(2), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(y));
+  $buf #(.WIDTH(1)) bt (.A(rb[0]), .Y(tap));
+  $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top bitslice_tap
+check -assert
+select -assert-count 5 t:$dff
+design -save orig
+opt_retime -flop fa0 -cut a0 -forward
+check -assert
+# fb0 kept for the tap; fa0 becomes the 2-bit sum register
+select -assert-count 3 t:$dff
+select -assert-count 1 c:fb0
+select -assert-count 0 c:fb1
+select -assert-count 1 c:bt %x:+[A] w:rb %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+rename bitslice_tap gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Refused: one bit of B is combinational"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module bitslice_combo(input clk, input [1:0] a, b, output [1:0] q);
+  wire [1:0] ra, y;
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa0 (.CLK(clk), .D(a[0]), .Q(ra[0]));
+  $dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) fa1 (.CLK(clk), .D(a[1]), .Q(ra[1]));
+  $add #(.A_WIDTH(2), .B_WIDTH(2), .Y_WIDTH(2), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(b), .Y(y));
+  $dff #(.WIDTH(2), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top bitslice_combo
+opt_retime -flop fa0 -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input B of cell a0 is not driven by a flop or a constant, so flop fa0 cannot move forward across it."

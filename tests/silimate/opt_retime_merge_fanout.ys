@@ -1,0 +1,86 @@
+# A forward move across an $add folds the registers on the operands into the
+# one it leaves on the output. If one of them is read somewhere else, deleting
+# it would change that reader, so the flop stays and only the cut is rewired
+# to its D. That is the same netlist as cloning a fanout-1 copy and merging
+# that copy away.
+#
+# Split out from opt_retime_add.ys because it used to be a logger -expect error
+# case (only one expected error fits per file). It is a real move now, as is
+# the backward case below, so nothing in this file refuses any more.
+design -reset
+read_verilog -icells <<EOF
+module tapped(input clk, input [7:0] a, b, output [7:0] q, tap);
+  wire [7:0] ra, rb, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(s));
+  $buf #(.WIDTH(8)) bt (.A(rb), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(s), .Q(q));
+endmodule
+EOF
+hierarchy -top tapped
+check -assert
+# rb feeds the adder and the tap
+select -assert-count 2 w:rb %co c:* %i
+select -assert-count 3 t:$dff
+design -save orig
+opt_retime -flop fa -cut a0 -forward
+check -assert
+# fb is kept for the tap, fa moves onto the sum; register count unchanged
+select -assert-count 3 t:$dff
+select -assert-count 1 c:fb
+select -assert-count 1 c:a0 %x:+[A] w:a %i
+select -assert-count 1 c:a0 %x:+[B] w:b %i
+select -assert-count 1 c:fa %x:+[Q] w:s %i
+select -assert-count 1 c:bt %x:+[A] w:rb %i
+select -assert-count 1 c:fb %x:+[Q] w:rb %i
+rename tapped gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+
+# ---------------------------------------------------------------------------
+# The backward side of the same question, and it used to be the expected-error
+# case of this file for the same reason the move above used to be one.
+#
+# The two directions answer it differently because they are copying different
+# things. Forward has extra readers on a register, so it leaves a register
+# behind. Backward has them on a combinational cell, the move having delayed
+# what that cell computes, so the copy left behind is logic.
+log -header "Backward: the cut is duplicated for the reader off the path"
+design -reset
+read_verilog -icells <<EOF
+module backfanout(input clk, input [7:0] a, output [7:0] q, tap);
+  wire [7:0] y;
+  $buf #(.WIDTH(8)) b0 (.A(a), .Y(y));
+  $buf #(.WIDTH(8)) bt (.A(y), .Y(tap));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top backfanout
+check -assert
+# y feeds the capture flop and the tap
+select -assert-count 2 w:y %co c:* %i
+select -assert-count 2 t:$buf
+design -save orig
+opt_retime -flop fq -cut b0 -backward
+check -assert
+# fq samples the port and b0 drives the old Q net, one buffer later than before
+select -assert-count 1 t:$dff
+select -assert-count 3 t:$buf
+select -assert-count 1 c:fq %x:+[D] w:a %i
+select -assert-count 1 c:fq %x:+[Q] w:y %i
+select -assert-count 1 c:b0 %x:+[A] w:y %i
+select -assert-count 1 c:b0 %x:+[Y] w:q %i
+# the tap keeps reading an undelayed copy rather than the retimed b0
+select -assert-count 1 c:b0_dup %x:+[A] w:a %i
+select -assert-count 1 c:bt %x:+[A] w:b0_dup_y %i
+rename backfanout gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
