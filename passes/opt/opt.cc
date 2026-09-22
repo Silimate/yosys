@@ -61,7 +61,7 @@ struct OptPass : public Pass {
 		log("        opt_hier (-hier only)\n");
 		log("        opt_boundary (-boundary only)\n");
 		log("        opt_clean [-purge]\n");
-		log("    while <changed design in opt_dff> (up to -max_iter iterations)\n");
+		log("    while <changed design in opt_dff, opt_hier or opt_boundary> (up to -max_iter iterations)\n");
 		log("\n");
 		log("Note: Options in square brackets (such as [-keepdc]) are passed through to\n");
 		log("the opt_* commands when given to 'opt'.\n");
@@ -178,18 +178,25 @@ struct OptPass : public Pass {
 				design->scratchpad_unset("opt.did_something");
 				if (!noff_mode)
 					Pass::call(design, "opt_dff" + opt_dff_args);
-				if (design->scratchpad_get_bool("opt.did_something") == false)
-					break;
+				// opt_hier and opt_boundary have to run before the loop decides whether
+				// to go again. Checked right after opt_dff, a round that removed no
+				// register never reaches them, so a constant waiting at a module port
+				// was never carried across.
 				if (hier_mode)
 					Pass::call(design, "opt_hier");
 				if (boundary_mode)
 					Pass::call(design, "opt_boundary");
+				if (design->scratchpad_get_bool("opt.did_something") == false)
+					break;
 				Pass::call(design, "opt_clean" + opt_clean_args);
 				if (max_iter > 0 && iter >= max_iter) {
 					reached_max_iter = true;
 					break;
 				}
-				log_header(design, "Rerunning OPT passes. (Removed registers in this run.)\n");
+				if (hier_mode || boundary_mode)
+					log_header(design, "Rerunning OPT passes. (Removed registers or crossed module boundaries in this run.)\n");
+				else
+					log_header(design, "Rerunning OPT passes. (Removed registers in this run.)\n");
 			}
 			Pass::call(design, "opt_clean" + opt_clean_args);
 		}

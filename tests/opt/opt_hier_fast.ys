@@ -1,0 +1,20 @@
+# `opt -fast -hier` has to run opt_hier before deciding whether to loop again. A round
+# that removes no register otherwise ends the loop before opt_hier ever runs, and a
+# constant tied off at the top never reaches the register it makes constant.
+read_verilog <<EOT
+module leaf(input clk, input en, input [3:0] d, output [3:0] q);
+	reg [3:0] r;
+	always @(posedge clk) r <= d & {4{en}};
+	assign q = r;
+endmodule
+module mid(input clk, input en, input [3:0] d, output [3:0] q);
+	leaf u(.clk(clk), .en(en), .d(d), .q(q));
+endmodule
+module top(input clk, input [3:0] d, output [3:0] q);
+	mid u(.clk(clk), .en(1'b0), .d(d), .q(q));
+endmodule
+EOT
+hierarchy -top top
+proc
+opt -fast -hier
+select -assert-none t:$*dff*

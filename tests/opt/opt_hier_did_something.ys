@@ -1,0 +1,44 @@
+# opt_hier has to flag every rewrite it makes, including the ones inside a module's
+# body, so a caller looping on opt.did_something runs it again, and has to stop
+# flagging once there is nothing left to carry.
+
+# A constant input: substituting it is a change, and the second call finds no
+# reference to the port left to rewrite.
+read_verilog <<EOT
+module leaf(input a, input b, output y);
+	assign y = a & b;
+endmodule
+module top(input b, output y);
+	leaf u(.a(1'b1), .b(b), .y(y));
+endmodule
+EOT
+hierarchy -top top
+scratchpad -unset opt.did_something
+opt_hier
+scratchpad -assert opt.did_something true
+scratchpad -unset opt.did_something
+opt_hier
+scratchpad -assert-unset opt.did_something
+design -reset
+
+# Two inputs every instance ties to the same net: merging them is a change too. It
+# leaves `b` unread inside `leaf`, so the second call disconnects it at the instance,
+# and only the third finds nothing left.
+read_verilog <<EOT
+module leaf(input a, input b, output y);
+	assign y = a ^ b;
+endmodule
+module top(input x, output y);
+	leaf u(.a(x), .b(x), .y(y));
+endmodule
+EOT
+hierarchy -top top
+scratchpad -unset opt.did_something
+opt_hier
+scratchpad -assert opt.did_something true
+scratchpad -unset opt.did_something
+opt_hier
+scratchpad -assert opt.did_something true
+scratchpad -unset opt.did_something
+opt_hier
+scratchpad -assert-unset opt.did_something
