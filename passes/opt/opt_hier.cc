@@ -417,17 +417,99 @@ struct UsageData {
 	}
 };
 
+// Carry unused signals, constants and tie-togethers across one module boundary, and
+// return the modules that were rewritten. Every module is indexed as it stands when
+// the round starts, so a fact pushed into a module only moves on in the next round.
+static pool<Module *> run_round(RTLIL::Design *d)
+{
+	dict<IdString, ModuleIndex> indices;
+	for (auto module : d->modules()) {
+		log_debug("Building index for %s\n", module);
+		indices.emplace(module->name, ModuleIndex(module));
+	}
+
+	dict<IdString, UsageData> usage_datas;
+	for (auto module : d->selected_modules(RTLIL::SELECT_WHOLE_ONLY, RTLIL::SB_UNBOXED_CMDERR)) {
+		if (module->get_bool_attribute(ID::top) || is_dw_module(module))
+			continue;
+
+		log_debug("Starting usage data for %s\n", module);
+		usage_datas.emplace(module->name, UsageData(module));
+	}
+
+	for (auto module : d->modules()) {
+		for (auto cell : module->cells()) {
+			if (usage_datas.count(cell->type)) {
+				log_debug("Account for instance %s of %s in %s\n", cell, cell->type.unescape(), module);
+				usage_datas.at(cell->type).refine(cell, indices.at(module->name));
+			}
+		}
+	}
+
+	pool<Module *> changed;
+	for (auto module : d->selected_modules(RTLIL::SELECT_WHOLE_ONLY, RTLIL::SB_UNBOXED_CMDERR)) {
+		if (is_dw_module(module)) {
+			log_debug("Skipping DW module %s\n", log_id(module));
+			continue;
+		}
+
+		ModuleIndex &parent_index = indices.at(module->name);
+
+		// Rewrites the module's own body: constants and ties substituted for its
+		// inputs, unused outputs disconnected.
+		if (usage_datas.count(module->name)) {
+			log_debug("Applying usage data changes to %s\n", module);
+			if (usage_datas.at(module->name).apply_changes(parent_index))
+				changed.insert(module);
+		}
+
+		// Rewrites this module around each instance: a child's constant outputs
+		// connected in, unused child inputs disconnected.
+		for (auto cell : module->cells()) {
+			Module *child = d->module(cell->type);
+			if (child != nullptr && !is_dw_module(child) && indices.count(cell->type)) {
+				log_debug("Applying changes to instance %s of %s in %s\n", cell, cell->type.unescape(), module);
+				if (indices.at(cell->type).apply_changes(parent_index, cell))
+					changed.insert(module);
+			}
+		}
+	}
+	return changed;
+}
+
 struct OptHierPass : Pass {
 	OptHierPass() : Pass("opt_hier", "perform cross-boundary optimization") {}
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    opt_hier [selection]\n");
+		log("    opt_hier [options] [selection]\n");
 		log("\n");
 		log("This pass considers the design hierarchy and propagates unused signals, constant\n");
 		log("signals, and tied-together signals across module boundaries to facilitate\n");
 		log("optimization. Only the selected modules are affected.\n");
+		log("\n");
+		log("A round carries each of these across one module boundary, so a constant tied\n");
+		log("off N levels above the logic that reads it takes N rounds to arrive. Getting\n");
+		log("through a register, or folding logic into a constant output, also takes the\n");
+		log("register or the logic to be optimized in between.\n");
+		log("\n");
+		log("    -max_iter <N>\n");
+		log("        run up to N rounds (0 for no limit), stopping at the first round that\n");
+		log("        changes nothing. Between rounds, the modules the last round rewrote are\n");
+		log("        optimized with opt_expr, opt_dff and opt_clean, so that what arrived can\n");
+		log("        fold before the next round carries it further. The default is 1: a\n");
+		log("        single round and no optimization in between.\n");
+		log("\n");
+		log("    -full\n");
+		log("        call opt_expr with -full between rounds.\n");
+		log("\n");
+		log("    -purge\n");
+		log("        call opt_clean with -purge between rounds.\n");
+		log("\n");
+		log("The number of rounds that changed something is left in the scratchpad as\n");
+		log("opt_hier.rounds, and opt_hier.saturated is set when the last round found\n");
+		log("nothing left to change.\n");
 		log("\n");
 		log("Note this pass changes port semantics on modules which are not the top.\n");
 		log("\n");
@@ -436,8 +518,24 @@ struct OptHierPass : Pass {
 	{
 		log_header(d, "Executing OPT_HIER pass.\n");
 
+		int max_iter = 1;
+		bool full = false, purge = false;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
+			if (args[argidx] == "-max_iter" && argidx + 1 < args.size()) {
+				max_iter = atoi(args[++argidx].c_str());
+				if (max_iter < 0)
+					log_cmd_error("-max_iter must not be negative\n");
+				continue;
+			}
+			if (args[argidx] == "-full") {
+				full = true;
+				continue;
+			}
+			if (args[argidx] == "-purge") {
+				purge = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, d);
@@ -445,53 +543,40 @@ struct OptHierPass : Pass {
 		if (!d->top_module())
 			log_cmd_error("Top module needs to be selected for opt_hier\n");
 
-		dict<IdString, ModuleIndex> indices;
-		for (auto module : d->modules()) {
-			log_debug("Building index for %s\n", module);
-			indices.emplace(module->name, ModuleIndex(module));
+		int rounds = 0;
+		bool saturated = false;
+		while (true) {
+			pool<Module *> changed = run_round(d);
+			if (changed.empty()) {
+				saturated = true;
+				break;
+			}
+			rounds++;
+			if (max_iter > 0 && rounds >= max_iter)
+				break;
+
+			// Only a module the round rewrote has anything new in it to fold. Every
+			// other module is exactly as it was before the round, so optimizing it would
+			// act on nothing this pass put there.
+			log("Round %d rewrote %d module(s); optimizing them before the next round.\n",
+					rounds, GetSize(changed));
+			RTLIL::Selection sel = RTLIL::Selection::EmptySelection(d);
+			for (auto module : changed)
+				sel.select(module);
+			Pass::call_on_selection(d, sel, full ? "opt_expr -full" : "opt_expr");
+			Pass::call_on_selection(d, sel, "opt_dff");
+			Pass::call_on_selection(d, sel, purge ? "opt_clean -purge" : "opt_clean");
 		}
 
-		dict<IdString, UsageData> usage_datas;
-		for (auto module : d->selected_modules(RTLIL::SELECT_WHOLE_ONLY, RTLIL::SB_UNBOXED_CMDERR)) {
-			if (module->get_bool_attribute(ID::top) || is_dw_module(module))
-				continue;
-
-			log_debug("Starting usage data for %s\n", module);
-			usage_datas.emplace(module->name, UsageData(module));
+		if (max_iter != 1) {
+			if (saturated)
+				log("Nothing left to carry across a boundary after %d round(s).\n", rounds);
+			else
+				log("Stopped at -max_iter %d with the last round still making changes.\n", max_iter);
 		}
-
-		for (auto module : d->modules()) {
-			for (auto cell : module->cells()) {
-				if (usage_datas.count(cell->type)) {
-					log_debug("Account for instance %s of %s in %s\n", cell, cell->type.unescape(), module);
-					usage_datas.at(cell->type).refine(cell, indices.at(module->name));
-				}
-			}
-		}
-
-		bool did_something = false;
-		for (auto module : d->selected_modules(RTLIL::SELECT_WHOLE_ONLY, RTLIL::SB_UNBOXED_CMDERR)) {
-			if (is_dw_module(module)) {
-				log_debug("Skipping DW module %s\n", log_id(module));
-				continue;
-			}
-
-			ModuleIndex &parent_index = indices.at(module->name);
-
-			if (usage_datas.count(module->name)) {
-				log_debug("Applying usage data changes to %s\n", module);
-				did_something |= usage_datas.at(module->name).apply_changes(parent_index);
-			}
-
-			for (auto cell : module->cells()) {
-				Module *child = d->module(cell->type);
-				if (child != nullptr && !is_dw_module(child) && indices.count(cell->type)) {
-					log_debug("Applying changes to instance %s of %s in %s\n", cell, cell->type.unescape(), module);
-					did_something |= indices.at(cell->type).apply_changes(parent_index, cell);
-				}
-			}
-		}
-		if (did_something)
+		d->scratchpad_set_int("opt_hier.rounds", rounds);
+		d->scratchpad_set_bool("opt_hier.saturated", saturated);
+		if (rounds > 0)
 			d->scratchpad_set_bool("opt.did_something", true);
 	}
 } OptHierPass;
