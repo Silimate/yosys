@@ -154,6 +154,10 @@ struct SimShared
 	struct MissingInput { std::string module, path; int width; };
 	std::string missing_input_file;
 	std::vector<MissingInput> missing_input_list;
+	// SILIMATE: a port the dump holds under its own name at a different width, driven on the
+	// bits the two have in common. Listed apart from the missing ones: it is bound, not absent.
+	struct PartialInput { std::string module, path; int fst_width, port_width; };
+	std::vector<PartialInput> partial_input_list;
 	bool blackbox_children = false;
 	pool<IdString> instance_root_modules;
 	double clk_period_override = 0.0;
@@ -1852,6 +1856,21 @@ struct SimWorker : SimShared
 			json.end_object();
 		}
 		json.end_array();
+		// Bound, but not over their whole width: the dump was narrower than the netlist port,
+		// so the bits above what it carried stay undriven. Kept apart from the missing ones so
+		// a reader counting absent ports is not handed a port that is driven.
+		json.name("partial_inputs");
+		json.begin_array();
+		for (auto &p : partial_input_list) {
+			json.begin_object();
+			json.compact();
+			json.entry("module", p.module);
+			json.entry("path", p.path);
+			json.entry("fst_width", p.fst_width);
+			json.entry("port_width", p.port_width);
+			json.end_object();
+		}
+		json.end_array();
 		json.end_object();
 		if (!missing_input_warning && !missing_input_list.empty())
 			log_error("Can't find port '%s' on module '%s' in FST. Use -missing-input-warn to leave it undriven and continue.\n",
@@ -1864,6 +1883,8 @@ struct SimWorker : SimShared
 	//   drive_bit_selects        — path[k] (packed d[0]/d[1], or din[1][k])
 	//   drive_flattened_element  — array element `\coeffs[-1]` / `\grid[1][2]` from a dump that
 	//                              flattened the array: one vector, or one 1-bit var per bit
+	//   drive_width_mismatch     — the dump has the name, at another width; last, so every
+	//                              shape above still claims its own port first
 	void bind_fst_input(SimInstance *t, Wire *wire, Module *mod)
 	{
 		std::string path = t->scope + "." + wire->name.unescape();
@@ -1875,7 +1896,33 @@ struct SimWorker : SimShared
 			return;
 		if (drive_flattened_element(t, wire, mod, path))
 			return;
+		if (drive_width_mismatch(t, wire, mod, path))
+			return;
 		report_missing_fst_input(path, mod, wire);
+	}
+
+	// SILIMATE: the dump holds this port under its own name but at another width, which
+	// synthesis produces whenever it narrows a port the dumper still writes in full. The name
+	// is right there, so "can't find port" is the wrong answer: drive the bits the two have in
+	// common, from the LSB, and say what was left over. A bracketed path is excluded because
+	// `d[0]` naming a wider `d` is a bit-select, which drive_bit_selects owns.
+	bool drive_width_mismatch(SimInstance *t, Wire *wire, Module *mod, const std::string &path)
+	{
+		if (!path.empty() && path.back() == ']')
+			return false;
+		fstHandle id = fst->getHandle(path);
+		if (id == 0)
+			return false;
+		int dumped = fst->getWidth(id), width = GetSize(wire);
+		if (dumped == width || dumped < 1)
+			return false;
+		int common = std::min(dumped, width);
+		t->fst_input_sigs.push_back({SigSpec(wire).extract(0, common), id, 0});
+		log_warning("Port '%s' on module '%s' is %d bit(s) in the FST and %d in the netlist; "
+				"driving the low %d bit(s).\n", path.c_str(), log_id(mod), dumped, width, common);
+		if (common < width)
+			partial_input_list.push_back({log_id(mod), path, dumped, width});
+		return true;
 	}
 
 	// Same dump name, usable width: either an exact vector or a sim_src_bit slice of a wider one.
