@@ -462,25 +462,36 @@ struct RegRenameInstance {
 		return objects.count(vcd_scope + "." + object_root(RTLIL::unescape_id(bit.wire->name))) > 0;
 	}
 
+	// What drives each bit of a module: a cell, or the other side of a direct connection
+	struct EnableGraph {
+		dict<SigBit, Cell *> cells;
+		dict<SigBit, SigBit> aliases;
+		dict<SigBit, bool> memo;
+	};
+
 	// Whether resim can settle this bit: the waveform gives it, or every bit driving it settles
 	bool bit_determined(const dict<std::string, std::vector<DumpLeaf>> &objects, SigBit bit,
-			    const dict<SigBit, Cell *> &drivers, dict<SigBit, bool> &memo) const
+			    EnableGraph &graph) const
 	{
 		if (bit_from_waveform(objects, bit))
 			return true;
-		auto seen = memo.find(bit);
-		if (seen != memo.end())
+		auto seen = graph.memo.find(bit);
+		if (seen != graph.memo.end())
 			return seen->second;
-		auto it = drivers.find(bit);
-		if (it == drivers.end())
+		graph.memo[bit] = false; // a combinational loop settles to nothing
+		bool all;
+		auto alias = graph.aliases.find(bit);
+		if (alias != graph.aliases.end())
+			all = bit_determined(objects, alias->second, graph);
+		else if (auto it = graph.cells.find(bit); it != graph.cells.end()) {
+			all = true;
+			for (auto &conn : it->second->connections())
+				if (!it->second->output(conn.first))
+					for (auto in : conn.second)
+						all = all && bit_determined(objects, in, graph);
+		} else
 			return false; // undriven here, and no lookup resolved it
-		memo[bit] = false; // a combinational loop settles to nothing
-		bool all = true;
-		for (auto &conn : it->second->connections())
-			if (!it->second->output(conn.first))
-				for (auto in : conn.second)
-					all = all && bit_determined(objects, in, drivers, memo);
-		memo[bit] = all;
+		graph.memo[bit] = all;
 		return all;
 	}
 
@@ -490,9 +501,8 @@ struct RegRenameInstance {
 	// Runs after process_registers so bound Q wires already carry their dumped names.
 	void stamp_icgs(const dict<std::string, std::vector<DumpLeaf>> &objects, BindStats &stats)
 	{
-		dict<SigBit, Cell *> drivers; // built on the first ICG, since most modules have none
-		dict<SigBit, bool> memo;
-		bool have_drivers = false;
+		EnableGraph graph; // built on the first ICG, since most modules have none
+		bool have_graph = false;
 
 		for (auto cell : module->cells()) {
 			if (cell->type != ID($icg) || !cell->hasPort(ID::EN))
@@ -504,18 +514,22 @@ struct RegRenameInstance {
 				stamp_status(stats, cell, status);
 				continue;
 			}
-			if (!have_drivers) {
+			if (!have_graph) {
 				for (auto other : module->cells())
 					for (auto &conn : other->connections())
 						if (other->output(conn.first))
 							for (auto bit : conn.second)
-								drivers[bit] = other;
-				have_drivers = true;
+								graph.cells[bit] = other;
+				// An alias carries the value of the bit on its other side
+				for (auto &conn : module->connections())
+					for (int i = 0; i < GetSize(conn.first); i++)
+						graph.aliases[conn.first[i]] = conn.second[i];
+				have_graph = true;
 			}
 
 			SigBit bit = en[0];
 			std::string name = bit.is_wire() ? RTLIL::unescape_id(bit.wire->name) : "";
-			bool bound = bit_determined(objects, bit, drivers, memo);
+			bool bound = bit_determined(objects, bit, graph);
 			note(stats, status, cell, 0, 1, bound ? KIND_BOUND : KIND_ABSENT,
 					bound ? "" : name, 1);
 			stamp_status(stats, cell, status);
