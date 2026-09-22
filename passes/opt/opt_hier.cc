@@ -376,6 +376,13 @@ struct UsageData {
 			log("Substituting constant %s for input terminal '%s' in module '%s'\n",
 				log_signal(const_), log_signal(chunk), module);
 		}
+		// A substitution is a change even when nothing else folds because of it: in a
+		// module that only hands the input on to a child, it is the step that brings the
+		// constant one boundary closer to its reader, and a caller looping to a fixpoint
+		// has to run again to carry it the rest of the way. The rewrite leaves no
+		// reference to the port bit behind, so the next call finds nothing to do here.
+		if (!applied_constants2.empty())
+			did_something = true;
 
 		// Propagate tied-together inputs
 		dict<SigBit, SigBit> ties;
@@ -404,6 +411,7 @@ struct UsageData {
 		if (applied_ties.size()) {
 			log("Replacing %zu input terminal bits with tie-togethers in module '%s'\n",
 					applied_ties.size(), module);
+			did_something = true;
 		}
 		return did_something;
 	}
