@@ -72,6 +72,13 @@ select -assert-count 1 c:fa_fanout
 # whole of why the operands no longer have to update together
 select -assert-count 0 c:a0 %x:+[A] w:ra %i
 select -assert-count 0 c:a0 %x:+[B] w:rb %i
+# each mux is named for the register and the control it came off, and so is
+# the net it drives: a lowered netlist is still one a reader can navigate
+select -assert-count 1 c:fa_ce_d
+select -assert-count 1 c:fb_ce_d
+select -assert-count 1 w:fa_ce_d_y
+select -assert-count 1 w:fb_ce_d_y
+select -assert-count 0 w:$auto$*
 
 rename ennet gate
 design -import orig -as gold
@@ -112,6 +119,7 @@ opt_retime -flop fa -cut a0 -forward
 check -assert
 # 8'h05 + 8'h03 on the net the cut used to drive combinationally
 select -assert-count 1 w:q a:init=8'h08 %i
+select -assert-count 0 w:$auto$*
 
 rename eninit gate
 design -import orig -as gold
@@ -149,6 +157,13 @@ check -assert
 select -assert-count 0 t:$sdffe
 select -assert-count 4 t:$mux
 select -assert-count 3 t:$dff
+# two muxes off one register still say which control each of them was, rather
+# than both answering to the same name with a number to tell them apart
+select -assert-count 1 c:fa_ce_d
+select -assert-count 1 c:fa_srst_d
+select -assert-count 1 c:fb_ce_d
+select -assert-count 1 c:fb_srst_d
+select -assert-count 0 w:$auto$*
 
 rename srstmix gate
 design -import orig -as gold
@@ -157,6 +172,51 @@ hierarchy -top miter
 proc; opt
 # r1 and r2 are free, so the proof covers one operand resetting while the
 # other holds or updates
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# One net driving both the enable and the sync reset of a register, which is
+# what makes the two muxes it lowers to indistinguishable by their select. The
+# chain is what tells them apart: the outer mux is the control with priority,
+# and $sdffe gives that to the reset. Neither the selects nor the order the
+# cells went in can answer here, the latter because a module hands out its
+# cells in the order its index holds them rather than the order they arrived.
+log -header "Moved: one net carrying both controls still names both muxes"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module sharedctl(input clk, g, e2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra, rb;
+  $sdffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1), .SRST_POLARITY(1'b1),
+           .SRST_VALUE(8'h11)) fa (.CLK(clk), .EN(g), .SRST(g), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(e2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+EOF
+hierarchy -top sharedctl
+check -assert
+design -save orig
+
+opt_retime -flop fa -cut a0 -forward
+check -assert
+select -assert-count 1 c:fa_ce_d
+select -assert-count 1 c:fa_srst_d
+select -assert-count 0 w:$auto$*
+# and the names are on the right cells: the enable mux feeds the reset mux,
+# which is the one the cut now reads, so a swap of the two shows up here
+select -assert-count 1 c:fa_ce_d %x:+[Y] %co c:fa_srst_d %i
+select -assert-count 1 c:fa_srst_d %x:+[Y] %co c:a0 %i
+select -assert-count 0 c:fa_srst_d %x:+[Y] %co c:fa_ce_d %i
+
+rename sharedctl gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
 sat -seq 8 -set-init-zero -prove-asserts -verify
 design -reset
 log -pop
@@ -301,6 +361,7 @@ design -load orig
 opt_retime -flop fa -cut a0 -forward
 check -assert
 select -assert-count 1 t:$dffe
+select -assert-count 0 w:$auto$*
 clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
 select -assert-count 1 t:$icg
 design -reset
@@ -351,6 +412,7 @@ check -assert
 scratchpad -assert opt_retime.moved true
 select -assert-count 2 t:$mux
 select -assert-count 3 t:$dff
+select -assert-count 0 w:$auto$*
 
 # And backward still moves this same flop when the cut really is behind it, so
 # what the direction check refuses is the wrong answer rather than every one.

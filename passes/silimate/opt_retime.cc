@@ -2393,6 +2393,58 @@ pool<Cell *> path_sources(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 	return sources;
 }
 
+// Name the cells and nets a lowering built, which the kernel only half does.
+// FfData raises the muxes through RTLIL::Module::Mux, which names the cell for
+// the register but takes an $auto$ id for the wire it drives; muxes are the one
+// shape kernel/rtlil.cc leaves anonymous on purpose. On top of that unmap_ce
+// and unmap_srst both ask for the suffix "d", so a register losing both
+// controls comes back as flop_d and flop_d_1. Every other cell this pass builds
+// is named for the cell or the register behind it, and these are worth no less.
+//
+// Which control each mux came off is read off the chain, and deliberately not
+// off the select or the order they went in. A register is free to hold its
+// enable and its reset on one net, which leaves the two selects identical and
+// saying nothing; and the order is no better, because a module iterates its
+// cells out of its own index rather than in the order they were added. What
+// does hold either way is that the outer mux drives what is now the register's
+// D, and that the outer mux is whichever control had priority.
+void name_lowered_controls(Module *module, SigMap &sigmap, const pool<Cell *> &before,
+		IdString flop, bool had_ce, bool had_srst, bool ce_over_srst,
+		const SigSpec &lowered_d)
+{
+	// Read out in full before anything is renamed, which rehashes the very
+	// index this would otherwise still be walking.
+	std::vector<Cell *> built;
+	for (auto cell : module->cells())
+		if (!before.count(cell))
+			built.push_back(cell);
+
+	for (auto cell : built) {
+		if (!cell->hasPort(ID::S) || !cell->hasPort(ID::Y))
+			continue;
+		bool outer = sigmap(cell->getPort(ID::Y)) == sigmap(lowered_d);
+		bool is_ce;
+		if (!had_srst)
+			is_ce = true;
+		else if (!had_ce)
+			is_ce = false;
+		else
+			is_ce = outer ? ce_over_srst : !ce_over_srst;
+		module->rename(cell,
+				module->uniquify(flop.str() + (is_ce ? "_ce_d" : "_srst_d")));
+	}
+
+	// The net each one drives, named for whatever the cell ended up called.
+	for (auto cell : built) {
+		if (!cell->hasPort(ID::Y))
+			continue;
+		for (const auto &chunk : cell->getPort(ID::Y).chunks())
+			if (chunk.wire && chunk.wire->name.begins_with("$auto$"))
+				module->rename(chunk.wire,
+						module->uniquify(cell->name.str() + "_y"));
+	}
+}
+
 // Lower the synchronous controls of every register the move would merge, so
 // that registers disagreeing on an enable or a sync reset can still move
 // forward. Each one keeps its state and its next value becomes a mux the cut
@@ -2450,7 +2502,19 @@ bool lower_path_controls(Module *module, Cell *flop, Cell *cut)
 		if (!ff.has_ce && !ff.has_srst)
 			continue;
 		log("Lowering the controls of flop %s into logic.\n", log_id(cell));
+		// A census of the module, and which controls the register still has,
+		// so that what the unmap adds can be named for the register it came
+		// off. Taken before the unmap and spent before the emit, which is
+		// what keeps the register itself out of the census.
+		pool<Cell *> before;
+		for (auto other : module->cells())
+			before.insert(other);
+		IdString name = ff.name;
+		bool had_ce = ff.has_ce, had_srst = ff.has_srst;
+		bool ce_over_srst = ff.ce_over_srst;
 		ff.unmap_ce_srst();
+		name_lowered_controls(module, sigmap, before, name, had_ce, had_srst,
+				ce_over_srst, ff.sig_d);
 		ff.emit();
 	}
 	return true;
