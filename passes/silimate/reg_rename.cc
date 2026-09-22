@@ -544,7 +544,7 @@ struct RegRenameInstance {
 						resolve(obj_it->second, obj_width, obj_bit, leaf, leaf_bit);
 
 				// A flattened interface pin is dumped under the parent's actual, so it is not
-				// in this scope's object map. bind_interface_ports already put that path on the
+				// in this scope's object map. bind_input_ports already put that path on the
 				// pin, so rename onto the pin itself and let sim_src do the lookup.
 				Wire *pin = placed ? nullptr : module->wire(RTLIL::escape_id(obj));
 				if (pin && pin->has_attribute(ID(sim_src)) && GetSize(pin) == obj_width &&
@@ -652,14 +652,23 @@ struct RegRenameInstance {
 		commit(bit_map, claimed_bits, port_aliases, drop_wires);
 	}
 
-	// Handle SV interface ports.
-	void bind_interface_ports(FstData &fst)
+	// Resolve each child's input ports through the parent's actual, for the ports a dump does
+	// not carry under the child's own scope: an interface modport member, a struct field, and
+	// an unpacked-array element are all split into one port per leaf, while the waveform holds
+	// only the parent signal those ports are wired to.
+	void bind_input_ports(FstData &fst)
 	{
 		for (auto &it : children) {
 			Cell *cell = it.first;
 			RegRenameInstance *child = it.second;
 			for (auto wire : child->module->wires()) {
-				if (!wire->get_bool_attribute(ID(interface_port)) || !cell->hasPort(wire->name))
+				if (!wire->port_input || wire->port_output || !cell->hasPort(wire->name))
+					continue;
+				// The dump carries this port under the child's own scope, which sim looks up
+				// first; resolving it through the parent as well would say nothing new.
+				fstHandle own = fst.getHandle(child->vcd_scope + "." +
+						RTLIL::unescape_id(wire->name));
+				if (own && (int)fst.getWidth(own) == GetSize(wire))
 					continue;
 				SigSpec sig = cell->getPort(wire->name);
 				// Parent ties the pin off; the cut removes that driver, so carry the value.
@@ -667,9 +676,13 @@ struct RegRenameInstance {
 					wire->set_string_attribute(ID(sim_const), sig.as_const().as_string());
 					continue;
 				}
-				if (!sig.is_wire())
-					continue; // slices/concats span more than one dumped signal
-				Wire *actual = sig.as_wire();
+				if (!sig.is_chunk())
+					continue; // a concat spans more than one dumped signal
+				SigChunk chunk = sig.as_chunk();
+				Wire *actual = chunk.wire;
+				if (!actual)
+					continue;
+				int offset = chunk.offset;
 
 				// A passthrough pin's parent may itself be tied off, which only the level
 				// above could see, so carry that value one more hop.
@@ -678,18 +691,26 @@ struct RegRenameInstance {
 							actual->get_string_attribute(ID(sim_const)));
 					continue;
 				}
-				std::string src = actual->has_attribute(ID(sim_src))
-					? actual->get_string_attribute(ID(sim_src))
-					: vcd_scope + "." + RTLIL::unescape_id(actual->name);
+				std::string src;
+				if (actual->has_attribute(ID(sim_src))) {
+					src = actual->get_string_attribute(ID(sim_src));
+					// The level above resolved its own port to a slice; ours sits inside it.
+					if (actual->has_attribute(ID(sim_src_bit)))
+						offset += std::stoi(actual->get_string_attribute(ID(sim_src_bit)));
+				} else {
+					src = vcd_scope + "." + RTLIL::unescape_id(actual->name);
+				}
 				fstHandle id = fst.getHandle(src);
-				if (!id || fst.getWidth(id) != GetSize(wire))
+				if (!id || offset < 0 || offset + GetSize(wire) > (int)fst.getWidth(id))
 					continue;
 				wire->set_string_attribute(ID(sim_src), src);
+				if (offset || (int)fst.getWidth(id) != GetSize(wire))
+					wire->set_string_attribute(ID(sim_src_bit), std::to_string(offset));
 				if (debug)
-					log("Interface port %s.%s resolved to %s\n", child->vcd_scope.c_str(),
-							RTLIL::unescape_id(wire->name).c_str(), src.c_str());
+					log("Input port %s.%s resolved to %s[%d]\n", child->vcd_scope.c_str(),
+							RTLIL::unescape_id(wire->name).c_str(), src.c_str(), offset);
 			}
-			child->bind_interface_ports(fst);
+			child->bind_input_ports(fst);
 		}
 	}
 
@@ -970,7 +991,7 @@ struct RegRenamePass : public Pass {
 			auto objects = collect_objects(fst, scopes, debug);
 			log("Extracted %d RTL object(s) from waveform\n", GetSize(objects));
 
-			root.bind_interface_ports(fst);
+			root.bind_input_ports(fst);
 			BindStats stats;
 			root.process_all(objects, stats, fst);
 			report_unbound(stats, objects, debug);
