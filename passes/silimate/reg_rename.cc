@@ -740,15 +740,15 @@ struct RegRenameInstance {
 		commit(bit_map, claimed_bits, port_aliases, drop_wires);
 	}
 
-	// Resolve a child's input ports through the parent's actual, for the leaf ports a dump
-	// carries only as the parent signal they are wired to
+	// Point each child input or interface pin at the parent actual a dump carries it under
 	void bind_input_ports(FstData &fst)
 	{
 		for (auto &it : children) {
 			Cell *cell = it.first;
 			RegRenameInstance *child = it.second;
 			for (auto wire : child->module->wires()) {
-				if (!wire->port_input || wire->port_output || !cell->hasPort(wire->name))
+				if (!(wire->port_input || wire->get_bool_attribute(ID(interface_port))) ||
+						!cell->hasPort(wire->name))
 					continue;
 				// Dumped under the child's own scope, which sim looks up first
 				fstHandle own = fst.getHandle(child->vcd_scope + "." +
