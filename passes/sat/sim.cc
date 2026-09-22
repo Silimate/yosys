@@ -154,8 +154,7 @@ struct SimShared
 	struct MissingInput { std::string module, path; int width; };
 	std::string missing_input_file;
 	std::vector<MissingInput> missing_input_list;
-	// SILIMATE: a port the dump holds under its own name at a different width, driven on the
-	// bits the two have in common. Listed apart from the missing ones: it is bound, not absent.
+	// SILIMATE: a port the dump names at another width, bound on the bits the two share
 	struct PartialInput { std::string module, path; int fst_width, port_width; };
 	std::vector<PartialInput> partial_input_list;
 	bool blackbox_children = false;
@@ -1856,9 +1855,7 @@ struct SimWorker : SimShared
 			json.end_object();
 		}
 		json.end_array();
-		// Bound, but not over their whole width: the dump was narrower than the netlist port,
-		// so the bits above what it carried stay undriven. Kept apart from the missing ones so
-		// a reader counting absent ports is not handed a port that is driven.
+		// Bound but short: a narrower dump leaves the port's top bits undriven
 		json.name("partial_inputs");
 		json.begin_array();
 		for (auto &p : partial_input_list) {
@@ -1901,11 +1898,7 @@ struct SimWorker : SimShared
 		report_missing_fst_input(path, mod, wire);
 	}
 
-	// SILIMATE: the dump holds this port under its own name but at another width, which
-	// synthesis produces whenever it narrows a port the dumper still writes in full. The name
-	// is right there, so "can't find port" is the wrong answer: drive the bits the two have in
-	// common, from the LSB, and say what was left over. A bracketed path is excluded because
-	// `d[0]` naming a wider `d` is a bit-select, which drive_bit_selects owns.
+	// SILIMATE: same name, another width -- drive the bits the two share rather than report it missing
 	bool drive_width_mismatch(SimInstance *t, Wire *wire, Module *mod, const std::string &path)
 	{
 		if (!path.empty() && path.back() == ']')
@@ -3705,7 +3698,12 @@ struct SimPass : public Pass {
 		log("        write every input port missing from the FST/VCD to the given JSON file,\n");
 		log("        not just the first few named in the log:\n");
 		log("            {\"count\": <ports>, \"bits\": <total width>, \"missing_inputs\":\n");
-		log("             [{\"module\": <module>, \"path\": <scope.port>, \"width\": <bits>}, ...]}\n");
+		log("             [{\"module\": <module>, \"path\": <scope.port>, \"width\": <bits>}, ...],\n");
+		log("             \"partial_inputs\":\n");
+		log("             [{\"module\": <module>, \"path\": <scope.port>,\n");
+		log("               \"fst_width\": <bits>, \"port_width\": <bits>}, ...]}\n");
+		log("        partial_inputs holds ports the dump names at a narrower width, bound on\n");
+		log("        the bits the two share; they are driven, so they are not counted missing.\n");
 		log("        The file is written, with a count of 0 if nothing is missing, once every\n");
 		log("        root's inputs are bound. Without -missing-input-warn the replay still\n");
 		log("        aborts on the first missing input, but only after the file is written.\n");

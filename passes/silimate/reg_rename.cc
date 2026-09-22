@@ -206,12 +206,13 @@ static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, Dum
 	if (leaves.empty() || bit < 0 || bit >= width)
 		return false;
 
-	// A single leaf covering the object: the bit indexes straight into it. A dump narrower
-	// than the object is normal -- a converter can dump fewer bits than the register holds --
-	// so place the bits it carries and leave the rest unplaced. A wider dump means the leaf
-	// is not this object after all.
+	// A single leaf covering the object: the bit indexes straight into it
 	if (leaves.size() == 1 && leaves[0].rel.empty()) {
+		// A converter may dump fewer bits than the object holds; bind those and leave the rest
 		if (leaves[0].width > width || bit >= leaves[0].width)
+			return false;
+		// A narrow leaf at a nonzero index needs the object's own LSB to align against
+		if (leaves[0].width != width && leaves[0].offset != 0)
 			return false;
 		out = leaves[0];
 		leaf_bit = bit;
@@ -451,23 +452,47 @@ struct RegRenameInstance {
 		cell->set_string_attribute(ID(rtl_bind_status), rtl_bind_status_compress(words));
 	}
 
+	// Whether the waveform fixes this bit on its own, without simulating anything to reach it
+	bool bit_from_waveform(const dict<std::string, std::vector<DumpLeaf>> &objects, SigBit bit) const
+	{
+		if (!bit.is_wire())
+			return true; // a constant
+		if (bit.wire->has_attribute(ID(sim_src)) || bit.wire->has_attribute(ID(sim_const)))
+			return true;
+		return objects.count(vcd_scope + "." + object_root(RTLIL::unescape_id(bit.wire->name))) > 0;
+	}
+
+	// Whether resim can settle this bit: the waveform gives it, or every bit driving it settles
+	bool bit_determined(const dict<std::string, std::vector<DumpLeaf>> &objects, SigBit bit,
+			    const dict<SigBit, Cell *> &drivers, dict<SigBit, bool> &memo) const
+	{
+		if (bit_from_waveform(objects, bit))
+			return true;
+		auto seen = memo.find(bit);
+		if (seen != memo.end())
+			return seen->second;
+		auto it = drivers.find(bit);
+		if (it == drivers.end())
+			return false; // undriven here, and no lookup resolved it
+		memo[bit] = false; // a combinational loop settles to nothing
+		bool all = true;
+		for (auto &conn : it->second->connections())
+			if (!it->second->output(conn.first))
+				for (auto in : conn.second)
+					all = all && bit_determined(objects, in, drivers, memo);
+		memo[bit] = all;
+		return all;
+	}
+
 	// Stamp a bind verdict on each inferred clock gate, from its enable.
-	//
-	// An ICG has no RTL object of its own to decode: it is synthesised from the gating logic,
-	// and its GCLK output is computed by resim rather than dumped, so no waveform can carry it.
-	// Its enable decides the verdict, and the question there is whether the enable is
-	// determined, not whether it was dumped under a name -- gating logic is internal, so an
-	// enable is rarely a dumped signal and would otherwise read as absent almost everywhere.
-	//
-	// So an enable counts when the waveform holds it, when a constant fixes it, or when logic
-	// inside this module drives it, since resim then computes it from a fanin the registers
-	// above have already bound. It is absent only when nothing determines it: an input port
-	// that no lookup resolved. Runs after process_registers so those Q wires already carry
-	// their dumped names.
+	// An ICG is synthesised from the gating logic and its GCLK is computed by resim, so no
+	// waveform carries it; the enable is what decides whether its activity is measured.
+	// Runs after process_registers so bound Q wires already carry their dumped names.
 	void stamp_icgs(const dict<std::string, std::vector<DumpLeaf>> &objects, BindStats &stats)
 	{
-		pool<SigBit> driven; // filled on the first ICG, since most modules have none
-		bool have_driven = false;
+		dict<SigBit, Cell *> drivers; // built on the first ICG, since most modules have none
+		dict<SigBit, bool> memo;
+		bool have_drivers = false;
 
 		for (auto cell : module->cells()) {
 			if (cell->type != ID($icg) || !cell->hasPort(ID::EN))
@@ -479,24 +504,18 @@ struct RegRenameInstance {
 				stamp_status(stats, cell, status);
 				continue;
 			}
-			if (!have_driven) {
+			if (!have_drivers) {
 				for (auto other : module->cells())
 					for (auto &conn : other->connections())
 						if (other->output(conn.first))
 							for (auto bit : conn.second)
-								driven.insert(bit);
-				for (auto &conn : module->connections())
-					for (auto bit : conn.first)
-						driven.insert(bit);
-				have_driven = true;
+								drivers[bit] = other;
+				have_drivers = true;
 			}
 
 			SigBit bit = en[0];
 			std::string name = bit.is_wire() ? RTLIL::unescape_id(bit.wire->name) : "";
-			bool bound = !bit.is_wire() || driven.count(bit) ||
-					bit.wire->has_attribute(ID(sim_src)) ||
-					bit.wire->has_attribute(ID(sim_const)) ||
-					objects.count(vcd_scope + "." + object_root(name));
+			bool bound = bit_determined(objects, bit, drivers, memo);
 			note(stats, status, cell, 0, 1, bound ? KIND_BOUND : KIND_ABSENT,
 					bound ? "" : name, 1);
 			stamp_status(stats, cell, status);
@@ -707,10 +726,8 @@ struct RegRenameInstance {
 		commit(bit_map, claimed_bits, port_aliases, drop_wires);
 	}
 
-	// Resolve each child's input ports through the parent's actual, for the ports a dump does
-	// not carry under the child's own scope: an interface modport member, a struct field, and
-	// an unpacked-array element are all split into one port per leaf, while the waveform holds
-	// only the parent signal those ports are wired to.
+	// Resolve a child's input ports through the parent's actual, for the leaf ports a dump
+	// carries only as the parent signal they are wired to
 	void bind_input_ports(FstData &fst)
 	{
 		for (auto &it : children) {
@@ -719,8 +736,7 @@ struct RegRenameInstance {
 			for (auto wire : child->module->wires()) {
 				if (!wire->port_input || wire->port_output || !cell->hasPort(wire->name))
 					continue;
-				// The dump carries this port under the child's own scope, which sim looks up
-				// first; resolving it through the parent as well would say nothing new.
+				// Dumped under the child's own scope, which sim looks up first
 				fstHandle own = fst.getHandle(child->vcd_scope + "." +
 						RTLIL::unescape_id(wire->name));
 				if (own && (int)fst.getWidth(own) == GetSize(wire))
