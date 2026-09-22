@@ -75,6 +75,20 @@ const TypeRange *RtlBinder::find_variable(const std::string &path, std::string &
 		if (const TypeRange *tr = (const TypeRange *)table->GetValue(var.c_str()))
 			return parse_steps(path, cut, steps) ? tr : nullptr;
 	}
+	// An interface instance is flattened into its module under `<instance>_<member>`, so a name
+	// the table has no entry for can still be a member of one it does. The dump spells that
+	// member `<instance>.<member>`, which is the step this rebuilds. Tried only after the scan
+	// above, so a variable whose own name holds an underscore still matches whole.
+	for (size_t cut = path.find('_'); table && cut != std::string::npos; cut = path.find('_', cut + 1)) {
+		var = path.substr(0, cut);
+		const TypeRange *tr = (const TypeRange *)table->GetValue(var.c_str());
+		if (!tr)
+			continue;
+		std::string dotted = path;
+		dotted[cut] = '.';
+		if (parse_steps(dotted, cut, steps))
+			return tr;
+	}
 	return nullptr;
 }
 
