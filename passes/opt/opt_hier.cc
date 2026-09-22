@@ -21,6 +21,9 @@
 #include "kernel/rtlil.h"
 #include "kernel/sigtools.h"
 
+#include <cerrno>
+#include <climits>
+
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
@@ -527,8 +530,9 @@ struct OptHierPass : Pass {
 				// ("-max_iter typo") must not quietly remove the cap.
 				const std::string &value = args[++argidx];
 				char *end = nullptr;
+				errno = 0;
 				long parsed = strtol(value.c_str(), &end, 10);
-				if (value.empty() || *end != '\0' || parsed < 0 || parsed > INT_MAX)
+				if (value.empty() || *end != '\0' || errno == ERANGE || parsed < 0 || parsed > INT_MAX)
 					log_cmd_error("-max_iter expects a non-negative integer, got '%s'.\n", value.c_str());
 				max_iter = int(parsed);
 				continue;
