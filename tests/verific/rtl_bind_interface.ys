@@ -1,0 +1,45 @@
+# RTL bind places a register that is a member of an interface. Verific flattens the member to
+# `<interface><separator><member>`, using db_block_name_separator for an interface instance and
+# db_interface_modport_field_separator for an interface port, so the stamp must not depend on
+# which separator the netlist was elaborated with.
+
+log -header "Block separator \"_\": members are named i0_a, i0_b_c, m_a, m_b_c"
+log -push
+verific -cfg db_block_name_separator "_"
+verific -cfg db_synopsys_register_names 1
+verific -sv rtl_bind_interface.sv
+logger -expect log "RTL bind of module top: .*, 0 unbound\." 1
+logger -expect log "RTL bind of module producer.*, 0 unbound\." 1
+verific -import -all -top top
+logger -check-expected
+select -assert-count 2 top/a:rtl_bind=i0/8*
+select -assert-count 1 top/a:rtl_bind=i0_x/4*
+select -assert-count 2 producer*/a:rtl_bind=m/8*
+log -pop
+
+log -header "Block separator \".\": the same stamps"
+log -push
+design -reset
+verific -cfg db_block_name_separator "."
+verific -cfg db_synopsys_register_names 1
+verific -sv rtl_bind_interface.sv
+logger -expect log "RTL bind of module top: .*, 0 unbound\." 1
+logger -expect log "RTL bind of module producer.*, 0 unbound\." 1
+verific -import -all -top top
+logger -check-expected
+select -assert-count 2 top/a:rtl_bind=i0/8*
+select -assert-count 1 top/a:rtl_bind=i0_x/4*
+select -assert-count 2 producer*/a:rtl_bind=m/8*
+log -pop
+
+log -header "Modport separator \"__\": port members are named m__a, m__b_c"
+log -push
+design -reset
+verific -cfg db_interface_modport_field_separator "__"
+verific -cfg db_synopsys_register_names 1
+verific -sv rtl_bind_interface.sv
+logger -expect log "RTL bind of module producer.*, 0 unbound\." 1
+verific -import -all -top top
+logger -check-expected
+select -assert-count 2 producer*/a:rtl_bind=m/8*
+log -pop

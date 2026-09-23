@@ -22,6 +22,7 @@
 #ifdef YOSYS_ENABLE_VERIFIC
 
 #include "DataBase.h"
+#include "RuntimeFlags.h"
 
 USING_YOSYS_NAMESPACE
 using namespace Verific;
@@ -75,6 +76,10 @@ const TypeRange *RtlBinder::find_variable(const std::string &path, std::string &
 		if (const TypeRange *tr = (const TypeRange *)table->GetValue(var.c_str()))
 			return parse_steps(path, cut, steps) ? tr : nullptr;
 	}
+	// A flattened interface member, which the table only holds under its interface
+	auto it = flattened.find(path.substr(0, path.find_first_of(".[")));
+	if (it != flattened.end())
+		return find_variable(it->second + path.substr(it->first.size()), var, steps);
 	return nullptr;
 }
 
@@ -325,6 +330,21 @@ void RtlBinder::begin(Netlist *netlist)
 	nl = netlist;
 	vhdl = nl->IsFromVhdl();
 	net_places.clear();
+
+	// Verific names an interface member `<interface><sep><member>`, with a separator per kind
+	flattened.clear();
+	const char *block_sep = RuntimeFlags::GetStringVar("db_block_name_separator");
+	const char *modport_sep = RuntimeFlags::GetStringVar("db_interface_modport_field_separator");
+	MapIter mi, mj;
+	const char *name, *member;
+	TypeRange *tr;
+	FOREACH_MAP_ITEM(nl->GetTypeRangeTable(), mi, &name, &tr) {
+		const char *sep = tr->IsTypeVerilogInterface() ? (block_sep ? block_sep : ".")
+				: tr->IsTypeVerilogModport() ? (modport_sep ? modport_sep : "_") : nullptr;
+		if (sep)
+			FOREACH_MAP_ITEM(tr->GetElementTypeRangeMap(), mj, &member, 0)
+				flattened[std::string(name) + sep + member] = std::string(name) + "." + member;
+	}
 }
 
 void RtlBinder::stamp(Instance *inst, const RTLIL::SigSpec &sig_q, const std::vector<RTLIL::Cell *> &cells)
