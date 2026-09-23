@@ -452,93 +452,6 @@ struct RegRenameInstance {
 		cell->set_string_attribute(ID(rtl_bind_status), rtl_bind_status_compress(words));
 	}
 
-	// Whether the waveform fixes this bit on its own, without simulating anything to reach it
-	bool bit_from_waveform(const dict<std::string, std::vector<DumpLeaf>> &objects, SigBit bit) const
-	{
-		if (!bit.is_wire())
-			return true; // a constant
-		if (bit.wire->has_attribute(ID(sim_src)) || bit.wire->has_attribute(ID(sim_const)))
-			return true;
-		return objects.count(vcd_scope + "." + object_root(RTLIL::unescape_id(bit.wire->name))) > 0;
-	}
-
-	// What drives each bit of a module: a cell, or the other side of a direct connection
-	struct EnableGraph {
-		dict<SigBit, Cell *> cells;
-		dict<SigBit, SigBit> aliases;
-		dict<SigBit, bool> memo;
-	};
-
-	// Whether resim can settle this bit: the waveform gives it, or every bit driving it settles
-	bool bit_determined(const dict<std::string, std::vector<DumpLeaf>> &objects, SigBit bit,
-			    EnableGraph &graph) const
-	{
-		if (bit_from_waveform(objects, bit))
-			return true;
-		auto seen = graph.memo.find(bit);
-		if (seen != graph.memo.end())
-			return seen->second;
-		graph.memo[bit] = false; // a combinational loop settles to nothing
-		bool all;
-		auto alias = graph.aliases.find(bit);
-		if (alias != graph.aliases.end())
-			all = bit_determined(objects, alias->second, graph);
-		else if (auto it = graph.cells.find(bit); it != graph.cells.end()) {
-			all = true;
-			for (auto &conn : it->second->connections())
-				if (!it->second->output(conn.first))
-					for (auto in : conn.second)
-						all = all && bit_determined(objects, in, graph);
-		} else
-			return false; // undriven here, and no lookup resolved it
-		graph.memo[bit] = all;
-		return all;
-	}
-
-	// Stamp a bind verdict on each inferred clock gate, from its enable.
-	// An ICG is synthesised from the gating logic and its GCLK is computed by resim, so no
-	// waveform carries it; the enable is what decides whether its activity is measured.
-	// Runs after process_registers so bound Q wires already carry their dumped names.
-	void stamp_icgs(const dict<std::string, std::vector<DumpLeaf>> &objects, BindStats &stats)
-	{
-		EnableGraph graph; // built on the first ICG, since most modules have none
-		bool have_graph = false;
-
-		for (auto cell : module->cells()) {
-			if (cell->type != ID($icg) || !cell->hasPort(ID::EN))
-				continue;
-			SigSpec en = cell->getPort(ID::EN);
-			std::vector<int> status(1, KIND_UNWIRED);
-			if (GetSize(en) != 1) {
-				note(stats, status, cell, 0, 1, KIND_UNWIRED);
-				stamp_status(stats, cell, status);
-				continue;
-			}
-			if (!have_graph) {
-				for (auto other : module->cells())
-					for (auto &conn : other->connections())
-						if (other->output(conn.first))
-							for (auto bit : conn.second)
-								graph.cells[bit] = other;
-				// An alias carries the value of the bit on its other side
-				for (auto &conn : module->connections())
-					for (int i = 0; i < GetSize(conn.first); i++)
-						graph.aliases[conn.first[i]] = conn.second[i];
-				have_graph = true;
-			}
-
-			SigBit bit = en[0];
-			std::string name = bit.is_wire() ? RTLIL::unescape_id(bit.wire->name) : "";
-			bool bound = bit_determined(objects, bit, graph);
-			note(stats, status, cell, 0, 1, bound ? KIND_BOUND : KIND_ABSENT,
-					bound ? "" : name, 1);
-			stamp_status(stats, cell, status);
-			if (debug)
-				log("ICG %s.%s enable %s: %s\n", vcd_scope.c_str(), log_id(cell->name),
-						name.c_str(), bound ? "bound" : "absent");
-		}
-	}
-
 	// Rename each flop's Q wire to the signal the waveform dumped it under.
 	void process_registers(const dict<std::string, std::vector<DumpLeaf>> &objects,
 			       BindStats &stats)
@@ -858,7 +771,6 @@ struct RegRenameInstance {
 	{
 		bind_packed_inputs(objects, fst);
 		process_registers(objects, stats);
-		stamp_icgs(objects, stats);
 		for (auto &it : children)
 			it.second->process_all(objects, stats, fst);
 	}
