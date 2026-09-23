@@ -6,7 +6,10 @@
 #   named       acc/4            acc           acc [3:0]                    bound*4 (already named)
 #   gone_ff     gone/2           gone          -                            absent*2
 #   m1_ff/m2_ff mem[1]/2 mem[2]  m1_q/m2_q     mem[0] [1:0] only            absent*2 each, one warning
-#   wide_ff     wide/8[0:2]      wide_q        wide [5:0]                   unplaced*3
+#   wide_ff     wide/8[0:2]      wide_q        wide [5:0]                   bound*3 (narrow dump,
+#                                                                             covers bits 0-2)
+#   edge_ff     wide/8[4:7]      edge_q        wide [5:0]                   bound*2 unplaced*2
+#                                                                             (straddles the end)
 #   ns_ff       (none)           ns            -                            unstamped
 #   pp_ff       - pp/2[1]        pp            pp [1:0]                     unstamped bound
 #   dupa/dupb   dup/1 twice      qa/qb         dup                          one bound, one conflict
@@ -27,6 +30,7 @@ module \top
   wire width 2 \m1_q
   wire width 2 \m2_q
   wire width 3 \wide_q
+  wire width 4 \edge_q
   wire \ns
   wire width 2 \pp
   wire \qa
@@ -85,6 +89,14 @@ module \top
     connect \CLK \clk
     connect \D \d4 [2:0]
     connect \Q \wide_q
+  end
+  attribute \rtl_bind "wide/8[4:7]"
+  cell $dff \edge_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d4
+    connect \Q \edge_q
   end
   cell $dff \ns_ff
     parameter \CLK_POLARITY 1
@@ -164,11 +176,11 @@ hierarchy -top top
 
 logger -expect warning "Cannot place 2 bit\(s\) of 2-bit object gone, 1 cell\(s\), e\.g\. gone_ff, in scope tb\.dut: not in the waveform; nothing named gone is dumped in that scope" 1
 logger -expect warning "Cannot place 4 bit\(s\) of 2 objects mem\[1\], mem\[2\] of 2 bits each, 2 cell\(s\), e\.g\. m1_ff, m2_ff, in scope tb\.dut: not in the waveform; the waveform has mem only as 1 signal\(s\) spanning 2 bit\(s\): mem\[0\] \[1:0\]" 1
-logger -expect warning "Cannot place 3 bit\(s\) of 8-bit object wide, 1 cell\(s\), e\.g\. wide_ff, in scope tb\.dut: the waveform has wide as 1 signal\(s\) spanning 6 bit\(s\): wide \[5:0\]" 1
 logger -expect warning "In scope tb\.dut, 2 Q bit\(s\) of 2 cell\(s\), e\.g\. ns_ff, pp_ff, have no usable RTL bind stamp" 1
 logger -expect warning "Cannot place 1 bit\(s\) of 1-bit object dup, 1 cell\(s\), e\.g\. dup[ab], in scope tb\.dut: dumped bit dup\[0\] is already driven by another cell" 1
-logger -expect log "Bound 8 flop\(s\); unstamped 2, object absent 3, bit unplaced 1" 1
-logger -expect log "Bound 34 of 48 Q bit\(s\); unstamped 2, absent 6, unplaced 3, conflict 1, unwired 2" 1
+logger -expect warning "Cannot place 2 bit\(s\) of 8-bit object wide, 1 cell\(s\), e\.g\. edge_ff, in scope tb\.dut: the waveform has wide as 1 signal\(s\) spanning 6 bit\(s\): wide \[5:0\]" 1
+logger -expect log "Bound 10 flop\(s\); unstamped 2, object absent 3, bit unplaced 1" 1
+logger -expect log "Bound 39 of 52 Q bit\(s\); unstamped 2, absent 6, unplaced 2, conflict 1, unwired 2" 1
 logger -expect log "In scope tb\.dut, 2 Q bit\(s\) of 1 cell\(s\), e\.g\. uw_ff, drive no wire reg_rename can rename" 1
 reg_rename -waveform reg_rename_status.vcd -scope tb.dut
 logger -check-expected
@@ -182,7 +194,9 @@ select -assert-count 0 w:q_ren
 select -assert-count 1 c:named a:rtl_bind_status=bound*4 %i
 select -assert-count 1 c:gone_ff a:rtl_bind_status=absent*2 %i
 select -assert-count 2 c:m1_ff c:m2_ff %u a:rtl_bind_status=absent*2 %i
-select -assert-count 1 c:wide_ff a:rtl_bind_status=unplaced*3 %i
+select -assert-count 1 c:wide_ff a:rtl_bind_status=bound*3 %i
+# A register straddling the end of a narrow dump binds only the bits the dump carries
+select -assert-count 1 c:edge_ff a:rtl_bind_status=bound*2\ unplaced*2 %i
 select -assert-count 1 c:ns_ff a:rtl_bind_status=unstamped %i
 select -assert-count 1 c:pp_ff a:rtl_bind_status=unstamped\ bound %i
 select -assert-count 1 c:dupa c:dupb %u a:rtl_bind_status=bound %i
@@ -196,4 +210,4 @@ select -assert-count 1 w:arr.?1?
 select -assert-none a:sim_src
 select -assert-count 1 c:hw_cnt a:rtl_bind_status=bound*4 %i
 select -assert-count 1 c:hw_thr a:rtl_bind_status=bound*8 %i
-select -assert-count 15 t:$dff a:rtl_bind_status %i
+select -assert-count 16 t:$dff a:rtl_bind_status %i

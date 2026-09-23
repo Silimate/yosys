@@ -206,9 +206,13 @@ static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, Dum
 	if (leaves.empty() || bit < 0 || bit >= width)
 		return false;
 
-	// A single leaf covering the whole object: the bit indexes straight into it
+	// A single leaf covering the object: the bit indexes straight into it
 	if (leaves.size() == 1 && leaves[0].rel.empty()) {
-		if (leaves[0].width != width)
+		// A converter may dump fewer bits than the object holds; bind those and leave the rest
+		if (leaves[0].width > width || bit >= leaves[0].width)
+			return false;
+		// A narrow leaf at a nonzero index needs the object's own LSB to align against
+		if (leaves[0].width != width && leaves[0].offset != 0)
 			return false;
 		out = leaves[0];
 		leaf_bit = bit;
