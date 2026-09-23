@@ -34,7 +34,7 @@ check $tmp/fatal.json 'd["count"] == 1 and d["missing_inputs"][0]["path"] == "mi
 # 3. Nothing missing: the file still says so, and every array element bound
 $YOSYS -q -p "read_verilog array_port.v; prep -top array_port_1d
 	sim -r $tmp/mif_array_port_1d_bits.vcd -scope tb.dut -q -sim-cmp -missing-input-file $tmp/none.json"
-check $tmp/none.json 'd == {"count": 0, "bits": 0, "missing_inputs": []}'
+check $tmp/none.json 'd == {"count": 0, "bits": 0, "missing_inputs": [], "partial_inputs": []}'
 
 # 4. 25 array element ports genuinely absent from the dump, past the 20 the log names: all of them
 #    are in the file, with their declared (negative) indices
@@ -52,3 +52,16 @@ grep -q "5 further input port(s) missing from the FST are left undriven." $tmp/m
 check $tmp/many.json 'd["count"] == 25 and d["bits"] == 50'
 check $tmp/many.json 'sorted(m["path"] for m in d["missing_inputs"]) == sorted("missing_input.gone[%d]" % i for i in range(-12, 13))'
 check $tmp/many.json 'all(m["module"] == "absent_array" and m["width"] == 2 for m in d["missing_inputs"])'
+
+# 5. A port the dump holds under its own name but narrower than declared: bound on the bits the
+#    two widths share, so it is listed as partial rather than missing
+{
+	echo "module narrow_port (input wire [3:0] a, output wire out);"
+	echo "	assign out = ^a;"
+	echo "endmodule"
+} > $tmp/narrow_port.v
+$YOSYS -q -l $tmp/narrow.log -p "read_verilog $tmp/narrow_port.v; prep -top narrow_port
+	sim -r $tmp/mif_missing_input.vcd -scope missing_input -q -missing-input-warn -missing-input-file $tmp/narrow.json"
+grep -q "Port 'missing_input.a' on module 'narrow_port' is 1 bit(s) in the FST and 4 in the netlist; driving the low 1 bit(s)." $tmp/narrow.log
+check $tmp/narrow.json 'd["missing_inputs"] == []'
+check $tmp/narrow.json 'd["partial_inputs"] == [{"module": "narrow_port", "path": "missing_input.a", "width": 3}]'
