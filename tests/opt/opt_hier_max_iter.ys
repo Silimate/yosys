@@ -1,0 +1,102 @@
+# opt_hier -max_iter runs rounds until one changes nothing, optimizing the modules each
+# round rewrote in between, so a constant can travel any number of levels and through
+# registers. The default stays a single round with nothing in between.
+
+# A strap tied at the top, one pass-through level above the register it zeroes.
+read_verilog <<EOT
+module leaf(input clk, input en, input [3:0] d, output [3:0] q);
+	reg [3:0] r;
+	always @(posedge clk) r <= d & {4{en}};
+	assign q = r;
+endmodule
+module mid(input clk, input en, input [3:0] d, output [3:0] q);
+	leaf u(.clk(clk), .en(en), .d(d), .q(q));
+endmodule
+module top(input clk, input [3:0] d, output [3:0] q);
+	mid u(.clk(clk), .en(1'b0), .d(d), .q(q));
+endmodule
+EOT
+hierarchy -top top
+proc
+design -save start
+
+# The default carries the strap into `mid` and stops.
+opt_hier
+select -assert-count 1 t:$dff
+scratchpad -assert opt_hier.rounds 1
+scratchpad -assert opt_hier.saturated false
+
+# Saturating: the strap reaches `leaf`, the fold in between zeroes the register, and the
+# rounds after it carry the now-constant output back up and disconnect the dead inputs.
+design -load start
+opt_hier -max_iter 0
+select -assert-none t:$dff
+scratchpad -assert opt_hier.saturated true
+
+# Two rounds get the strap into `leaf` but leave no fold after the last one.
+design -load start
+opt_hier -max_iter 2
+select -assert-count 1 t:$dff
+scratchpad -assert opt_hier.rounds 2
+scratchpad -assert opt_hier.saturated false
+design -reset
+
+# A constant passing a register: it reaches u_b only once u_a has folded to a constant
+# and that constant has been carried up out of u_a and back down into u_b.
+read_verilog <<EOT
+module ff_a(input clk, input d, output q);
+	reg r;
+	always @(posedge clk) r <= d;
+	assign q = r;
+endmodule
+module ff_b(input clk, input d, output q);
+	reg r;
+	always @(posedge clk) r <= d;
+	assign q = r;
+endmodule
+module top(input clk, input x, output y);
+	wire s;
+	ff_a u_a(.clk(clk), .d(1'b0), .q(s));
+	ff_b u_b(.clk(clk), .d(s & x), .q(y));
+endmodule
+EOT
+hierarchy -top top
+proc
+opt_hier -max_iter 0
+select -assert-none t:$dff
+scratchpad -assert opt_hier.saturated true
+design -reset
+
+# Only modules a round rewrote are optimized: `other` has a foldable $and, but nothing
+# crosses its boundary, so it is left exactly as it was.
+read_verilog <<EOT
+module leaf(input en, input [3:0] d, output [3:0] y);
+	assign y = d & {4{en}};
+endmodule
+module other(input [3:0] a, output [3:0] y);
+	wire [3:0] zero = 4'b0;
+	assign y = a & zero;
+endmodule
+module top(input [3:0] d, input [3:0] a, output [3:0] y, output [3:0] z);
+	leaf u_l(.en(1'b0), .d(d), .y(y));
+	other u_o(.a(a), .y(z));
+endmodule
+EOT
+# No proc here: there are no processes, and proc's own opt_expr would fold `other` first.
+hierarchy -top top
+select -assert-count 1 other/t:$and
+opt_hier -max_iter 0
+select -assert-none leaf/t:$and
+select -assert-count 1 other/t:$and
+design -reset
+
+# The cap is parsed strictly: 0 means no limit, so a malformed value must be an error
+# rather than read as 0.
+read_verilog <<EOT
+module top(input a, output y);
+	assign y = a;
+endmodule
+EOT
+hierarchy -top top
+logger -expect error "-max_iter expects a non-negative integer, got 'typo'" 1
+opt_hier -max_iter typo
