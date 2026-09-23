@@ -1,0 +1,59 @@
+# reg_rename points each child input pin at the parent signal the dump carries it under, since a
+# simulator dumps a port only as the net it is wired to. reg_rename_inputs.vcd dumps tb.dut and
+# one pin in the leaf's own scope.
+#
+#   leaf pin  mid pin           top actual       expected on leaf
+#   a         a[7:4], a<-u_in[15:8]  u_in (dumped)  sim_src tb.dut.u_in, sim_src_bit 12 (8 + 4)
+#   b         b<-w              w (dumped)       sim_src tb.dut.w, no bit offset
+#   t         t<-8'hA5          constant         sim_const carried down one level
+#   own       own               -                none: dumped under the leaf's own scope
+#   gone      gone<-nd          nd (not dumped)  none
+
+read_rtlil <<EOT
+module \leaf
+  wire width 4 input 1 \a
+  wire width 4 input 2 \b
+  wire width 8 input 3 \t
+  wire width 2 input 4 \own
+  wire width 4 input 5 \gone
+end
+module \mid
+  wire width 8 input 1 \a
+  wire width 4 input 2 \b
+  wire width 8 input 3 \t
+  wire width 2 input 4 \own
+  wire width 4 input 5 \gone
+  cell \leaf \u_leaf
+    connect \a \a [7:4]
+    connect \b \b
+    connect \t \t
+    connect \own \own
+    connect \gone \gone
+  end
+end
+module \top
+  wire width 16 input 1 \u_in
+  wire width 4 input 2 \w
+  wire width 2 input 3 \o
+  wire width 4 input 4 \nd
+  cell \mid \u_mid
+    connect \a \u_in [15:8]
+    connect \b \w
+    connect \t 8'10100101
+    connect \own \o
+    connect \gone \nd
+  end
+end
+EOT
+hierarchy -top top
+
+reg_rename -waveform reg_rename_inputs.vcd -scope tb.dut
+
+select -assert-count 1 mid/w:a a:sim_src=tb.dut.u_in %i a:sim_src_bit=8 %i
+select -assert-count 1 leaf/w:a a:sim_src=tb.dut.u_in %i a:sim_src_bit=12 %i
+select -assert-count 1 leaf/w:b a:sim_src=tb.dut.w %i
+select -assert-none leaf/w:b a:sim_src_bit %i
+select -assert-count 1 mid/w:t a:sim_const=10100101 %i
+select -assert-count 1 leaf/w:t a:sim_const=10100101 %i
+select -assert-none leaf/w:own a:sim_src %i
+select -assert-none leaf/w:gone a:sim_src %i
