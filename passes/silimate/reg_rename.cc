@@ -555,6 +555,14 @@ struct RegRenameInstance {
 		dict<IdString, Wire *> target_wires;
 		pool<Wire *> drop_wires;
 
+		// Pins bind_ports resolved to a whole dumped signal, by the net each bit carries
+		SigMap sigmap(module);
+		dict<SigBit, SigBit> resolved_pins;
+		for (auto wire : module->wires())
+			if (wire->port_id && wire->has_attribute(ID(sim_src)) && !wire->has_attribute(ID(sim_src_bit)))
+				for (auto bit : SigSpec(wire))
+					resolved_pins[sigmap(bit)] = bit;
+
 		for (auto cell : module->cells()) {
 			if (!StaticCellTypes::categories.is_ff(cell->type) || !cell->hasPort(ID::Q))
 				continue;
@@ -631,15 +639,14 @@ struct RegRenameInstance {
 				bool placed = obj_it != objects.end() &&
 						resolve(obj_it->second, obj_width, obj_bit, leaf, leaf_bit);
 
-				// A flattened interface pin is dumped under the parent's actual, so it is not
-				// in this scope's object map. bind_input_ports already put that path on the
-				// pin, so rename onto the pin itself and let sim_src do the lookup.
-				Wire *pin = placed ? nullptr : module->wire(RTLIL::escape_id(obj));
-				if (pin && pin->has_attribute(ID(sim_src)) && GetSize(pin) == obj_width &&
-						obj_bit >= 0 && obj_bit < obj_width) {
-					dump_path = pin->get_string_attribute(ID(sim_src));
-					leaf = {obj, "", GetSize(pin), pin->start_offset};
-					leaf_bit = obj_bit;
+				// Q is the net of a pin the dump holds at a parent's actual, so bind through that pin
+				auto pin = resolved_pins.find(sigmap(SigBit(old_wire, qbits.offset + start)));
+				if (!placed && pin != resolved_pins.end()) {
+					Wire *pin_wire = pin->second.wire;
+					dump_path = pin_wire->get_string_attribute(ID(sim_src));
+					leaf = {RTLIL::unescape_id(pin_wire->name), "", GetSize(pin_wire), pin_wire->start_offset};
+					leaf_bit = pin->second.offset;
+					end = start + 1; // the pin need not follow the flop's bit order
 					placed = true;
 				}
 
@@ -740,15 +747,14 @@ struct RegRenameInstance {
 		commit(bit_map, claimed_bits, port_aliases, drop_wires);
 	}
 
-	// Point each child input or interface pin at the parent actual a dump carries it under
-	void bind_input_ports(FstData &fst)
+	// Point each child pin at the parent actual a dump carries it under
+	void bind_ports(FstData &fst)
 	{
 		for (auto &it : children) {
 			Cell *cell = it.first;
 			RegRenameInstance *child = it.second;
 			for (auto wire : child->module->wires()) {
-				if (!(wire->port_input || wire->get_bool_attribute(ID(interface_port))) ||
-						!cell->hasPort(wire->name))
+				if (!cell->hasPort(wire->name))
 					continue;
 				// Dumped under the child's own scope, which sim looks up first
 				fstHandle own = fst.getHandle(child->vcd_scope + "." +
@@ -758,7 +764,8 @@ struct RegRenameInstance {
 				SigSpec sig = cell->getPort(wire->name);
 				// Parent ties the pin off; the cut removes that driver, so carry the value.
 				if (sig.is_fully_const()) {
-					wire->set_string_attribute(ID(sim_const), sig.as_const().as_string());
+					if (wire->port_input) // an unconnected output reads as an empty constant
+						wire->set_string_attribute(ID(sim_const), sig.as_const().as_string());
 					continue;
 				}
 				if (!sig.is_chunk())
@@ -792,10 +799,10 @@ struct RegRenameInstance {
 				if (offset || (int)fst.getWidth(id) != GetSize(wire))
 					wire->set_string_attribute(ID(sim_src_bit), std::to_string(offset));
 				if (debug)
-					log("Input port %s.%s resolved to %s[%d]\n", child->vcd_scope.c_str(),
+					log("Port %s.%s resolved to %s[%d]\n", child->vcd_scope.c_str(),
 							RTLIL::unescape_id(wire->name).c_str(), src.c_str(), offset);
 			}
-			child->bind_input_ports(fst);
+			child->bind_ports(fst);
 		}
 	}
 
@@ -1077,7 +1084,7 @@ struct RegRenamePass : public Pass {
 			auto objects = collect_objects(fst, scopes, debug);
 			log("Extracted %d RTL object(s) from waveform\n", GetSize(objects));
 
-			root.bind_input_ports(fst);
+			root.bind_ports(fst);
 			BindStats stats;
 			root.process_all(objects, stats, fst);
 			report_unbound(stats, objects, debug);

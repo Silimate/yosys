@@ -1,0 +1,73 @@
+# A dump that stops above a register still carries it when the register drives a port: the
+# net the port reaches in a dumped scope holds the same value. reg_rename_ports.vcd dumps only
+# tb.dut, two levels above both registers.
+#
+#   cell     Q net                 reaches the dump as               expected
+#   acc_reg  acc_q, wired to q     leaf.q -> mid.q -> top.q_top      bound*4 through leaf.q
+#   inv_reg  inv_q, inverted to n  leaf.n -> mid.n -> top.n_top      absent*4 (a different net)
+
+read_rtlil <<EOT
+module \leaf
+  wire input 1 \clk
+  wire width 4 input 2 \d
+  wire width 4 output 3 \q
+  wire width 4 output 4 \n
+  wire width 4 \acc_q
+  wire width 4 \inv_q
+  attribute \rtl_bind "acc/4[0:3]"
+  cell $dff \acc_reg
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d
+    connect \Q \acc_q
+  end
+  connect \q \acc_q
+  attribute \rtl_bind "inv/4[0:3]"
+  cell $dff \inv_reg
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d
+    connect \Q \inv_q
+  end
+  cell $not \neg
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 4
+    parameter \Y_WIDTH 4
+    connect \A \inv_q
+    connect \Y \n
+  end
+end
+module \mid
+  wire input 1 \clk
+  wire width 4 input 2 \d
+  wire width 4 output 3 \q
+  wire width 4 output 4 \n
+  cell \leaf \u_leaf
+    connect \clk \clk
+    connect \d \d
+    connect \q \q
+    connect \n \n
+  end
+end
+module \top
+  wire input 1 \clk
+  wire width 4 input 2 \d
+  wire width 4 output 3 \q_top
+  wire width 4 output 4 \n_top
+  cell \mid \u_mid
+    connect \clk \clk
+    connect \d \d
+    connect \q \q_top
+    connect \n \n_top
+  end
+end
+EOT
+hierarchy -top top
+
+reg_rename -waveform reg_rename_ports.vcd -scope tb.dut
+
+select -assert-count 1 leaf/acc_reg a:rtl_bind_status=bound*4 %i
+select -assert-count 1 leaf/inv_reg a:rtl_bind_status=absent*4 %i
+select -assert-count 1 leaf/w:q a:sim_src=tb.dut.q_top %i
