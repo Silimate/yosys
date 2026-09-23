@@ -69,6 +69,7 @@ private:
 	Verific::Netlist *nl = nullptr;
 	bool vhdl = false;
 	std::map<RTLIL::Wire *, std::optional<Location>> net_places;
+	std::map<std::string, std::string> flattened; // `q0_sel` -> `q0.sel`
 	int decoded_bits = 0, fallback_bits = 0, missing_bits = 0;
 
 	bool parse_steps(const std::string &path, size_t pos, std::vector<Step> &steps) const;
