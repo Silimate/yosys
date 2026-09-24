@@ -5,10 +5,12 @@ YOSYS_NAMESPACE_BEGIN
 namespace CompressorTree
 {
 
-// a + b + c as {sum, cout}: $fa where all three inputs are live, wires where the rest are zero, gates otherwise
+// a + b + c as {sum, cout}: $fa over live columns, wires over zero padding and repeated columns, gates otherwise
 static std::pair<SigSpec, SigSpec> emit_fa(Module *module, SigSpec a, SigSpec b, SigSpec c, IdString cell_name, const std::string &suffix)
 {
 	auto kind = [&](int i) {
+		if (i > 0 && a[i] == a[i - 1] && b[i] == b[i - 1] && c[i] == c[i - 1])
+			return 3;
 		int live = (a[i].wire != nullptr) + (b[i].wire != nullptr) + (c[i].wire != nullptr);
 		bool zeros = (a[i].wire || a[i] == State::S0) && (b[i].wire || b[i] == State::S0) && (c[i].wire || c[i] == State::S0);
 		return live == 3 ? 2 : zeros && live <= 1 ? 0 : 1;
@@ -17,6 +19,12 @@ static std::pair<SigSpec, SigSpec> emit_fa(Module *module, SigSpec a, SigSpec b,
 	for (int lo = 0, hi; lo < GetSize(a); lo = hi) {
 		for (hi = lo + 1; hi < GetSize(a) && kind(hi) == kind(lo); hi++);
 		int n = hi - lo;
+		// Sign extension repeats the column below, and so do its outputs
+		if (kind(lo) == 3) {
+			sum.append(SigSpec(sum[GetSize(sum) - 1], n));
+			cout.append(SigSpec(cout[GetSize(cout) - 1], n));
+			continue;
+		}
 		if (kind(lo) == 0) {
 			for (int i = lo; i < hi; i++)
 				sum.append(a[i].wire ? a[i] : b[i].wire ? b[i] : c[i]);

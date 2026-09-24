@@ -498,3 +498,19 @@ design -load postopt
 select -assert-count 1 t:$fa
 select -assert-count 1 t:$fa r:WIDTH=4 %i
 design -reset
+
+read_verilog <<EOT
+module add_sign_extended(
+	input signed [3:0] a, b, c,
+	output signed [15:0] y
+);
+	assign y = a + b + c;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-count 1 t:$fa
+select -assert-count 1 t:$fa r:WIDTH=4 %i
+design -reset
