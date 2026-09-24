@@ -1,0 +1,130 @@
+# A dump carries a submodule pin only as the parent net it is wired to, so reg_rename resolves
+# each pin through the parent and binds a register through the pin its Q drives.
+# reg_rename_ports.vcd dumps tb.dut, and nest's z in each of its two instances.
+#
+#   leaf pin / cell  wired to                                 expected
+#   a                mid.a[7:4], mid.a <- u_in[15:8]          sim_src tb.dut.u_in, sim_src_bit 12
+#   b                mid.b <- w                               sim_src tb.dut.w, no bit offset
+#   t                mid.t <- 8'hA5                           sim_const 10100101 on mid.t and leaf.t
+#   t4               mid.t[3:0]                               sim_const 0101, its slice of the tie-off
+#   gone             mid.gone <- nd (not dumped)              nothing
+#   acc_reg          Q wired to q -> mid.q -> q_top           bound*4 through leaf.q
+#   inv_reg          Q inverted onto n                        absent*4, a different net
+#   pair.x           two instances wired to different nets    nothing: one wire cannot hold both
+#   inner.y          one instance, inside a module used twice nothing, though each nest.z is dumped
+
+read_rtlil <<EOT
+module \leaf
+  wire input 1 \clk
+  wire width 4 input 2 \a
+  wire width 4 input 3 \b
+  wire width 8 input 4 \t
+  wire width 4 input 5 \t4
+  wire width 4 input 6 \gone
+  wire width 4 output 7 \q
+  wire width 4 output 8 \n
+  wire width 4 \acc_q
+  wire width 4 \inv_q
+  attribute \rtl_bind "acc/4[0:3]"
+  cell $dff \acc_reg
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \a
+    connect \Q \acc_q
+  end
+  connect \q \acc_q
+  attribute \rtl_bind "inv/4[0:3]"
+  cell $dff \inv_reg
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \b
+    connect \Q \inv_q
+  end
+  cell $not \neg
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 4
+    parameter \Y_WIDTH 4
+    connect \A \inv_q
+    connect \Y \n
+  end
+end
+module \mid
+  wire input 1 \clk
+  wire width 8 input 2 \a
+  wire width 4 input 3 \b
+  wire width 8 input 4 \t
+  wire width 4 input 5 \gone
+  wire width 4 output 6 \q
+  wire width 4 output 7 \n
+  cell \leaf \u_leaf
+    connect \clk \clk
+    connect \a \a [7:4]
+    connect \b \b
+    connect \t \t
+    connect \t4 \t [3:0]
+    connect \gone \gone
+    connect \q \q
+    connect \n \n
+  end
+end
+module \pair
+  wire width 4 input 1 \x
+end
+module \inner
+  wire width 4 input 1 \y
+end
+module \nest
+  wire width 4 input 1 \z
+  cell \inner \u_i
+    connect \y \z
+  end
+end
+module \top
+  wire input 1 \clk
+  wire width 16 input 2 \u_in
+  wire width 4 input 3 \w
+  wire width 4 input 4 \nd
+  wire width 4 output 5 \q_top
+  wire width 4 output 6 \n_top
+  cell \mid \u_mid
+    connect \clk \clk
+    connect \a \u_in [15:8]
+    connect \b \w
+    connect \t 8'10100101
+    connect \gone \nd
+    connect \q \q_top
+    connect \n \n_top
+  end
+  cell \pair \u_p0
+    connect \x \w
+  end
+  cell \pair \u_p1
+    connect \x \u_in [3:0]
+  end
+  cell \nest \u_n0
+    connect \z \w
+  end
+  cell \nest \u_n1
+    connect \z \u_in [7:4]
+  end
+end
+EOT
+hierarchy -top top
+
+reg_rename -waveform reg_rename_ports.vcd -scope tb.dut
+
+select -assert-count 1 mid/w:a a:sim_src=tb.dut.u_in %i a:sim_src_bit=8 %i
+select -assert-count 1 leaf/w:a a:sim_src=tb.dut.u_in %i a:sim_src_bit=12 %i
+select -assert-count 1 leaf/w:b a:sim_src=tb.dut.w %i
+select -assert-none leaf/w:b a:sim_src_bit %i
+select -assert-count 1 mid/w:t a:sim_const=10100101 %i
+select -assert-count 1 leaf/w:t a:sim_const=10100101 %i
+select -assert-count 1 leaf/w:t4 a:sim_const=0101 %i
+select -assert-none leaf/w:gone a:sim_src %i
+select -assert-count 1 leaf/acc_reg a:rtl_bind_status=bound*4 %i
+select -assert-count 1 leaf/inv_reg a:rtl_bind_status=absent*4 %i
+select -assert-count 1 leaf/w:q a:sim_src=tb.dut.q_top %i
+select -assert-none pair/w:x a:sim_src %i
+select -assert-none inner/w:y a:sim_src %i

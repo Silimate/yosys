@@ -135,11 +135,11 @@ static std::string capped_list(std::vector<std::string> items, int cap)
 }
 
 // Read one of the stamped integer fields.
-static bool stamped_int(Cell *cell, IdString attr, int &out)
+static bool stamped_int(const RTLIL::AttrObject *obj, IdString attr, int &out)
 {
-	if (!cell->has_attribute(attr))
+	if (!obj->has_attribute(attr))
 		return false;
-	const std::string text = cell->get_string_attribute(attr);
+	const std::string text = obj->get_string_attribute(attr);
 	if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos)
 		return false;
 	out = std::stoi(text);
@@ -468,6 +468,14 @@ struct RegRenameInstance {
 		dict<IdString, Wire *> target_wires;
 		pool<Wire *> drop_wires;
 
+		// Pins bind_ports resolved to a whole dumped signal, by the net each bit carries
+		SigMap sigmap(module);
+		dict<SigBit, SigBit> resolved_pins;
+		for (auto wire : module->wires())
+			if (wire->port_id && wire->has_attribute(ID(sim_src)) && !wire->has_attribute(ID(sim_src_bit)))
+				for (auto bit : SigSpec(wire))
+					resolved_pins[sigmap(bit)] = bit;
+
 		for (auto cell : module->cells()) {
 			if (!StaticCellTypes::categories.is_ff(cell->type) || !cell->hasPort(ID::Q))
 				continue;
@@ -544,15 +552,14 @@ struct RegRenameInstance {
 				bool placed = obj_it != objects.end() &&
 						resolve(obj_it->second, obj_width, obj_bit, leaf, leaf_bit);
 
-				// A flattened interface pin is dumped under the parent's actual, so it is not
-				// in this scope's object map. bind_interface_ports already put that path on the
-				// pin, so rename onto the pin itself and let sim_src do the lookup.
-				Wire *pin = placed ? nullptr : module->wire(RTLIL::escape_id(obj));
-				if (pin && pin->has_attribute(ID(sim_src)) && GetSize(pin) == obj_width &&
-						obj_bit >= 0 && obj_bit < obj_width) {
-					dump_path = pin->get_string_attribute(ID(sim_src));
-					leaf = {obj, "", GetSize(pin), pin->start_offset};
-					leaf_bit = obj_bit;
+				// Q is the net of a pin the dump holds at a parent's actual, so bind through that pin
+				auto pin = resolved_pins.find(sigmap(SigBit(old_wire, qbits.offset + start)));
+				if (!placed && pin != resolved_pins.end()) {
+					Wire *pin_wire = pin->second.wire;
+					dump_path = pin_wire->get_string_attribute(ID(sim_src));
+					leaf = {RTLIL::unescape_id(pin_wire->name), "", GetSize(pin_wire), pin_wire->start_offset};
+					leaf_bit = pin->second.offset;
+					end = start + 1; // the pin need not follow the flop's bit order
 					placed = true;
 				}
 
@@ -653,45 +660,65 @@ struct RegRenameInstance {
 		commit(bit_map, claimed_bits, port_aliases, drop_wires);
 	}
 
-	// Handle SV interface ports.
-	void bind_interface_ports(FstData &fst)
+	// How many times each module appears in the hierarchy below this instance
+	void count_uses(dict<Module *, int> &uses) const
+	{
+		for (auto &it : children) {
+			uses[it.second->module]++;
+			it.second->count_uses(uses);
+		}
+	}
+
+	// Point each child pin at the parent signal a dump carries it under
+	void bind_ports(FstData &fst, const dict<Module *, int> &uses)
 	{
 		for (auto &it : children) {
 			Cell *cell = it.first;
 			RegRenameInstance *child = it.second;
-			for (auto wire : child->module->wires()) {
-				if (!wire->get_bool_attribute(ID(interface_port)) || !cell->hasPort(wire->name))
-					continue;
-				SigSpec sig = cell->getPort(wire->name);
-				// Parent ties the pin off; the cut removes that driver, so carry the value.
-				if (sig.is_fully_const()) {
-					wire->set_string_attribute(ID(sim_const), sig.as_const().as_string());
-					continue;
-				}
-				if (!sig.is_wire())
-					continue; // slices/concats span more than one dumped signal
-				Wire *actual = sig.as_wire();
-
-				// A passthrough pin's parent may itself be tied off, which only the level
-				// above could see, so carry that value one more hop.
-				if (actual->has_attribute(ID(sim_const))) {
-					wire->set_string_attribute(ID(sim_const),
-							actual->get_string_attribute(ID(sim_const)));
-					continue;
-				}
-				std::string src = actual->has_attribute(ID(sim_src))
-					? actual->get_string_attribute(ID(sim_src))
-					: vcd_scope + "." + RTLIL::unescape_id(actual->name);
-				fstHandle id = fst.getHandle(src);
-				if (!id || fst.getWidth(id) != GetSize(wire))
-					continue;
-				wire->set_string_attribute(ID(sim_src), src);
-				if (debug)
-					log("Interface port %s.%s resolved to %s\n", child->vcd_scope.c_str(),
-							RTLIL::unescape_id(wire->name).c_str(), src.c_str());
-			}
-			child->bind_interface_ports(fst);
+			// A path left on the wires of a module used twice would belong to the other instance
+			if (uses.at(child->module) == 1)
+				for (auto &conn : cell->connections())
+					if (Wire *pin = child->module->wire(conn.first))
+						bind_pin(child, pin, conn.second, fst);
+			child->bind_ports(fst, uses);
 		}
+	}
+
+	// Where sim finds a child pin this module wires to `sig`: a constant, or bits of a dumped signal
+	void bind_pin(RegRenameInstance *child, Wire *pin, const SigSpec &sig, FstData &fst)
+	{
+		// Dumped under the child's own scope at full width, which sim looks up first
+		fstHandle own = fst.getHandle(child->vcd_scope + "." + RTLIL::unescape_id(pin->name));
+		if (own && (int)fst.getWidth(own) == GetSize(pin))
+			return;
+		if (!sig.is_chunk())
+			return; // unconnected, or a concat spanning several signals
+		SigChunk chunk = sig.as_chunk();
+		Wire *actual = chunk.wire;
+		if (!actual) {
+			pin->set_string_attribute(ID(sim_const), Const(chunk.data).as_string()); // the parent ties it off
+			return;
+		}
+		if (actual->has_attribute(ID(sim_const))) {
+			// The pin above was tied off, and this one takes its slice of that constant
+			Const value = Const::from_string(actual->get_string_attribute(ID(sim_const)));
+			pin->set_string_attribute(ID(sim_const), value.extract(chunk.offset, chunk.width).as_string());
+			return;
+		}
+		std::string src = actual->has_attribute(ID(sim_src)) ? actual->get_string_attribute(ID(sim_src))
+				: vcd_scope + "." + RTLIL::unescape_id(actual->name);
+		int above = 0; // the pin above may already sit inside a wider signal
+		if (actual->has_attribute(ID(sim_src_bit)) && !stamped_int(actual, ID(sim_src_bit), above))
+			return;
+		int offset = chunk.offset + above;
+		fstHandle id = fst.getHandle(src);
+		if (!id || offset + GetSize(pin) > (int)fst.getWidth(id))
+			return;
+		pin->set_string_attribute(ID(sim_src), src);
+		if (offset || (int)fst.getWidth(id) != GetSize(pin))
+			pin->set_string_attribute(ID(sim_src_bit), std::to_string(offset));
+		if (debug)
+			log("Pin %s resolved to %s[%d]\n", log_id(pin), src.c_str(), offset);
 	}
 
 	// Handle packed inputs.
@@ -971,7 +998,9 @@ struct RegRenamePass : public Pass {
 			auto objects = collect_objects(fst, scopes, debug);
 			log("Extracted %d RTL object(s) from waveform\n", GetSize(objects));
 
-			root.bind_interface_ports(fst);
+			dict<Module *, int> uses;
+			root.count_uses(uses);
+			root.bind_ports(fst, uses);
 			BindStats stats;
 			root.process_all(objects, stats, fst);
 			report_unbound(stats, objects, debug);
