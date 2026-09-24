@@ -269,7 +269,7 @@ std::pair<SigSpec, SigSpec> reduce_scheduled(Module *module, std::vector<DepthSi
 	if (out_final_depth)
 		*out_final_depth = final_depth;
 	log_assert(operands.size() == 2);
-	log("    CompressorTree::reduce_scheduled: %d levels, %d $fa (%d as 4:2), final depth %d\n", levels, fa_count, c42_count, final_depth);
+	log("    CompressorTree::reduce_scheduled: %d levels, %d 3:2 compressors (%d as 4:2), final depth %d\n", levels, fa_count, c42_count, final_depth);
 	return {operands[0].sig, operands[1].sig};
 }
 

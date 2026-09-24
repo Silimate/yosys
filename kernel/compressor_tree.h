@@ -106,7 +106,7 @@ std::vector<DepthSig> generate_partial_products(Module *module, SigSpec a, SigSp
  * @width: Target bit-width to which all operands will be zero-extended
  * @strategy: Compression strategy to use
  * @cell_name: Originating cell, used to name the emitted logic
- * @out_compressor_count: Optional pointer to return the number of $fa cells emitted
+ * @out_compressor_count: Optional pointer to return the number of 3:2 compressors emitted (a 4:2 counts as two)
  * @out_final_depth: Optional pointer to return the final depth of the scheduled tree
  *
  * Return: The final two reduced operands, that are to be fed into an adder
