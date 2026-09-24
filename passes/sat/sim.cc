@@ -154,6 +154,7 @@ struct SimShared
 	struct MissingInput { std::string module, path; int width; };
 	std::string missing_input_file;
 	std::vector<MissingInput> missing_input_list;
+	std::vector<MissingInput> partial_input_list; // SILIMATE: width is the bits a narrower dump leaves undriven
 	bool blackbox_children = false;
 	pool<IdString> instance_root_modules;
 	double clk_period_override = 0.0;
@@ -1838,20 +1839,24 @@ struct SimWorker : SimShared
 		int bits = 0;
 		for (auto &m : missing_input_list)
 			bits += m.width;
+		auto write_list = [&](const char *name, const std::vector<MissingInput> &list) {
+			json.name(name);
+			json.begin_array();
+			for (auto &m : list) {
+				json.begin_object();
+				json.compact();
+				json.entry("module", m.module);
+				json.entry("path", m.path);
+				json.entry("width", m.width);
+				json.end_object();
+			}
+			json.end_array();
+		};
 		json.begin_object();
 		json.entry("count", GetSize(missing_input_list));
 		json.entry("bits", bits);
-		json.name("missing_inputs");
-		json.begin_array();
-		for (auto &m : missing_input_list) {
-			json.begin_object();
-			json.compact();
-			json.entry("module", m.module);
-			json.entry("path", m.path);
-			json.entry("width", m.width);
-			json.end_object();
-		}
-		json.end_array();
+		write_list("missing_inputs", missing_input_list);
+		write_list("partial_inputs", partial_input_list);
 		json.end_object();
 		if (!missing_input_warning && !missing_input_list.empty())
 			log_error("Can't find port '%s' on module '%s' in FST. Use -missing-input-warn to leave it undriven and continue.\n",
@@ -1864,6 +1869,7 @@ struct SimWorker : SimShared
 	//   drive_bit_selects        — path[k] (packed d[0]/d[1], or din[1][k])
 	//   drive_flattened_element  — array element `\coeffs[-1]` / `\grid[1][2]` from a dump that
 	//                              flattened the array: one vector, or one 1-bit var per bit
+	//   drive_width_mismatch     — same name at another width; last, so every shape above wins
 	void bind_fst_input(SimInstance *t, Wire *wire, Module *mod)
 	{
 		std::string path = t->scope + "." + wire->name.unescape();
@@ -1875,7 +1881,24 @@ struct SimWorker : SimShared
 			return;
 		if (drive_flattened_element(t, wire, mod, path))
 			return;
+		if (drive_width_mismatch(t, wire, mod, path))
+			return;
 		report_missing_fst_input(path, mod, wire);
+	}
+
+	// SILIMATE: the dump holds this name at another width; drive the low bits the two share
+	bool drive_width_mismatch(SimInstance *t, Wire *wire, Module *mod, const std::string &path)
+	{
+		fstHandle id = path.back() == ']' ? 0 : fst->getHandle(path); // a bracketed name may be a bit-select
+		if (id == 0)
+			return false;
+		int dumped = fst->getWidth(id), width = GetSize(wire), common = std::min(dumped, width);
+		t->fst_input_sigs.push_back({SigSpec(wire).extract(0, common), id, 0});
+		log_warning("Port '%s' on module '%s' is %d bit(s) in the FST and %d in the netlist; "
+				"driving the low %d bit(s).\n", path.c_str(), log_id(mod), dumped, width, common);
+		if (common < width)
+			partial_input_list.push_back({log_id(mod), path, width - common});
+		return true;
 	}
 
 	// Same dump name, usable width: either an exact vector or a sim_src_bit slice of a wider one.
@@ -3658,7 +3681,10 @@ struct SimPass : public Pass {
 		log("        write every input port missing from the FST/VCD to the given JSON file,\n");
 		log("        not just the first few named in the log:\n");
 		log("            {\"count\": <ports>, \"bits\": <total width>, \"missing_inputs\":\n");
-		log("             [{\"module\": <module>, \"path\": <scope.port>, \"width\": <bits>}, ...]}\n");
+		log("             [{\"module\": <module>, \"path\": <scope.port>, \"width\": <bits>}, ...],\n");
+		log("             \"partial_inputs\": [...]}\n");
+		log("        partial_inputs lists ports a narrower dump drives only in part, with the\n");
+		log("        number of bits left undriven as the width.\n");
 		log("        The file is written, with a count of 0 if nothing is missing, once every\n");
 		log("        root's inputs are bound. Without -missing-input-warn the replay still\n");
 		log("        aborts on the first missing input, but only after the file is written.\n");
