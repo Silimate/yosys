@@ -1,0 +1,30 @@
+$timescale 1ns $end
+$scope module tb $end
+$scope module dut $end
+$var wire 16 ! u_in [15:0] $end
+$var wire 4 " w [3:0] $end
+$var wire 4 # q_top [3:0] $end
+$var wire 4 $ n_top [3:0] $end
+$scope module u_n0 $end
+$var wire 4 % z [3:0] $end
+$upscope $end
+$scope module u_n1 $end
+$var wire 4 & z [3:0] $end
+$upscope $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+b0000000000000000 !
+b0000 "
+b0000 #
+b1111 $
+b0000 %
+b0000 &
+#5
+b1010010111000011 !
+b0110 "
+b0011 #
+b1100 $
+b0101 %
+b1010 &
