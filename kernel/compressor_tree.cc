@@ -5,11 +5,44 @@ YOSYS_NAMESPACE_BEGIN
 namespace CompressorTree
 {
 
+// a + b + c as {sum, cout}: $fa where all three inputs are live, wires where the rest are zero, gates otherwise
+static std::pair<SigSpec, SigSpec> emit_fa(Module *module, SigSpec a, SigSpec b, SigSpec c, IdString cell_name, const std::string &suffix)
+{
+	auto kind = [&](int i) {
+		int live = (a[i].wire != nullptr) + (b[i].wire != nullptr) + (c[i].wire != nullptr);
+		bool zeros = (a[i].wire || a[i] == State::S0) && (b[i].wire || b[i] == State::S0) && (c[i].wire || c[i] == State::S0);
+		return live == 3 ? 2 : zeros && live <= 1 ? 0 : 1;
+	};
+	SigSpec sum, cout;
+	for (int lo = 0, hi; lo < GetSize(a); lo = hi) {
+		for (hi = lo + 1; hi < GetSize(a) && kind(hi) == kind(lo); hi++);
+		int n = hi - lo;
+		if (kind(lo) == 0) {
+			for (int i = lo; i < hi; i++)
+				sum.append(a[i].wire ? a[i] : b[i].wire ? b[i] : c[i]);
+			cout.append(SigSpec(State::S0, n));
+			continue;
+		}
+		SigSpec sa = a.extract(lo, n), sb = b.extract(lo, n), sc = c.extract(lo, n);
+		SigSpec s = module->addWire(NEW_ID3_SUFFIX(suffix + "_sum"), n); // SILIMATE: Improve the naming
+		SigSpec co = module->addWire(NEW_ID3_SUFFIX(suffix + "_cout"), n); // SILIMATE: Improve the naming
+		if (kind(lo) == 2) {
+			module->addFa(NEW_ID3_SUFFIX(suffix), sa, sb, sc, co, s); // SILIMATE: Improve the naming
+		} else {
+			SigSpec t1 = module->Xor(NEW_ID3_SUFFIX(suffix + "_xor"), sa, sb);
+			module->addXor(NEW_ID3_SUFFIX(suffix + "_xor"), t1, sc, s);
+			module->addOr(NEW_ID3_SUFFIX(suffix + "_or"), module->And(NEW_ID3_SUFFIX(suffix + "_and"), sa, sb),
+					module->And(NEW_ID3_SUFFIX(suffix + "_and"), sc, t1), co);
+		}
+		sum.append(s);
+		cout.append(co);
+	}
+	return {sum, cout};
+}
+
 std::pair<SigSpec, SigSpec> emit_compressor_32(Module *module, SigSpec a, SigSpec b, SigSpec c, int width, IdString cell_name)
 {
-	SigSpec sum = module->addWire(NEW_ID3_SUFFIX("fa_sum"), width); // SILIMATE: Improve the naming
-	SigSpec cout = module->addWire(NEW_ID3_SUFFIX("fa_cout"), width); // SILIMATE: Improve the naming
-	module->addFa(NEW_ID3_SUFFIX("fa"), a, b, c, cout, sum); // SILIMATE: Improve the naming
+	auto [sum, cout] = emit_fa(module, a, b, c, cell_name, "fa");
 
 	SigSpec carry;
 	carry.append(State::S0);
@@ -20,9 +53,7 @@ std::pair<SigSpec, SigSpec> emit_compressor_32(Module *module, SigSpec a, SigSpe
 std::pair<SigSpec, SigSpec> emit_compressor_42(Module *module, SigSpec a, SigSpec b, SigSpec c, SigSpec d, int width, IdString cell_name)
 {
 	// First FA: a + b + c -> s0
-	SigSpec s0 = module->addWire(NEW_ID3_SUFFIX("c42_sum"), width); // SILIMATE: Improve the naming
-	SigSpec cout_h_full = module->addWire(NEW_ID3_SUFFIX("c42_cout"), width); // SILIMATE: Improve the naming
-	module->addFa(NEW_ID3_SUFFIX("c42_lo"), a, b, c, cout_h_full, s0); // SILIMATE: Improve the naming
+	auto [s0, cout_h_full] = emit_fa(module, a, b, c, cell_name, "c42_lo");
 
 	// cin[0] = 0, cin[i] = cout_h_full[i-1]
 	SigSpec cin;
@@ -31,9 +62,7 @@ std::pair<SigSpec, SigSpec> emit_compressor_42(Module *module, SigSpec a, SigSpe
 		cin.append(cout_h_full.extract(0, width - 1));
 
 	// Second FA: s0 + d + cin -> sum
-	SigSpec sum = module->addWire(NEW_ID3_SUFFIX("c42_out"), width); // SILIMATE: Improve the naming
-	SigSpec carry_full = module->addWire(NEW_ID3_SUFFIX("c42_carry"), width); // SILIMATE: Improve the naming
-	module->addFa(NEW_ID3_SUFFIX("c42_hi"), s0, d, cin, carry_full, sum); // SILIMATE: Improve the naming
+	auto [sum, carry_full] = emit_fa(module, s0, d, cin, cell_name, "c42_hi");
 
 	SigSpec carry;
 	carry.append(State::S0);

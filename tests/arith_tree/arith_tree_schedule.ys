@@ -93,7 +93,7 @@ hierarchy -auto-top
 proc
 equiv_opt -assert arith_tree -strategy fa -final ripple -schedule
 design -load postopt
-# a, b, late, the inverted c and its +1 row: five operands, so three compressors.
-select -assert-count 3 t:$fa
+# a, b, late, the inverted c and its +1 row: three compressors, the one taking the constant row as gates.
+select -assert-count 2 t:$fa
 select -assert-count 1 t:$mul %co* t:$fa %i
 design -reset

@@ -108,7 +108,7 @@ hierarchy -auto-top
 proc
 equiv_opt -assert arith_tree
 design -load postopt
-select -assert-count 2 t:$fa
+select -assert-count 1 t:$fa
 select -assert-count 1 t:$add
 design -reset
 
@@ -156,7 +156,7 @@ hierarchy -auto-top
 proc
 equiv_opt -assert arith_tree
 design -load postopt
-select -assert-count 3 t:$fa
+select -assert-count 2 t:$fa
 select -assert-count 1 t:$add
 design -reset
 
