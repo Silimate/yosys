@@ -22,10 +22,12 @@
 USING_YOSYS_NAMESPACE
 
 
+#if defined(YOSYS_ENABLE_SPAWN)
 static std::string file_base_name(std::string const & path)
 {
 	return path.substr(path.find_last_of("/\\") + 1);
 }
+#endif
 
 // One index per waveform file, held strongly for the life of the process and shared by any forked process.
 static std::map<std::string, std::shared_ptr<const FstIndex>> &indexCache()

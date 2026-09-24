@@ -29,7 +29,6 @@ MK_TEST_DIRS += ./arch/nexus
 MK_TEST_DIRS += ./arch/quicklogic/pp3
 MK_TEST_DIRS += ./arch/quicklogic/qlf_k6n10f
 MK_TEST_DIRS += ./arch/xilinx
-MK_TEST_DIRS += ./bind
 MK_TEST_DIRS += ./bugpoint
 MK_TEST_DIRS += ./opt
 MK_TEST_DIRS += ./sat
@@ -69,6 +68,9 @@ MK_TEST_DIRS += ./fmt
 MK_TEST_DIRS += ./lut
 MK_TEST_DIRS += ./cxxrtl
 MK_TEST_DIRS += ./liberty
+MK_TEST_DIRS += ./abc_new
+MK_TEST_DIRS += ./abc_new/openroad
+MK_TEST_DIRS += ./abc_new/librelane
 #ifeq ($(ENABLE_FUNCTIONAL_TESTS),1)
 #MK_TEST_DIRS += ./functional
 #endif

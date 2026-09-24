@@ -263,7 +263,7 @@ struct SynthAnalogDevicesPass : public ScriptPass
 		}
 
 		if (check_label("prepare")) {
-			run("proc");
+			run("proc -latches error");
 			if (flatten || help_mode) {
 				run("check");
 				run("flatten", "(with '-flatten')");
@@ -275,8 +275,8 @@ struct SynthAnalogDevicesPass : public ScriptPass
 				log_error("Tristate buffers are unsupported without the '-iopad' option.\n");
 			run("deminout");
 			run("opt_expr");
-			run("opt_clean");
 			run("check");
+			run("opt_clean");
 			run("opt -nodffe -nosdff");
 			run("fsm");
 			run("opt");
@@ -302,6 +302,10 @@ struct SynthAnalogDevicesPass : public ScriptPass
 		if (check_label("map_dsp", "(skip if '-nodsp')")) {
 			if (!nodsp || help_mode) {
 				run("memory_dff"); // xilinx_dsp will merge registers, reserve memory port registers first
+				// give every product its own adder for the DSP post-adder
+				run("alumacc -macc-only");
+				run("maccmap -unmap");
+				run("opt_clean");
 				// NB: Analog Devices multipliers are signed only
 				if (help_mode)
 					run("techmap -map +/mul2dsp.v -map +/analogdevices/{family}_dsp_map.v {options}");
@@ -426,6 +430,7 @@ struct SynthAnalogDevicesPass : public ScriptPass
 		}
 
 		if (check_label("map_ffs")) {
+			run("check -latchonly -assert");
 			run("dfflegalize -cell $_DFFE_?P?P_ r -cell $_SDFFE_?P?P_ r");
 			if (dff || help_mode)
 				run("zinit -all w:* t:$_SDFFE_*", "('-dff' only)");

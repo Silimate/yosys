@@ -15,8 +15,6 @@ foreach (library simlib simcells)
 endforeach()
 
 yosys_core(kernel
-	binding.cc
-	binding.h
 	bitpattern.h
 	calc.cc
 	cellaigs.cc
@@ -115,7 +113,6 @@ yosys_core(kernel
 	DATA_DIR
 		include/kernel
 	DATA_FILES
-		binding.h
 		bitpattern.h
 		cellaigs.h
 		celledges.h
@@ -181,6 +178,7 @@ if (NOT YOSYS_BUILD_PYTHON_ONLY)
 		INCLUDE_DIRS
 			${pybind11_INCLUDE_DIR}
 		LIBRARIES
+			fmt::fmt
 			$<${YOSYS_ENABLE_READLINE}:PkgConfig::readline>
 			$<${YOSYS_ENABLE_EDITLINE}:PkgConfig::editline>
 			$<${YOSYS_ENABLE_TCL}:PkgConfig::tcl>

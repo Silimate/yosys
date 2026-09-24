@@ -84,7 +84,14 @@ failed:
 	return std::pair<RTLIL::IdString, int>(RTLIL::IdString(), 0);
 }
 
-void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool run_clean, bool sop_mode, bool wideports)
+static IdString blif_new_id(int autoidx_base, int &local_autoidx)
+{
+	// SILIMATE: public boolopt_ names; abc's remap_name() appends _ix<autoidx_base>, which keeps them unique
+	(void)autoidx_base;
+	return stringf("\\boolopt_%d", local_autoidx++);
+}
+
+void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, int autoidx_base, bool run_clean, bool sop_mode, bool wideports)
 {
 	RTLIL::Module *module = nullptr;
 	RTLIL::Const *lutptr = NULL;
@@ -93,6 +100,7 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 	RTLIL::State lut_default_state = RTLIL::State::Sx;
 	std::string err_reason;
 	int blif_maxnum = 0, sopmode = -1;
+	int local_autoidx = 0;
 
 	auto blif_wire = [&](const std::string &wire_name) -> Wire*
 	{
@@ -412,19 +420,19 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 					goto no_latch_clock;
 
 				if (!strcmp(edge, "re"))
-					cell = module->addDff(NEW_BLIF_ID, blif_wire(clock), blif_wire(d), blif_wire(q));
+					cell = module->addDff(blif_new_id(autoidx_base, local_autoidx), blif_wire(clock), blif_wire(d), blif_wire(q));
 				else if (!strcmp(edge, "fe"))
-					cell = module->addDff(NEW_BLIF_ID, blif_wire(clock), blif_wire(d), blif_wire(q), false);
+					cell = module->addDff(blif_new_id(autoidx_base, local_autoidx), blif_wire(clock), blif_wire(d), blif_wire(q), false);
 				else if (!strcmp(edge, "ah"))
-					cell = module->addDlatch(NEW_BLIF_ID, blif_wire(clock), blif_wire(d), blif_wire(q));
+					cell = module->addDlatch(blif_new_id(autoidx_base, local_autoidx), blif_wire(clock), blif_wire(d), blif_wire(q));
 				else if (!strcmp(edge, "al"))
-					cell = module->addDlatch(NEW_BLIF_ID, blif_wire(clock), blif_wire(d), blif_wire(q), false);
+					cell = module->addDlatch(blif_new_id(autoidx_base, local_autoidx), blif_wire(clock), blif_wire(d), blif_wire(q), false);
 				else {
 			no_latch_clock:
 					if (dff_name.empty()) {
-						cell = module->addFf(NEW_BLIF_ID, blif_wire(d), blif_wire(q));
+						cell = module->addFf(blif_new_id(autoidx_base, local_autoidx), blif_wire(d), blif_wire(q));
 					} else {
-						cell = module->addCell(NEW_BLIF_ID, dff_name);
+						cell = module->addCell(blif_new_id(autoidx_base, local_autoidx), dff_name);
 						cell->setPort(ID::D, blif_wire(d));
 						cell->setPort(ID::Q, blif_wire(q));
 					}
@@ -443,7 +451,7 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 					goto error;
 
 				IdString celltype = RTLIL::escape_id(p);
-				RTLIL::Cell *cell = module->addCell(NEW_BLIF_ID, celltype);
+				RTLIL::Cell *cell = module->addCell(blif_new_id(autoidx_base, local_autoidx), celltype);
 				RTLIL::Module *cell_mod = design->module(celltype);
 
 				dict<RTLIL::IdString, dict<int, SigBit>> cell_wideports_cache;
@@ -490,7 +498,7 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 						if (it.second.count(idx))
 							sig.append(it.second.at(idx));
 						else
-							sig.append(module->addWire(NEW_BLIF_ID));
+							sig.append(module->addWire(blif_new_id(autoidx_base, local_autoidx)));
 					}
 
 					cell->setPort(it.first, sig);
@@ -587,7 +595,7 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 
 				if (sop_mode)
 				{
-					sopcell = module->addCell(NEW_BLIF_ID, ID($sop));
+					sopcell = module->addCell(blif_new_id(autoidx_base, local_autoidx), ID($sop));
 					sopcell->parameters[ID::WIDTH] = RTLIL::Const(input_sig.size());
 					sopcell->parameters[ID::DEPTH] = 0;
 					sopcell->parameters[ID::TABLE] = RTLIL::Const();
@@ -603,7 +611,7 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 				}
 				else
 				{
-					RTLIL::Cell *cell = module->addCell(NEW_BLIF_ID, ID($lut));
+					RTLIL::Cell *cell = module->addCell(blif_new_id(autoidx_base, local_autoidx), ID($lut));
 					cell->parameters[ID::WIDTH] = RTLIL::Const(input_sig.size());
 					cell->parameters[ID::LUT] = RTLIL::Const(RTLIL::State::Sx, 1 << input_sig.size());
 					cell->setPort(ID::A, input_sig);
@@ -656,8 +664,8 @@ void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name, bool 
 				sopmode = (*output == '1');
 				if (!sopmode) {
 					SigSpec outnet = sopcell->getPort(ID::Y);
-					SigSpec tempnet = module->addWire(NEW_BLIF_ID);
-					module->addNotGate(NEW_BLIF_ID, tempnet, outnet);
+					SigSpec tempnet = module->addWire(blif_new_id(autoidx_base, local_autoidx));
+					module->addNotGate(blif_new_id(autoidx_base, local_autoidx), tempnet, outnet);
 					sopcell->setPort(ID::Y, tempnet);
 				}
 			} else
@@ -735,7 +743,7 @@ struct BlifFrontend : public Frontend {
 		}
 		extra_args(f, filename, args, argidx);
 
-		parse_blif(design, *f, "", true, sop_mode, wideports);
+		parse_blif(design, *f, "", autoidx++, true, sop_mode, wideports);
 	}
 } BlifFrontend;
 
