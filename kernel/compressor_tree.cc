@@ -5,46 +5,64 @@ YOSYS_NAMESPACE_BEGIN
 namespace CompressorTree
 {
 
-// a + b + c as {sum, cout}: $fa over live columns, wires over zero padding and repeated columns, gates otherwise
 static std::pair<SigSpec, SigSpec> emit_fa(Module *module, SigSpec a, SigSpec b, SigSpec c, IdString cell_name, const std::string &suffix)
 {
-	auto kind = [&](int i) {
-		if (i > 0 && a[i] == a[i - 1] && b[i] == b[i - 1] && c[i] == c[i - 1])
-			return 3;
-		int live = (a[i].wire != nullptr) + (b[i].wire != nullptr) + (c[i].wire != nullptr);
-		bool zeros = (a[i].wire || a[i] == State::S0) && (b[i].wire || b[i] == State::S0) && (c[i].wire || c[i] == State::S0);
-		return live == 3 ? 2 : zeros && live <= 1 ? 0 : 1;
-	};
-	SigSpec sum, cout;
-	for (int lo = 0, hi; lo < GetSize(a); lo = hi) {
-		for (hi = lo + 1; hi < GetSize(a) && kind(hi) == kind(lo); hi++);
-		int n = hi - lo;
-		// Sign extension repeats the column below, and so do its outputs
-		if (kind(lo) == 3) {
-			sum.append(SigSpec(sum[GetSize(sum) - 1], n));
-			cout.append(SigSpec(cout[GetSize(cout) - 1], n));
-			continue;
-		}
-		if (kind(lo) == 0) {
-			for (int i = lo; i < hi; i++)
-				sum.append(a[i].wire ? a[i] : b[i].wire ? b[i] : c[i]);
-			cout.append(SigSpec(State::S0, n));
-			continue;
-		}
-		SigSpec sa = a.extract(lo, n), sb = b.extract(lo, n), sc = c.extract(lo, n);
-		SigSpec s = module->addWire(NEW_ID3_SUFFIX(suffix + "_sum"), n); // SILIMATE: Improve the naming
-		SigSpec co = module->addWire(NEW_ID3_SUFFIX(suffix + "_cout"), n); // SILIMATE: Improve the naming
-		if (kind(lo) == 2) {
-			module->addFa(NEW_ID3_SUFFIX(suffix), sa, sb, sc, co, s); // SILIMATE: Improve the naming
+	// Outputs built so far, and the run of columns waiting to become one cell
+	SigSpec sum, cout, run_a, run_b, run_c;
+	bool run_is_fa = false;
+
+	// Turn the waiting run into one cell and append its outputs
+	auto flush_run = [&]() {
+		if (run_a.empty())
+			return;
+		if (run_is_fa) {
+			// Every column has three signals, so this is a full adder
+			SigSpec s = module->addWire(NEW_ID3_SUFFIX(suffix + "_sum"), GetSize(run_a)); // SILIMATE: Improve the naming
+			SigSpec co = module->addWire(NEW_ID3_SUFFIX(suffix + "_cout"), GetSize(run_a)); // SILIMATE: Improve the naming
+			module->addFa(NEW_ID3_SUFFIX(suffix), run_a, run_b, run_c, co, s); // SILIMATE: Improve the naming
+			sum.append(s);
+			cout.append(co);
 		} else {
-			SigSpec t1 = module->Xor(NEW_ID3_SUFFIX(suffix + "_xor"), sa, sb);
-			module->addXor(NEW_ID3_SUFFIX(suffix + "_xor"), t1, sc, s);
-			module->addOr(NEW_ID3_SUFFIX(suffix + "_or"), module->And(NEW_ID3_SUFFIX(suffix + "_and"), sa, sb),
-					module->And(NEW_ID3_SUFFIX(suffix + "_and"), sc, t1), co);
+			// A constant input makes these half adders, so build them from gates instead
+			SigSpec ab = module->Xor(NEW_ID3_SUFFIX(suffix + "_xor"), run_a, run_b);
+			sum.append(module->Xor(NEW_ID3_SUFFIX(suffix + "_xor"), ab, run_c));
+			cout.append(module->Or(NEW_ID3_SUFFIX(suffix + "_or"), module->And(NEW_ID3_SUFFIX(suffix + "_and"), run_a, run_b),
+					module->And(NEW_ID3_SUFFIX(suffix + "_and"), run_c, ab)));
 		}
-		sum.append(s);
-		cout.append(co);
+		run_a = run_b = run_c = SigSpec();
+	};
+
+	for (int i = 0; i < GetSize(a); i++) {
+		// A column that matches the one below is sign extension
+		bool repeat = i > 0 && a[i] == a[i - 1] && b[i] == b[i - 1] && c[i] == c[i - 1];
+		int zeros = (a[i] == State::S0) + (b[i] == State::S0) + (c[i] == State::S0);
+
+		// A column with real adding to do joins the run
+		if (!repeat && zeros < 2) {
+			bool is_fa = a[i].wire && b[i].wire && c[i].wire;
+			// Full adders and half adders go in separate runs
+			if (is_fa != run_is_fa)
+				flush_run();
+			run_is_fa = is_fa;
+			run_a.append(a[i]);
+			run_b.append(b[i]);
+			run_c.append(c[i]);
+			continue;
+		}
+
+		// Anything else needs no logic, so first close out the run before it
+		flush_run();
+		if (repeat) {
+			// Same inputs as the column below, so the same outputs
+			sum.append(sum.extract(i - 1));
+			cout.append(cout.extract(i - 1));
+		} else {
+			// Two inputs are 0, so the sum is the third and nothing carries
+			sum.append(a[i] != State::S0 ? a[i] : b[i] != State::S0 ? b[i] : c[i]);
+			cout.append(State::S0);
+		}
 	}
+	flush_run();
 	return {sum, cout};
 }
 
