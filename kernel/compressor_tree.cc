@@ -5,11 +5,70 @@ YOSYS_NAMESPACE_BEGIN
 namespace CompressorTree
 {
 
+static std::pair<SigSpec, SigSpec> emit_fa(Module *module, SigSpec a, SigSpec b, SigSpec c, IdString cell_name, const std::string &suffix)
+{
+	// Outputs built so far, and the run of columns waiting to become one cell
+	SigSpec sum, cout, run_a, run_b, run_c;
+	bool run_is_fa = false;
+
+	// Turn the waiting run into one cell and append its outputs
+	auto flush_run = [&]() {
+		if (run_a.empty())
+			return;
+		if (run_is_fa) {
+			// Every column has three signals, so this is a full adder
+			SigSpec s = module->addWire(NEW_ID3_SUFFIX(suffix + "_sum"), GetSize(run_a)); // SILIMATE: Improve the naming
+			SigSpec co = module->addWire(NEW_ID3_SUFFIX(suffix + "_cout"), GetSize(run_a)); // SILIMATE: Improve the naming
+			module->addFa(NEW_ID3_SUFFIX(suffix), run_a, run_b, run_c, co, s); // SILIMATE: Improve the naming
+			sum.append(s);
+			cout.append(co);
+		} else {
+			// A constant input makes these half adders, so build them from gates instead
+			SigSpec ab = module->Xor(NEW_ID3_SUFFIX(suffix + "_xor"), run_a, run_b);
+			sum.append(module->Xor(NEW_ID3_SUFFIX(suffix + "_xor"), ab, run_c));
+			cout.append(module->Or(NEW_ID3_SUFFIX(suffix + "_or"), module->And(NEW_ID3_SUFFIX(suffix + "_and"), run_a, run_b),
+					module->And(NEW_ID3_SUFFIX(suffix + "_and"), run_c, ab)));
+		}
+		run_a = run_b = run_c = SigSpec();
+	};
+
+	for (int i = 0; i < GetSize(a); i++) {
+		// A column that matches the one below is sign extension
+		bool repeat = i > 0 && a[i] == a[i - 1] && b[i] == b[i - 1] && c[i] == c[i - 1];
+		int zeros = (a[i] == State::S0) + (b[i] == State::S0) + (c[i] == State::S0);
+
+		// A column with real adding to do joins the run
+		if (!repeat && zeros < 2) {
+			bool is_fa = a[i].wire && b[i].wire && c[i].wire;
+			// Full adders and half adders go in separate runs
+			if (is_fa != run_is_fa)
+				flush_run();
+			run_is_fa = is_fa;
+			run_a.append(a[i]);
+			run_b.append(b[i]);
+			run_c.append(c[i]);
+			continue;
+		}
+
+		// Anything else needs no logic, so first close out the run before it
+		flush_run();
+		if (repeat) {
+			// Same inputs as the column below, so the same outputs
+			sum.append(sum.extract(i - 1));
+			cout.append(cout.extract(i - 1));
+		} else {
+			// Two inputs are 0, so the sum is the third and nothing carries
+			sum.append(a[i] != State::S0 ? a[i] : b[i] != State::S0 ? b[i] : c[i]);
+			cout.append(State::S0);
+		}
+	}
+	flush_run();
+	return {sum, cout};
+}
+
 std::pair<SigSpec, SigSpec> emit_compressor_32(Module *module, SigSpec a, SigSpec b, SigSpec c, int width, IdString cell_name)
 {
-	SigSpec sum = module->addWire(NEW_ID3_SUFFIX("fa_sum"), width); // SILIMATE: Improve the naming
-	SigSpec cout = module->addWire(NEW_ID3_SUFFIX("fa_cout"), width); // SILIMATE: Improve the naming
-	module->addFa(NEW_ID3_SUFFIX("fa"), a, b, c, cout, sum); // SILIMATE: Improve the naming
+	auto [sum, cout] = emit_fa(module, a, b, c, cell_name, "fa");
 
 	SigSpec carry;
 	carry.append(State::S0);
@@ -20,9 +79,7 @@ std::pair<SigSpec, SigSpec> emit_compressor_32(Module *module, SigSpec a, SigSpe
 std::pair<SigSpec, SigSpec> emit_compressor_42(Module *module, SigSpec a, SigSpec b, SigSpec c, SigSpec d, int width, IdString cell_name)
 {
 	// First FA: a + b + c -> s0
-	SigSpec s0 = module->addWire(NEW_ID3_SUFFIX("c42_sum"), width); // SILIMATE: Improve the naming
-	SigSpec cout_h_full = module->addWire(NEW_ID3_SUFFIX("c42_cout"), width); // SILIMATE: Improve the naming
-	module->addFa(NEW_ID3_SUFFIX("c42_lo"), a, b, c, cout_h_full, s0); // SILIMATE: Improve the naming
+	auto [s0, cout_h_full] = emit_fa(module, a, b, c, cell_name, "c42_lo");
 
 	// cin[0] = 0, cin[i] = cout_h_full[i-1]
 	SigSpec cin;
@@ -31,9 +88,7 @@ std::pair<SigSpec, SigSpec> emit_compressor_42(Module *module, SigSpec a, SigSpe
 		cin.append(cout_h_full.extract(0, width - 1));
 
 	// Second FA: s0 + d + cin -> sum
-	SigSpec sum = module->addWire(NEW_ID3_SUFFIX("c42_out"), width); // SILIMATE: Improve the naming
-	SigSpec carry_full = module->addWire(NEW_ID3_SUFFIX("c42_carry"), width); // SILIMATE: Improve the naming
-	module->addFa(NEW_ID3_SUFFIX("c42_hi"), s0, d, cin, carry_full, sum); // SILIMATE: Improve the naming
+	auto [sum, carry_full] = emit_fa(module, s0, d, cin, cell_name, "c42_hi");
 
 	SigSpec carry;
 	carry.append(State::S0);
@@ -240,7 +295,7 @@ std::pair<SigSpec, SigSpec> reduce_scheduled(Module *module, std::vector<DepthSi
 	if (out_final_depth)
 		*out_final_depth = final_depth;
 	log_assert(operands.size() == 2);
-	log("    CompressorTree::reduce_scheduled: %d levels, %d $fa (%d as 4:2), final depth %d\n", levels, fa_count, c42_count, final_depth);
+	log("    CompressorTree::reduce_scheduled: %d levels, %d 3:2 compressors (%d as 4:2), final depth %d\n", levels, fa_count, c42_count, final_depth);
 	return {operands[0].sig, operands[1].sig};
 }
 

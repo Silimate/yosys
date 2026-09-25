@@ -9,7 +9,7 @@ EOT
 hierarchy -auto-top
 proc
 arith_tree
-select -assert-count 2 t:$fa
+select -assert-count 1 t:$fa
 select -assert-count 1 t:$add
 select -assert-count 1 t:$not
 select -assert-none t:$sub
@@ -26,7 +26,7 @@ EOT
 hierarchy -auto-top
 proc
 arith_tree
-select -assert-count 3 t:$fa
+select -assert-count 2 t:$fa
 select -assert-count 1 t:$add
 select -assert-count 1 t:$not
 select -assert-none t:$sub
@@ -43,7 +43,7 @@ EOT
 hierarchy -auto-top
 proc
 arith_tree
-select -assert-count 3 t:$fa
+select -assert-count 2 t:$fa
 select -assert-count 1 t:$add
 select -assert-count 3 t:$not
 select -assert-none t:$sub
@@ -60,7 +60,7 @@ EOT
 hierarchy -auto-top
 proc
 arith_tree
-select -assert-count 4 t:$fa
+select -assert-count 3 t:$fa
 select -assert-count 1 t:$add
 select -assert-count 2 t:$not
 select -assert-none t:$sub
@@ -77,7 +77,7 @@ EOT
 hierarchy -auto-top
 proc
 arith_tree
-select -assert-count 3 t:$fa
+select -assert-count 2 t:$fa
 select -assert-count 1 t:$add
 select -assert-count 2 t:$not
 select -assert-none t:$sub
@@ -95,7 +95,7 @@ EOT
 hierarchy -auto-top
 proc
 arith_tree
-select -assert-count 2 t:$fa
+select -assert-count 1 t:$fa
 select -assert-count 1 t:$add
 select -assert-count 1 t:$not
 select -assert-none t:$sub
@@ -115,7 +115,7 @@ alumacc
 opt_clean
 arith_tree
 opt_clean
-select -assert-count 2 t:$fa
+select -assert-count 1 t:$fa
 select -assert-count 1 t:$add
 select -assert-none t:$alu
 select -assert-none t:$sub
@@ -135,7 +135,7 @@ alumacc
 opt_clean
 arith_tree
 opt_clean
-select -assert-count 3 t:$fa
+select -assert-count 2 t:$fa
 select -assert-count 1 t:$add
 select -assert-none t:$alu
 select -assert-none t:$sub
@@ -155,7 +155,7 @@ alumacc
 opt_clean
 arith_tree
 opt_clean
-select -assert-count 3 t:$fa
+select -assert-count 2 t:$fa
 select -assert-count 1 t:$add
 select -assert-none t:$alu
 select -assert-none t:$sub
@@ -175,7 +175,7 @@ alumacc
 opt_clean
 arith_tree
 opt_clean
-select -assert-count 3 t:$fa
+select -assert-count 2 t:$fa
 select -assert-count 1 t:$add
 select -assert-none t:$alu
 select -assert-none t:$sub
