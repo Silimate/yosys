@@ -32,6 +32,58 @@ struct ArithTreeOptions {
 	bool bit_offsets = false;
 };
 
+// Widen each adder back over the low bits opt_expr stripped from it, so the adder feeding it has one reader
+static void rejoin_stripped_lsbs(Module *module)
+{
+	SigMap sigmap(module);
+	dict<SigBit, std::pair<Cell *, int>> sum_bit;
+	pool<Cell *> rejoined;
+	auto index = [&](Cell *cell) {
+		SigSpec y = sigmap(cell->getPort(ID::Y));
+		for (int i = 0; i < GetSize(y); i++)
+			sum_bit[y[i]] = {cell, i};
+	};
+	for (auto cell : module->cells())
+		if (cell->type.in(ID($add), ID($sub)))
+			index(cell);
+
+	for (auto parent : module->cells()) {
+		if (!parent->type.in(ID($add), ID($sub)) || parent->getParam(ID::A_SIGNED).as_bool())
+			continue;
+		for (auto port : {ID::A, ID::B}) {
+			// A subtrahend's low bits would come out negated, so only widen over a minuend
+			if (port == ID::B && parent->type == ID($sub))
+				continue;
+			// The port must start with the child's sum above bits it no longer covers
+			SigSpec x = sigmap(parent->getPort(port));
+			if (x.empty() || !sum_bit.count(x[0]))
+				continue;
+			auto [child, k] = sum_bit.at(x[0]);
+			SigSpec y = child->getPort(ID::Y);
+			if (k == 0 || rejoined.count(child) || GetSize(x) < GetSize(y) - k ||
+			    x.extract(0, GetSize(y) - k) != sigmap(y.extract_end(k)))
+				continue;
+			// A parent that also reads those low bits would end up reading its own sum
+			pool<SigBit> reads = sigmap(SigSpec({parent->getPort(ID::A), parent->getPort(ID::B)})).to_sigbit_pool();
+			if (!sigmap(y.extract(0, k)).extract(reads).empty())
+				continue;
+
+			// Adding zeros below the other operand passes the child's low bits through the parent's sum
+			IdString other = port == ID::A ? ID::B : ID::A;
+			Wire *wire = module->addWire(NEW_ID, k);
+			child->setPort(ID::Y, {y.extract_end(k), wire});
+			parent->setPort(port, {parent->getPort(port), wire});
+			parent->setPort(other, {parent->getPort(other), SigSpec(State::S0, k)});
+			parent->setPort(ID::Y, {parent->getPort(ID::Y), y.extract(0, k)});
+			parent->fixup_parameters();
+			rejoined.insert(child);
+			index(child);
+			index(parent);
+			break;
+		}
+	}
+}
+
 struct ArithTreeWorker {
 	const ArithTreeOptions &opt;
 	Module *module;
@@ -871,6 +923,7 @@ struct ArithTreePass : public Pass {
 		extra_args(args, argidx, design);
 
 		for (auto mod : design->selected_modules()) {
+			rejoin_stripped_lsbs(mod);
 			ArithTreeWorker worker(opt, mod);
 			worker.run();
 		}

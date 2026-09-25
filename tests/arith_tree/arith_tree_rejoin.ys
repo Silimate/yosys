@@ -1,0 +1,30 @@
+# opt_expr strips the low sum bits c << 2 cannot touch, so a + b feeds both the outer add and y
+read_verilog <<EOT
+module add_shifted(input [7:0] a, b, c, output [7:0] y);
+	assign y = a + b + (c << 2);
+endmodule
+EOT
+hierarchy -auto-top
+proc
+opt_expr -fine
+opt_clean
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-count 1 t:$fa
+select -assert-count 1 t:$add
+design -reset
+
+# The same split under a subtraction, whose minuend passes its low bits through
+read_verilog <<EOT
+module sub_shifted(input [7:0] a, b, c, output [7:0] y);
+	assign y = a + b - (c << 2);
+endmodule
+EOT
+hierarchy -auto-top
+proc
+opt_expr -fine
+opt_clean
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-count 1 t:$fa
+select -assert-count 1 t:$add t:$sub %u
