@@ -153,8 +153,14 @@ struct SimShared
 	// SILIMATE: -missing-input-file lists every missing input, uncapped, for tools to read
 	struct MissingInput { std::string module, path; int width; };
 	std::string missing_input_file;
+	bool bind_only = false; // SILIMATE: stop once every input is bound and the file is written
 	std::vector<MissingInput> missing_input_list;
-	std::vector<MissingInput> partial_input_list; // SILIMATE: width is the bits a narrower dump leaves undriven
+	// SILIMATE: a port the dump holds at another width, bound on the low bits the two share
+	struct MismatchedInput { std::string module, path; int width, fst_width; };
+	std::vector<MismatchedInput> mismatched_input_list;
+	// SILIMATE: a dumped signal with bits the netlist no longer drives, so its dump is not replayed
+	struct UndrivenSignal { std::string module, path; int bits, width; };
+	std::vector<UndrivenSignal> undriven_list;
 	bool blackbox_children = false;
 	pool<IdString> instance_root_modules;
 	double clk_period_override = 0.0;
@@ -1435,7 +1441,8 @@ struct SimInstance
 	// 3) module has no processes (sim enforces proc-lowered input before this point).
 	// 4) sigmap is valid for per-bit queries on this instance.
 	// 5) shared->fst is active, i.e. this is called from FST/VCD replay flow.
-	int checkUndrivenReplaySignals(bool &any_undriven_found)
+	// SILIMATE: one driver map serves every root and child, since building one scans the whole design
+	int checkUndrivenReplaySignals(bool &any_undriven_found, DriverMap &drivermap, pool<Module *> &mapped)
 	{
 		int issue_count = 0;
 		bool has_replay_candidates = false;
@@ -1447,8 +1454,8 @@ struct SimInstance
 			}
 
 		if (has_replay_candidates) {
-			DriverMap drivermap(module->design);
-			drivermap.add(module);
+			if (mapped.insert(module).second)
+				drivermap.add(module);
 
 			for (auto &item : fst_handles) {
 				Wire *wire = item.first;
@@ -1467,6 +1474,7 @@ struct SimInstance
 				issue_count++;
 				any_undriven_found = true;
 				std::string wire_name = scope + "." + RTLIL::unescape_id(wire->name);
+				shared->undriven_list.push_back({log_id(module), wire_name, GetSize(undriven), GetSize(wire)});
 				if (GetSize(undriven) == GetSize(wire))
 				log_warning("Input trace contains undriven signal `%s` (%s).\n", wire_name.c_str(), log_signal(undriven));
 				else
@@ -1477,7 +1485,7 @@ struct SimInstance
 		}
 
 		for (auto child : children)
-			issue_count += child.second->checkUndrivenReplaySignals(any_undriven_found);
+			issue_count += child.second->checkUndrivenReplaySignals(any_undriven_found, drivermap, mapped);
 
 		return issue_count;
 	}
@@ -1856,7 +1864,30 @@ struct SimWorker : SimShared
 		json.entry("count", GetSize(missing_input_list));
 		json.entry("bits", bits);
 		write_list("missing_inputs", missing_input_list);
-		write_list("partial_inputs", partial_input_list);
+		json.name("mismatched_inputs");
+		json.begin_array();
+		for (auto &m : mismatched_input_list) {
+			json.begin_object();
+			json.compact();
+			json.entry("module", m.module);
+			json.entry("path", m.path);
+			json.entry("width", m.width);
+			json.entry("fst_width", m.fst_width);
+			json.end_object();
+		}
+		json.end_array();
+		json.name("undriven_signals");
+		json.begin_array();
+		for (auto &u : undriven_list) {
+			json.begin_object();
+			json.compact();
+			json.entry("module", u.module);
+			json.entry("path", u.path);
+			json.entry("bits", u.bits);
+			json.entry("width", u.width);
+			json.end_object();
+		}
+		json.end_array();
 		json.end_object();
 		if (!missing_input_warning && !missing_input_list.empty())
 			log_error("Can't find port '%s' on module '%s' in FST. Use -missing-input-warn to leave it undriven and continue.\n",
@@ -1896,8 +1927,7 @@ struct SimWorker : SimShared
 		t->fst_input_sigs.push_back({SigSpec(wire).extract(0, common), id, 0});
 		log_warning("Port '%s' on module '%s' is %d bit(s) in the FST and %d in the netlist; "
 				"driving the low %d bit(s).\n", path.c_str(), log_id(mod), dumped, width, common);
-		if (common < width)
-			partial_input_list.push_back({log_id(mod), path, width - common});
+		mismatched_input_list.push_back({log_id(mod), path, width, dumped});
 		return true;
 	}
 
@@ -2201,6 +2231,15 @@ struct SimWorker : SimShared
 			top->addAdditionalInputs();
 		}
 
+		// SILIMATE: check every root before the file is written, so it lists their undriven signals too
+		bool any_undriven_found = false;
+		int issue_count = 0;
+		DriverMap drivermap(top->module->design);
+		pool<Module *> mapped;
+		if (undriven_check && !bind_only)
+			for (auto t : tops)
+				issue_count += t->checkUndrivenReplaySignals(any_undriven_found, drivermap, mapped);
+
 		write_missing_input_file();
 
 		// SILIMATE: one line for the tail of the missing-input list that was not named above
@@ -2208,17 +2247,19 @@ struct SimWorker : SimShared
 			log_warning("%d further input port(s) missing from the FST are left undriven.\n",
 					missing_inputs - MAX_MISSING_INPUT_WARNINGS);
 
+		// SILIMATE: -bind-only reports how every input bound without replaying anything
+		if (bind_only) {
+			delete fst;
+			return;
+		}
+
 		register_signals();
 		top->addAdditionalInputs();
-		if (undriven_check) {
-			bool any_undriven_found = false;
-			int issue_count = top->checkUndrivenReplaySignals(any_undriven_found);
-			if (any_undriven_found)
-				log_warning("Values for the undriven signal(s) listed above are not replayed from FST/VCD input.\n");
-			if (issue_count > 0 && !undriven_warning)
-				log_cmd_error("Found %d undriven signal%s in the replay trace. Use -undriven-warn to continue or -no-undriven-check to disable this check.\n",
-						issue_count, issue_count == 1 ? "" : "s");
-		}
+		if (any_undriven_found)
+			log_warning("Values for the undriven signal(s) listed above are not replayed from FST/VCD input.\n");
+		if (issue_count > 0 && !undriven_warning)
+			log_cmd_error("Found %d undriven signal%s in the replay trace. Use -undriven-warn to continue or -no-undriven-check to disable this check.\n",
+					issue_count, issue_count == 1 ? "" : "s");
 
 		uint64_t startCount = 0;
 		uint64_t stopCount = 0;
@@ -3682,12 +3723,24 @@ struct SimPass : public Pass {
 		log("        not just the first few named in the log:\n");
 		log("            {\"count\": <ports>, \"bits\": <total width>, \"missing_inputs\":\n");
 		log("             [{\"module\": <module>, \"path\": <scope.port>, \"width\": <bits>}, ...],\n");
-		log("             \"partial_inputs\": [...]}\n");
-		log("        partial_inputs lists ports a narrower dump drives only in part, with the\n");
-		log("        number of bits left undriven as the width.\n");
+		log("             \"mismatched_inputs\":\n");
+		log("             [{\"module\": <module>, \"path\": <scope.port>,\n");
+		log("               \"width\": <bits>, \"fst_width\": <bits>}, ...],\n");
+		log("             \"undriven_signals\":\n");
+		log("             [{\"module\": <module>, \"path\": <scope.wire>,\n");
+		log("               \"bits\": <undriven bits>, \"width\": <bits>}, ...]}\n");
+		log("        mismatched_inputs lists ports the dump holds at another width, driven on\n");
+		log("        the low bits the two share; they are not counted missing.\n");
+		log("        undriven_signals holds the dumped signals the undriven-signal check finds\n");
+		log("        with bits the netlist does not drive; it is empty with -no-undriven-check.\n");
 		log("        The file is written, with a count of 0 if nothing is missing, once every\n");
 		log("        root's inputs are bound. Without -missing-input-warn the replay still\n");
 		log("        aborts on the first missing input, but only after the file is written.\n");
+		log("\n");
+		log("    -bind-only\n");
+		log("        bind every root's inputs, write -missing-input-file, and stop before\n");
+		log("        replaying anything, so how each input binds is known without a\n");
+		log("        replay. Needs -r with an FST or VCD file. undriven_signals stays empty.\n");
 		log("\n");
 		log("    An array port that Verific splits into element wires (`\\coeffs[-1]`,\n");
 		log("    `\\grid[1][0]`) binds to a dump that names the element (`coeffs[-1] [11:0]`,\n");
@@ -3971,6 +4024,10 @@ struct SimPass : public Pass {
 				worker.missing_input_file = missing_input_file;
 				continue;
 			}
+			if (args[argidx] == "-bind-only") {
+				worker.bind_only = true;
+				continue;
+			}
 			if (args[argidx] == "-x") {
 				worker.ignore_x = true;
 				worker.retain_output_data = true;  // use_signal needs every sample to spot all-X signals
@@ -4057,6 +4114,8 @@ struct SimPass : public Pass {
 		// Multi-root (-instance) is only supported in FST/VCD cosim
 		if (!worker.instance_specs.empty() && worker.sim_filename.empty())
 			log_cmd_error("-instance requires FST/VCD cosim (-r <file.vcd|.fst>).\n");
+		if (worker.bind_only && (worker.sim_filename.empty() || worker.missing_input_file.empty()))
+			log_cmd_error("-bind-only requires FST/VCD cosim (-r <file.vcd|.fst>) and -missing-input-file.\n");
 		if (worker.sim_filename.empty())
 			worker.run(top_mod, cycle_width, numcycles);
 		else {
