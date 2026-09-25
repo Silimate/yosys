@@ -1,0 +1,47 @@
+# rtl_bind_reason names a scope with nothing dumped (tb.dut.u_c), and a cell that binds loses a stale one
+
+read_rtlil <<EOT
+module \child
+  wire input 1 \clk
+  wire width 4 input 2 \d
+  wire width 4 output 3 \q
+  attribute \rtl_bind "acc/4[0:3]"
+  cell $dff \acc_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d
+    connect \Q \q
+  end
+end
+module \top
+  wire input 1 \clk
+  wire width 4 input 2 \d4
+  wire width 4 \acc
+  wire width 4 output 3 \y
+  attribute \rtl_bind "acc/4[0:3]"
+  attribute \rtl_bind_reason "stale"
+  cell $dff \named
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d4
+    connect \Q \acc
+  end
+  cell \child \u_c
+    connect \clk \clk
+    connect \d \acc
+    connect \q \y
+  end
+end
+EOT
+hierarchy -top top
+
+logger -expect warning "Cannot place 4 bit\(s\) of 4-bit object acc, 1 cell\(s\), e\.g\. acc_ff, in scope tb\.dut\.u_c: not in the waveform; nothing is dumped in that scope" 1
+reg_rename -waveform reg_rename_status.vcd -scope tb.dut
+logger -check-expected
+
+select -assert-count 1 child/c:acc_ff a:rtl_bind_status=absent*4 %i
+select -assert-count 1 child/c:acc_ff a:rtl_bind_reason=not?in?the?waveform??nothing?is?dumped?in?that?scope %i
+select -assert-count 1 top/c:named a:rtl_bind_status=bound*4 %i
+select -assert-none a:rtl_bind_reason=stale
