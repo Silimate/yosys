@@ -46,6 +46,8 @@ struct CheckPass : public Pass {
 		log("  - combinatorial loops\n");
 		log("  - two or more conflicting drivers for one wire\n");
 		log("  - used wires that do not have a driver\n");
+		log("  - cells of an internal ($-prefixed) type that is neither a known cell type\n");
+		log("    nor a module in the design\n");
 		log("\n");
 		log("Options:\n");
 		log("\n");
@@ -63,7 +65,8 @@ struct CheckPass : public Pass {
 		log("    -nolatches\n");
 		log("        also check for latch cells ($dlatch, $adlatch, $dlatchsr and their\n");
 		log("        $_DLATCH_*/$_DLATCHSR_* mappings) remaining in the design. Use this\n");
-		log("        before techmapping in flows that must not emit latches.\n");
+		log("        before techmapping in flows that must not emit latches. Cells marked\n");
+		log("        with the 'always_latch' attribute are not reported.\n");
 		log("\n");
 		log("    -latchonly\n");
 		log("        check only for latch cells (as listed under -nolatches), skipping all\n");
@@ -142,10 +145,9 @@ struct CheckPass : public Pass {
 			// latch-only mode only flags latches, skipping the (potentially false-positive mid-flow) undriven/driver/loop checks below
 			if (latchonly) {
 				for (auto cell : module->cells())
-					if (
+					if (!cell->get_bool_attribute(ID::always_latch) && (
 						cell->type.in(ID($dlatch), ID($adlatch), ID($dlatchsr)) ||
-						cell->type.begins_with("$_DLATCH_") || cell->type.begins_with("$_DLATCHSR_")
-					) {
+						cell->type.begins_with("$_DLATCH_") || cell->type.begins_with("$_DLATCHSR_"))) {
 						log_warning("Cell %s.%s is a latch of type %s.\n", module, cell, cell->type.unescape());
 						counter++;
 					}
@@ -160,13 +162,17 @@ struct CheckPass : public Pass {
 			TopoSort<std::pair<RTLIL::IdString, int>> topo;
 			for (auto &proc_it : module->processes)
 			{
+				pool<SigBit> proc_driven_bits;
 				std::vector<RTLIL::CaseRule*> all_cases = {&proc_it.second->root_case};
 				for (size_t i = 0; i < all_cases.size(); i++) {
 					for (auto action : all_cases[i]->actions) {
-						for (auto bit : sigmap(action.first))
+						for (auto bit : sigmap(action.first)) {
 							wire_drivers[bit].push_back(
 								stringf("action %s <= %s (case rule) in process %s",
 										log_signal(action.first), log_signal(action.second), proc_it.first.unescape()));
+							if (bit.wire)
+								proc_driven_bits.insert(bit);
+						}
 
 						for (auto bit : sigmap(action.second))
 							if (bit.wire) used_wires.insert(bit);
@@ -184,10 +190,13 @@ struct CheckPass : public Pass {
 					for (auto bit : sigmap(sync->signal))
 						if (bit.wire) used_wires.insert(bit);
 					for (auto action : sync->actions) {
-						for (auto bit : sigmap(action.first))
+						for (auto bit : sigmap(action.first)) {
 							wire_drivers[bit].push_back(
 								stringf("action %s <= %s (sync rule) in process %s",
 										log_signal(action.first), log_signal(action.second), proc_it.first.unescape()));
+							if (bit.wire && sync->type != RTLIL::SyncType::STi)
+								proc_driven_bits.insert(bit);
+						}
 						for (auto bit : sigmap(action.second))
 							if (bit.wire) used_wires.insert(bit);
 					}
@@ -200,6 +209,8 @@ struct CheckPass : public Pass {
 							if (bit.wire) used_wires.insert(bit);
 					}
 				}
+				for (auto bit : proc_driven_bits)
+					wire_drivers_count[bit]++;
 			}
 
 			struct CircuitEdgesDatabase : AbstractCellEdgesDatabase {
@@ -290,6 +301,11 @@ struct CheckPass : public Pass {
 			pool<Cell *> coarsened_cells;
 			for (auto cell : module->cells())
 			{
+				if (cell->type.begins_with("$") && !yosys_celltypes.cell_known(cell->type) && design->module(cell->type) == nullptr) {
+					log_warning("Cell %s.%s has unknown internal type %s.\n", module, cell, cell->type.unescape());
+					counter++;
+				}
+
 				if (mapped && cell->type.begins_with("$") && design->module(cell->type) == nullptr) {
 					if (allow_tbuf && cell->type == ID($_TBUF_)) goto cell_allowed;
 					log_warning("Cell %s.%s is an unmapped internal cell of type %s.\n", module, cell, cell->type.unescape());
@@ -298,7 +314,7 @@ struct CheckPass : public Pass {
 				}
 
 				if (
-					nolatches && (
+					nolatches && !cell->get_bool_attribute(ID::always_latch) && (
 					cell->type.in(ID($dlatch), ID($adlatch), ID($dlatchsr)) ||
 					cell->type.begins_with("$_DLATCH_") || cell->type.begins_with("$_DLATCHSR_"))
 				) {

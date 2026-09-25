@@ -22,6 +22,7 @@
 #include "kernel/celltypes.h"
 #include "kernel/rtlil.h"
 #include "kernel/log.h"
+#include "passes/proc/proc_dlatch.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -147,11 +148,7 @@ struct SynthLatticePass : public ScriptPass
 		log("        implement constant comparisons in soft logic, do not involve\n");
 		log("        hard carry chains\n");
 		log("\n");
-		log("    -latches <info|warn|error>\n");
-		log("        select the behaviour for latches that cannot be mapped to a\n");
-		log("        dedicated hardware primitive and are implemented using LUTs\n");
-		log("        instead. 'error' (the default) aborts synthesis, 'warn' only\n");
-		log("        prints a warning, and 'info' permits them with an info-level message.\n");
+		log("%s", SynthLatchesConfig::help());
 		log("        (ignored with -asyncprld, which has a latch primitive)\n");
 		log("\n");
 		log("\n");
@@ -160,7 +157,8 @@ struct SynthLatticePass : public ScriptPass
 		log("\n");
 	}
 
-	string top_opt, edif_file, json_file, family, latches;
+	string top_opt, edif_file, json_file, family;
+	SynthLatchesConfig latches;
 	bool noccu2, nodffe, nobram, nolutram, nowidelut, asyncprld, flatten, dff, iopad, nodsp, no_rw_check, have_dsp;
 	bool cmp2softlogic;
 	string postfix, arith_map, brams_map, dsp_map, cells_map, map_ram_default;
@@ -184,7 +182,7 @@ struct SynthLatticePass : public ScriptPass
 		iopad = false;
 		nodsp = false;
 		no_rw_check = false;
-		latches = "error";
+		latches = SynthLatchesConfig();
 		postfix = "";
 		arith_map = "";
 		brams_map = "";
@@ -310,19 +308,14 @@ struct SynthLatticePass : public ScriptPass
 				cmp2softlogic = true;
 				continue;
 			}
-			if (args[argidx] == "-latches" && argidx+1 < args.size()) {
-				latches = args[++argidx];
+			if (latches.parse(args, argidx))
 				continue;
-			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
 		if (family.empty())
 			log_cmd_error("Lattice family parameter must be set.\n");
-
-		if (latches != "info" && latches != "warn" && latches != "error")
-			log_cmd_error("Invalid value '%s' for -latches (expected info, warn or error)\n", latches.c_str());
 
 		if (family == "ecp5") {
 			postfix = "_ecp5";
@@ -394,7 +387,7 @@ struct SynthLatticePass : public ScriptPass
 
 		if (check_label("coarse"))
 		{
-			run("proc -latches " + ((asyncprld || latches == "info") ? std::string("info") : std::string("warn")));
+			run(stringf("proc -latches %s", asyncprld ? "info" : latches.str()));
 			if (flatten || help_mode) {
 				run("check");
 				run("flatten");
@@ -402,8 +395,8 @@ struct SynthLatticePass : public ScriptPass
 			run("tribuf -logic");
 			run("deminout");
 			run("opt_expr");
-			run("opt_clean");
 			run("check");
+			run("opt_clean");
 			run("opt -nodffe -nosdff");
 			run("fsm");
 			run("opt");
@@ -418,12 +411,21 @@ struct SynthLatticePass : public ScriptPass
 			run("opt_clean");
 
 			if (help_mode) {
+				// give every product its own adder for the DSP post-adder
+				run("alumacc -macc-only", "(only if -family lifcl/lfd2nx and unless -nodsp)");
+				run("maccmap -unmap", "(only if -family lifcl/lfd2nx and unless -nodsp)");
+				run("opt_clean", "(only if -family lifcl/lfd2nx and unless -nodsp)");
 				run("lattice_dsp_nexus", "(only if -family lifcl/lfd2nx and unless -nodsp)");
 				run("techmap -map +/mul2dsp.v [...]", "(unless -nodsp)");
 				run("techmap -map +/lattice/dsp_map" + dsp_map + ".v", "(unless -nodsp)");
 			} else if (have_dsp && !nodsp) {
-				if (is_nexus)
+				if (is_nexus) {
+					// give every product its own adder for the DSP post-adder
+					run("alumacc -macc-only");
+					run("maccmap -unmap");
+					run("opt_clean");
 					run("lattice_dsp_nexus");
+				}
 				for (const auto &rule : dsp_rules) {
 					run(stringf("techmap -map +/mul2dsp.v -D DSP_A_MAXWIDTH=%d -D DSP_B_MAXWIDTH=%d -D DSP_A_MINWIDTH=%d -D DSP_B_MINWIDTH=%d -D DSP_NAME=%s",
 						rule.a_maxwidth, rule.b_maxwidth, rule.a_minwidth, rule.b_minwidth, rule.prim));
@@ -521,7 +523,7 @@ struct SynthLatticePass : public ScriptPass
 		if (check_label("map_luts"))
 		{
 			if (!asyncprld || help_mode) {
-				if (latches == "error" || help_mode)
+				if (latches.policy == LatchPolicy::Error || help_mode)
 					run("check -latchonly -assert", "(skip if -asyncprld; only if -latches error, the default)");
 				run("techmap -map +/lattice/latches_map.v", "(skip if -asyncprld)");
 			}
