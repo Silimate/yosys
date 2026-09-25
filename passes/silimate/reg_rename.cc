@@ -62,7 +62,7 @@ struct Unbound {
 	bool mixed_width = false;
 	std::vector<std::string> cells; // distinct cells, first seen first
 	pool<Cell *> cell_set;
-	std::string detail; // first conflicting target, or the first width mismatch
+	std::string reason; // why, as the first miss in the group put it
 };
 
 // End-of-pass tally, so a partial binding is reported rather than passed off as complete
@@ -75,6 +75,7 @@ struct BindStats {
 	pool<Cell *> stamped; // cells given a status by this run, merged across instances
 	dict<std::string, int> summary_index;
 	std::vector<Unbound> summaries;
+	dict<Cell *, std::vector<std::string>> reasons; // distinct reasons per cell, for `rtl_bind_reason`
 };
 
 // Object with its trailing element indices dropped, so a whole array reports as one group
@@ -299,6 +300,14 @@ static std::string split_bit_range(const std::string &name, int &offset)
 	return name.substr(0, open);
 }
 
+// Why a bit did not bind, in the words of its warning (defined with report_unbound)
+static std::string dumped_context(const dict<std::string, std::vector<DumpLeaf>> &objects,
+				  const pool<std::string> &dumped_scopes, const std::string &scope,
+				  const std::string &obj);
+static std::string dumped_as(const dict<std::string, std::vector<DumpLeaf>> &objects,
+			     const std::string &scope, const std::string &obj);
+static std::string already_driven(const DumpLeaf &leaf, int leaf_bit);
+
 struct RegRenameInstance {
 	std::string vcd_scope;
 	Module *module;
@@ -405,13 +414,16 @@ struct RegRenameInstance {
 	// Record what became of `count` Q bits of `cell` from Q bit `q`, and fold a failure into the
 	// summary warning for its object
 	void note(BindStats &stats, std::vector<int> &status, Cell *cell, int q, int count, BindKind kind,
-		  const std::string &obj = "", int obj_width = 0, const std::string &detail = "")
+		  const std::string &obj = "", int obj_width = 0, const std::string &reason = "")
 	{
 		for (int i = 0; i < count; i++)
 			status[q + i] = kind;
 		stats.bits[kind] += count;
 		if (kind == KIND_BOUND)
 			return;
+		std::vector<std::string> &reasons = stats.reasons[cell];
+		if (std::find(reasons.begin(), reasons.end(), reason) == reasons.end())
+			reasons.push_back(reason);
 
 		std::string group = element_group(obj);
 		std::string key = stringf("%d\n%s\n%s", kind, vcd_scope.c_str(), group.c_str());
@@ -424,7 +436,7 @@ struct RegRenameInstance {
 			u.group = group;
 			u.kind = kind;
 			u.width = obj_width;
-			u.detail = detail;
+			u.reason = reason;
 		}
 		Unbound &u = stats.summaries[it->second];
 		u.bits += count;
@@ -454,7 +466,7 @@ struct RegRenameInstance {
 
 	// Rename each flop's Q wire to the signal the waveform dumped it under.
 	void process_registers(const dict<std::string, std::vector<DumpLeaf>> &objects,
-			       BindStats &stats)
+			       const pool<std::string> &dumped_scopes, BindStats &stats)
 	{
 		if (debug)
 			log("Processing registers in scope: %s (module: %s)\n", vcd_scope.c_str(),
@@ -492,7 +504,7 @@ struct RegRenameInstance {
 				if (debug)
 					log("Cell %s in scope %s has no usable RTL bind stamp\n",
 							log_id(cell->name), vcd_scope.c_str());
-				note(stats, status, cell, 0, GetSize(q), KIND_UNSTAMPED);
+				note(stats, status, cell, 0, GetSize(q), KIND_UNSTAMPED, "", 0, "no usable RTL bind stamp");
 				stats.no_stamp++;
 				stamp_status(stats, cell, status);
 				continue;
@@ -504,7 +516,8 @@ struct RegRenameInstance {
 				if (debug)
 					log("Cell %s in scope %s drives no wire that can be renamed (%s)\n",
 							log_id(cell->name), vcd_scope.c_str(), log_signal(q));
-				note(stats, status, cell, 0, GetSize(q), KIND_UNWIRED);
+				note(stats, status, cell, 0, GetSize(q), KIND_UNWIRED, "", 0,
+						"Q drives no wire reg_rename can rename");
 				stamp_status(stats, cell, status);
 				continue;
 			}
@@ -522,7 +535,8 @@ struct RegRenameInstance {
 						log_id(cell->name), GetSize(bind), qbits.width);
 				if (debug)
 					log("Cell %s in scope %s\n", detail.c_str(), vcd_scope.c_str());
-				note(stats, status, cell, 0, qbits.width, KIND_UNSTAMPED, "", 0, detail);
+				note(stats, status, cell, 0, qbits.width, KIND_UNSTAMPED, "", 0,
+						"no usable RTL bind stamp; " + detail);
 				stats.no_stamp++;
 				stamp_status(stats, cell, status);
 				continue;
@@ -537,7 +551,7 @@ struct RegRenameInstance {
 					if (debug)
 						log("Q bit %d of cell %s in scope %s has no RTL bind\n",
 								start, log_id(cell->name), vcd_scope.c_str());
-					note(stats, status, cell, start, 1, KIND_UNSTAMPED);
+					note(stats, status, cell, start, 1, KIND_UNSTAMPED, "", 0, "no usable RTL bind stamp");
 					stats.no_stamp++;
 					continue;
 				}
@@ -584,7 +598,9 @@ struct RegRenameInstance {
 								obj.c_str(), absent ? 0 : GetSize(obj_it->second), log_id(cell->name),
 								vcd_scope.c_str());
 					note(stats, status, cell, start, end - start, absent ? KIND_ABSENT : KIND_UNPLACED,
-							obj, obj_width);
+							obj, obj_width, absent
+							? "not in the waveform; " + dumped_context(objects, dumped_scopes, vcd_scope, obj)
+							: dumped_as(objects, vcd_scope, obj));
 					(absent ? stats.no_object : stats.no_bit)++;
 					continue;
 				}
@@ -596,7 +612,8 @@ struct RegRenameInstance {
 						log("Bit index %d is invalid for wire indices [%d:%d] for '%s'\n",
 								leaf.offset + leaf_bit, leaf.offset + leaf.width - 1, leaf.offset,
 								leaf.name.c_str());
-					note(stats, status, cell, start, end - start, KIND_UNPLACED, obj, obj_width);
+					note(stats, status, cell, start, end - start, KIND_UNPLACED, obj, obj_width,
+							dumped_as(objects, vcd_scope, obj));
 					stats.no_bit++;
 					continue;
 				}
@@ -614,7 +631,7 @@ struct RegRenameInstance {
 					if (aligned)
 						bound_bits += run.width;
 					note(stats, status, cell, start, run.width, aligned ? KIND_BOUND : KIND_CONFLICT, obj,
-							obj_width, stringf("%s[%d]", leaf.name.c_str(), leaf.offset + leaf_bit));
+							obj_width, aligned ? "" : already_driven(leaf, leaf_bit));
 					continue;
 				}
 
@@ -628,7 +645,7 @@ struct RegRenameInstance {
 						log("Skipping cell %s: target %s[%d] already driven by another cell\n",
 								log_id(cell->name), leaf.name.c_str(), leaf.offset + leaf_bit);
 					note(stats, status, cell, start, run.width, KIND_CONFLICT, obj, obj_width,
-							stringf("%s[%d]", leaf.name.c_str(), leaf.offset + leaf_bit));
+							already_driven(leaf, leaf_bit));
 					continue;
 				}
 
@@ -769,18 +786,19 @@ struct RegRenameInstance {
 	}
 
 	void process_all(const dict<std::string, std::vector<DumpLeaf>> &objects,
-			 BindStats &stats, FstData &fst)
+			 const pool<std::string> &dumped_scopes, BindStats &stats, FstData &fst)
 	{
 		bind_packed_inputs(objects, fst);
-		process_registers(objects, stats);
+		process_registers(objects, dumped_scopes, stats);
 		for (auto &it : children)
-			it.second->process_all(objects, stats, fst);
+			it.second->process_all(objects, dumped_scopes, stats, fst);
 	}
 };
 
 // Group every dumped signal under the RTL object it belongs to.
 static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 								const pool<std::string> &scopes,
+								pool<std::string> &dumped_scopes,
 								bool debug)
 {
 	dict<std::string, std::vector<DumpLeaf>> objects;
@@ -798,6 +816,7 @@ static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 		}
 		if (scope.empty() && !scopes.count(scope))
 			continue; // outside the hierarchy being processed
+		dumped_scopes.insert(scope);
 
 		std::string rel = full.substr(scope.empty() ? 0 : scope.size() + 1);
 
@@ -839,8 +858,11 @@ static std::string describe_dump(const std::vector<DumpLeaf> &leaves)
 
 // What the waveform holds for the nearest enclosing object of `obj` that it dumped at all
 static std::string dumped_context(const dict<std::string, std::vector<DumpLeaf>> &objects,
-				  const std::string &scope, const std::string &obj)
+				  const pool<std::string> &dumped_scopes, const std::string &scope,
+				  const std::string &obj)
 {
+	if (!dumped_scopes.count(scope))
+		return "nothing is dumped in that scope";
 	std::string prefix = obj;
 	for (size_t cut; (cut = prefix.find_last_of(".[")) != std::string::npos && cut > 0;) {
 		prefix.resize(cut);
@@ -851,9 +873,39 @@ static std::string dumped_context(const dict<std::string, std::vector<DumpLeaf>>
 	return stringf("nothing named %s is dumped in that scope", prefix.c_str());
 }
 
+// Why an object the waveform does hold could not place a bit
+static std::string dumped_as(const dict<std::string, std::vector<DumpLeaf>> &objects,
+			     const std::string &scope, const std::string &obj)
+{
+	auto it = objects.find(scope + "." + obj);
+	return stringf("the waveform has %s as %s", obj.c_str(),
+			it == objects.end() ? "nothing" : describe_dump(it->second).c_str());
+}
+
+static std::string already_driven(const DumpLeaf &leaf, int leaf_bit)
+{
+	return stringf("dumped bit %s[%d] is already driven by another cell", leaf.name.c_str(),
+			leaf.offset + leaf_bit);
+}
+
+// Stamp `rtl_bind_reason` on every cell left partly unbound, and clear one an earlier run left
+static void stamp_reasons(const BindStats &stats)
+{
+	for (auto cell : stats.stamped) {
+		auto it = stats.reasons.find(cell);
+		if (it == stats.reasons.end()) {
+			cell->attributes.erase(ID(rtl_bind_reason));
+			continue;
+		}
+		std::string text;
+		for (auto &reason : it->second)
+			text += (text.empty() ? "" : " | ") + reason;
+		cell->set_string_attribute(ID(rtl_bind_reason), text);
+	}
+}
+
 // One warning per object group left (partly) unbound, capped so a design-wide miss stays readable
-static void report_unbound(const BindStats &stats, const dict<std::string, std::vector<DumpLeaf>> &objects,
-			   bool debug)
+static void report_unbound(const BindStats &stats, bool debug)
 {
 	const int max_warnings = 100;
 	int shown = 0, hidden = 0, hidden_bits = 0;
@@ -863,8 +915,8 @@ static void report_unbound(const BindStats &stats, const dict<std::string, std::
 		examples.resize(std::min(3, GetSize(examples)));
 		std::string cells = stringf("%d cell(s), e.g. %s", GetSize(u.cell_set), capped_list(examples, 3).c_str());
 		if (u.kind == KIND_UNWIRED) { // never bindable, and not a waveform problem
-			log("In scope %s, %d Q bit(s) of %s, drive no wire reg_rename can rename\n", u.scope.c_str(),
-					u.bits, cells.c_str());
+			log("In scope %s, %d Q bit(s) of %s: %s\n", u.scope.c_str(), u.bits, cells.c_str(),
+					u.reason.c_str());
 			continue;
 		}
 		if (!debug && shown >= max_warnings) {
@@ -883,30 +935,12 @@ static void report_unbound(const BindStats &stats, const dict<std::string, std::
 			? stringf("%d-bit object %s", u.width, first.c_str())
 			: stringf("%d objects %s%s", GetSize(u.objects), capped_list(u.objects, 4).c_str(),
 					u.mixed_width ? "" : stringf(" of %d bits each", u.width).c_str());
-		switch (u.kind) {
-		case KIND_UNSTAMPED:
-			log_warning("In scope %s, %d Q bit(s) of %s, have no usable RTL bind stamp%s%s\n", u.scope.c_str(),
-					u.bits, cells.c_str(), u.detail.empty() ? "" : "; ", u.detail.c_str());
-			break;
-		case KIND_ABSENT:
-			log_warning("Cannot place %d bit(s) of %s, %s, in scope %s: not in the waveform; %s\n", u.bits,
-					what.c_str(), cells.c_str(), u.scope.c_str(),
-					dumped_context(objects, u.scope, first).c_str());
-			break;
-		case KIND_UNPLACED: {
-			auto it = objects.find(u.scope + "." + first);
-			log_warning("Cannot place %d bit(s) of %s, %s, in scope %s: the waveform has %s as %s\n", u.bits,
-					what.c_str(), cells.c_str(), u.scope.c_str(), first.c_str(),
-					it == objects.end() ? "nothing" : describe_dump(it->second).c_str());
-			break;
-		}
-		case KIND_CONFLICT:
-			log_warning("Cannot place %d bit(s) of %s, %s, in scope %s: dumped bit %s is already driven by "
-					"another cell\n", u.bits, what.c_str(), cells.c_str(), u.scope.c_str(), u.detail.c_str());
-			break;
-		default:
-			break;
-		}
+		if (u.kind == KIND_UNSTAMPED)
+			log_warning("In scope %s, %d Q bit(s) of %s, have %s\n", u.scope.c_str(), u.bits, cells.c_str(),
+					u.reason.c_str());
+		else
+			log_warning("Cannot place %d bit(s) of %s, %s, in scope %s: %s\n", u.bits, what.c_str(),
+					cells.c_str(), u.scope.c_str(), u.reason.c_str());
 	}
 	if (hidden)
 		log_warning("%d more object(s) left %d Q bit(s) unbound; rerun reg_rename with -d to list every one\n",
@@ -942,6 +976,10 @@ struct RegRenamePass : public Pass {
 		log("usable `rtl_bind`), absent (object not in the waveform), unplaced (object\n");
 		log("dumped, bit not found in it), conflict (dumped bit already driven by another\n");
 		log("flop) or unwired (Q is not a slice of one renamable wire).\n");
+		log("\n");
+		log("A cell with any bit left unbound also gets an `rtl_bind_reason` attribute saying\n");
+		log("why, in the words of the matching warning, with distinct reasons joined by \" | \".\n");
+		log("It is set on every such cell, not only the ones the capped warnings name.\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -995,15 +1033,17 @@ struct RegRenamePass : public Pass {
 			// Module scopes first, so a dumped name can be split into instance path and object
 			pool<std::string> scopes;
 			root.collect_scopes(scopes);
-			auto objects = collect_objects(fst, scopes, debug);
+			pool<std::string> dumped_scopes; // module scopes the waveform holds anything in
+			auto objects = collect_objects(fst, scopes, dumped_scopes, debug);
 			log("Extracted %d RTL object(s) from waveform\n", GetSize(objects));
 
 			dict<Module *, int> uses;
 			root.count_uses(uses);
 			root.bind_ports(fst, uses);
 			BindStats stats;
-			root.process_all(objects, stats, fst);
-			report_unbound(stats, objects, debug);
+			root.process_all(objects, dumped_scopes, stats, fst);
+			stamp_reasons(stats);
+			report_unbound(stats, debug);
 			log("Bound %d flop(s); unstamped %d, object absent %d, bit unplaced %d\n",
 				stats.bound, stats.no_stamp, stats.no_object, stats.no_bit);
 			log("Bound %d of %d Q bit(s); unstamped %d, absent %d, unplaced %d, conflict %d, unwired %d\n",
