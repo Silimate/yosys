@@ -181,7 +181,7 @@ logger -expect warning "Cannot place 1 bit\(s\) of 1-bit object dup, 1 cell\(s\)
 logger -expect warning "Cannot place 2 bit\(s\) of 8-bit object wide, 1 cell\(s\), e\.g\. edge_ff, in scope tb\.dut: the waveform has wide as 1 signal\(s\) spanning 6 bit\(s\): wide \[5:0\]" 1
 logger -expect log "Bound 10 flop\(s\); unstamped 2, object absent 3, bit unplaced 1" 1
 logger -expect log "Bound 39 of 52 Q bit\(s\); unstamped 2, absent 6, unplaced 2, conflict 1, unwired 2" 1
-logger -expect log "In scope tb\.dut, 2 Q bit\(s\) of 1 cell\(s\), e\.g\. uw_ff, drive no wire reg_rename can rename" 1
+logger -expect log "In scope tb\.dut, 2 Q bit\(s\) of 1 cell\(s\), e\.g\. uw_ff: Q drives no wire reg_rename can rename" 1
 reg_rename -waveform reg_rename_status.vcd -scope tb.dut
 logger -check-expected
 
@@ -211,3 +211,12 @@ select -assert-none a:sim_src
 select -assert-count 1 c:hw_cnt a:rtl_bind_status=bound*4 %i
 select -assert-count 1 c:hw_thr a:rtl_bind_status=bound*8 %i
 select -assert-count 16 t:$dff a:rtl_bind_status %i
+
+# Every cell left partly unbound says why in `rtl_bind_reason`, in the words of its warning
+select -assert-count 8 t:$dff a:rtl_bind_reason %i
+select -assert-count 1 c:gone_ff a:rtl_bind_reason=not?in?the?waveform??nothing?named?gone?is?dumped?in?that?scope %i
+select -assert-count 2 c:m1_ff c:m2_ff %u a:rtl_bind_reason=not?in?the?waveform??the?waveform?has?mem?only?as?1?signal* %i
+select -assert-count 1 c:edge_ff a:rtl_bind_reason=the?waveform?has?wide?as?1?signal* %i
+select -assert-count 2 c:ns_ff c:pp_ff %u a:rtl_bind_reason=no?usable?RTL?bind?stamp %i
+select -assert-count 1 c:dupa c:dupb %u a:rtl_bind_reason=dumped?bit?dup?0??is?already?driven?by?another?cell %i
+select -assert-count 1 c:uw_ff a:rtl_bind_reason=Q?drives?no?wire?reg_rename?can?rename %i
