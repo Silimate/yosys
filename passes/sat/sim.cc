@@ -4123,6 +4123,8 @@ struct SimPass : public Pass {
 			if (filename_trim.size() > 4 && ((filename_trim.compare(filename_trim.size()-4, std::string::npos, ".fst") == 0) ||
 				filename_trim.compare(filename_trim.size()-4, std::string::npos, ".vcd") == 0)) {
 				worker.run_cosim_fst(top_mod, numcycles, log_interval);
+			} else if (worker.bind_only) {
+				log_cmd_error("-bind-only requires FST/VCD cosim (-r <file.vcd|.fst>).\n");
 			} else if (filename_trim.size() > 4 && filename_trim.compare(filename_trim.size()-4, std::string::npos, ".aiw") == 0) {
 				if (worker.map_filename.empty())
 					log_cmd_error("For AIGER witness file map parameter is mandatory.\n");

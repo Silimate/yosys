@@ -131,9 +131,14 @@ grep -q "Co-simulation from" $tmp/replay.log
 if grep -q "Co-simulation from" $tmp/bind_only.log; then echo "-bind-only replayed the dump"; exit 1; fi
 check $tmp/bind_only.json 'd == json.load(open(sys.argv[1].replace("bind_only", "replay")))'
 
-# 9. -bind-only with no file to write reports nothing, so it is an error
+# 9. -bind-only with no file to write, or a replay that is not FST/VCD, is an error
 if $YOSYS -q -l $tmp/no_file.log -p "read_verilog missing_input.v; prep -top missing_input
 	sim -r $tmp/mif_missing_input.vcd -scope missing_input -missing-input-warn -bind-only" 2>/dev/null; then
 	echo "-bind-only ran without -missing-input-file"; exit 1
 fi
 grep -q "requires FST/VCD cosim" $tmp/no_file.log
+if $YOSYS -q -l $tmp/witness.log -p "read_verilog missing_input.v; prep -top missing_input
+	sim -r $tmp/none.yw -missing-input-warn -bind-only -missing-input-file $tmp/witness.json" 2>/dev/null; then
+	echo "-bind-only replayed a witness file"; exit 1
+fi
+grep -q "requires FST/VCD cosim" $tmp/witness.log

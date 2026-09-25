@@ -62,7 +62,7 @@ struct Unbound {
 	bool mixed_width = false;
 	std::vector<std::string> cells; // distinct cells, first seen first
 	pool<Cell *> cell_set;
-	std::string reason; // why, as the first miss in the group put it
+	dict<std::string, std::string> reasons; // why, per object, as its first miss put it
 };
 
 // End-of-pass tally, so a partial binding is reported rather than passed off as complete
@@ -436,13 +436,13 @@ struct RegRenameInstance {
 			u.group = group;
 			u.kind = kind;
 			u.width = obj_width;
-			u.reason = reason;
 		}
 		Unbound &u = stats.summaries[it->second];
 		u.bits += count;
 		u.mixed_width |= obj_width != u.width;
 		if (!obj.empty() && u.object_set.insert(obj).second)
 			u.objects.push_back(obj);
+		u.reasons.insert({obj, reason});
 		if (u.cell_set.insert(cell).second && GetSize(u.cells) < 8)
 			u.cells.push_back(log_id(cell->name));
 	}
@@ -916,7 +916,7 @@ static void report_unbound(const BindStats &stats, bool debug)
 		std::string cells = stringf("%d cell(s), e.g. %s", GetSize(u.cell_set), capped_list(examples, 3).c_str());
 		if (u.kind == KIND_UNWIRED) { // never bindable, and not a waveform problem
 			log("In scope %s, %d Q bit(s) of %s: %s\n", u.scope.c_str(), u.bits, cells.c_str(),
-					u.reason.c_str());
+					u.reasons.at("").c_str());
 			continue;
 		}
 		if (!debug && shown >= max_warnings) {
@@ -935,12 +935,14 @@ static void report_unbound(const BindStats &stats, bool debug)
 			? stringf("%d-bit object %s", u.width, first.c_str())
 			: stringf("%d objects %s%s", GetSize(u.objects), capped_list(u.objects, 4).c_str(),
 					u.mixed_width ? "" : stringf(" of %d bits each", u.width).c_str());
+		// The reason is the one for the object the warning names first
+		const std::string &reason = u.reasons.at(first);
 		if (u.kind == KIND_UNSTAMPED)
 			log_warning("In scope %s, %d Q bit(s) of %s, have %s\n", u.scope.c_str(), u.bits, cells.c_str(),
-					u.reason.c_str());
+					reason.c_str());
 		else
 			log_warning("Cannot place %d bit(s) of %s, %s, in scope %s: %s\n", u.bits, what.c_str(),
-					cells.c_str(), u.scope.c_str(), u.reason.c_str());
+					cells.c_str(), u.scope.c_str(), reason.c_str());
 	}
 	if (hidden)
 		log_warning("%d more object(s) left %d Q bit(s) unbound; rerun reg_rename with -d to list every one\n",
