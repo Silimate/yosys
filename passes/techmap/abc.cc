@@ -2756,6 +2756,15 @@ struct AbcPass : public Pass {
 					assigned_cells_reverse[cell] = key;
 				}
 
+				// SILIMATE: keep each domain's cells in module order, since ABC's mapping depends on it
+				dict<RTLIL::Cell*, int> module_order;
+				for (int i = 0; i < GetSize(all_cells); i++)
+					module_order[all_cells[i]] = i;
+				for (auto &it : assigned_cells)
+					std::sort(it.second.begin(), it.second.end(), [&](RTLIL::Cell *a, RTLIL::Cell *b) {
+						return module_order.at(a) < module_order.at(b);
+					});
+
 				log_header(design, "Summary of detected clock domains:\n");
 				{
 					std::vector<std::vector<RTLIL::Cell*>*> cell_sets;
