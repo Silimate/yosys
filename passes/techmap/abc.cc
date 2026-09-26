@@ -2613,7 +2613,7 @@ struct AbcPass : public Pass {
 			typedef tuple<bool, RTLIL::SigSpec, bool, RTLIL::SigSpec, bool, RTLIL::SigSpec, bool, RTLIL::SigSpec> clkdomain_t;
 			dict<clkdomain_t, std::vector<RTLIL::Cell*>> assigned_cells;
 
-			if (!dff_mode || !clk_str.empty()) { // SILIMATE: without -dff, keep module order rather than partitioning
+			if (!clk_str.empty()) {
 				std::vector<RTLIL::Cell*> &cells = assigned_cells[clkdomain_t()];
 				cells = mod->selected_cells();
 				assign_cell_connection_ports(mod, {&cells}, assign_map, config.cdc_file);
@@ -2755,6 +2755,15 @@ struct AbcPass : public Pass {
 					assigned_cells[key].push_back(cell);
 					assigned_cells_reverse[cell] = key;
 				}
+
+				// SILIMATE: keep each domain's cells in module order, since ABC's mapping depends on it
+				dict<RTLIL::Cell*, int> module_order;
+				for (int i = 0; i < GetSize(all_cells); i++)
+					module_order[all_cells[i]] = i;
+				for (auto &it : assigned_cells)
+					std::sort(it.second.begin(), it.second.end(), [&](RTLIL::Cell *a, RTLIL::Cell *b) {
+						return module_order.at(a) < module_order.at(b);
+					});
 
 				log_header(design, "Summary of detected clock domains:\n");
 				{
