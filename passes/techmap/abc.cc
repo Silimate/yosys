@@ -2613,7 +2613,7 @@ struct AbcPass : public Pass {
 			typedef tuple<bool, RTLIL::SigSpec, bool, RTLIL::SigSpec, bool, RTLIL::SigSpec, bool, RTLIL::SigSpec> clkdomain_t;
 			dict<clkdomain_t, std::vector<RTLIL::Cell*>> assigned_cells;
 
-			if (!clk_str.empty()) {
+			if (!dff_mode || !clk_str.empty()) { // SILIMATE: without -dff, keep module order rather than partitioning
 				std::vector<RTLIL::Cell*> &cells = assigned_cells[clkdomain_t()];
 				cells = mod->selected_cells();
 				assign_cell_connection_ports(mod, {&cells}, assign_map, config.cdc_file);
