@@ -34,7 +34,7 @@
 // cones with hundreds of same-width candidate buses) degrade into skipped
 // candidates instead of multi-minute runtimes.
 
-#include "passes/opt/rewrite_utils.h"
+#include "passes/silimate/rewrite_utils.h"
 
 struct CutRegionWorker
 {

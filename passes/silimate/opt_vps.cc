@@ -25,7 +25,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/rewrite_utils.h"
+#include "passes/silimate/rewrite_utils.h"
 
 struct OptVpsWorker
 {

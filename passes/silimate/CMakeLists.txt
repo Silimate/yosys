@@ -80,6 +80,60 @@ yosys_pass(opt_retime
 yosys_pass(infer_icg
 	infer_icg.cc
 )
+yosys_pass(opt_addcin
+	opt_addcin.cc
+)
+yosys_pass(opt_andor_pmux
+	opt_andor_pmux.cc
+)
+yosys_pass(opt_argmax
+	opt_argmax.cc
+)
+yosys_pass(opt_decode_fuse
+	opt_decode_fuse.cc
+)
+yosys_pass(opt_addcmp
+	opt_addcmp.cc
+)
+yosys_pass(opt_maxcmp
+	opt_maxcmp.cc
+)
+yosys_pass(opt_modadd_tree
+	opt_modadd_tree.cc
+)
+yosys_pass(opt_modred
+	opt_modred.cc
+)
+yosys_pass(opt_parallel_prefix
+	opt_parallel_prefix.cc
+)
+yosys_pass(opt_prienc
+	opt_prienc.cc
+)
+yosys_pass(opt_priority_onehot
+	opt_priority_onehot.cc
+)
+yosys_pass(opt_first_fit_alloc
+	opt_first_fit_alloc.cc
+)
+yosys_pass(opt_priokey
+	opt_priokey.cc
+)
+yosys_pass(opt_xor_fold
+	opt_xor_fold.cc
+)
+yosys_pass(opt_signif
+	opt_signif.cc
+)
+yosys_pass(opt_mux_odc
+	opt_mux_odc.cc
+)
+yosys_pass(opt_disjoint_add
+	opt_disjoint_add.cc
+)
+yosys_pass(opt_accum_enable
+	opt_accum_enable.cc
+)
 
 
 pmgen_command(peepopt_shift

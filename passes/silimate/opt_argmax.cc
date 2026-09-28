@@ -47,7 +47,7 @@ static Const packed_valid_const(const vector<int> &valid)
 	return Const(bits);
 }
 
-#include "passes/opt/cut_region.h"
+#include "passes/silimate/cut_region.h"
 
 struct OptArgmaxWorker : CutRegionWorker
 {

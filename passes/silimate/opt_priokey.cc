@@ -24,7 +24,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/rewrite_utils.h"
+#include "passes/silimate/rewrite_utils.h"
 
 // ---------------------------------------------------------------------------
 // opt_priokey: priority-by-key deduplication ("taken" accumulator) rewrite.

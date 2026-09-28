@@ -25,7 +25,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/rewrite_utils.h"
+#include "passes/silimate/rewrite_utils.h"
 #include "passes/silimate/unit_delay.h"
 
 // opt_addcmp: fuse an adder into the comparator it feeds.
