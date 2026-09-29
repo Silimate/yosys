@@ -1,0 +1,10 @@
+# RTL bind records each stamped register's declared ranges on its module, unpacked then packed,
+# so a waveform that dumps a register one index per signal can be placed by index.
+
+verific -cfg db_synopsys_register_names 1
+verific -sv rtl_bind_dims.sv
+logger -expect log "RTL bind of module top: 16 register bit\(s\) placed from their register name, 0 from their net, 0 unbound\." 1
+verific -import -all -top top
+logger -check-expected
+# `?` stands in for the `=` and the spaces, which a select pattern cannot spell
+select -assert-mod-count 1 A:rtl_bind_dims=a?p3:0?b?p0:3?c?p5:2?m?u0:1,p1:0

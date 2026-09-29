@@ -198,10 +198,18 @@ static int span(const std::vector<DumpLeaf> &leaves)
 	return total;
 }
 
+// One declared range of an object, from its module's `rtl_bind_dims` (frontends/verific/rtl_bind.h)
+struct Dim {
+	int msb = 0, lsb = 0;
+	bool packed = false;
+};
+
+static bool parse_bound(const std::string &text, int &out);
+
 // Locate `bit` of an object that the waveform dumped as `leaves`, given the width the
-// netlist says the object has.
+// netlist says the object has and, when known, its declared ranges.
 static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, DumpLeaf &out,
-		    int &leaf_bit)
+		    int &leaf_bit, const std::vector<Dim> &dims = {})
 {
 	if (leaves.empty() || bit < 0 || bit >= width)
 		return false;
@@ -226,6 +234,31 @@ static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, Dum
 		flat = flat && leaf.rel.empty();
 	if (flat)
 		return false;
+
+	// An index says where a member sits in the declared range, whatever order the dump lists it in
+	if (!dims.empty()) {
+		const Dim &dim = dims.front();
+		int lo = std::min(dim.msb, dim.lsb), hi = std::max(dim.msb, dim.lsb), count = hi - lo + 1;
+		int span = width / count, pos = span ? bit / span : -1;
+		std::vector<DumpLeaf> member;
+		bool indexed = width % count == 0;
+		for (auto &leaf : leaves) {
+			std::string head = first_component(leaf.rel);
+			int index = 0;
+			indexed = indexed && head.size() > 2 && head.front() == '[' && head.back() == ']' &&
+					parse_bound(head.substr(1, head.size() - 2), index) && index >= lo && index <= hi;
+			if (!indexed)
+				break;
+			// Packed ranges count from their LSB; unpacked ones put the lowest index on top
+			if ((dim.packed ? std::abs(index - dim.lsb) : hi - index) == pos) {
+				DumpLeaf child = leaf;
+				child.rel = leaf.rel.substr(head.size());
+				member.push_back(child);
+			}
+		}
+		if (indexed)
+			return resolve(member, span, bit % span, out, leaf_bit, {dims.begin() + 1, dims.end()});
+	}
 
 	auto groups = group_children(leaves);
 	int total = 0;
@@ -275,6 +308,31 @@ static bool parse_bound(const std::string &text, int &out)
 	return true;
 }
 
+// Each object's declared ranges from a module's `rtl_bind_dims`, e.g. `mem=u0:3,p7:0`
+static dict<std::string, std::vector<Dim>> parse_dims(const std::string &value)
+{
+	dict<std::string, std::vector<Dim>> dims;
+	for (auto &entry : split_tokens(value, " ")) {
+		size_t eq = entry.rfind('=');
+		std::vector<Dim> ranges;
+		for (auto &text : split_tokens(eq == std::string::npos ? "" : entry.substr(eq + 1), ",")) {
+			Dim dim;
+			size_t colon = text.find(':', 2);
+			if ((text[0] != 'u' && text[0] != 'p') || colon == std::string::npos ||
+					!parse_bound(text.substr(1, colon - 1), dim.msb) ||
+					!parse_bound(text.substr(colon + 1), dim.lsb)) {
+				ranges.clear();
+				break;
+			}
+			dim.packed = text[0] == 'p';
+			ranges.push_back(dim);
+		}
+		if (!ranges.empty())
+			dims[entry.substr(0, eq)] = ranges;
+	}
+	return dims;
+}
+
 // Strip a trailing bit range and report the declared lsb. A range written with no space
 // before it is a packed dimension (SHM's "deep_out[1:0]"), not a bit range, but either way
 // the dumped width is authoritative and the name without it is the signal.
@@ -304,12 +362,14 @@ struct RegRenameInstance {
 	Module *module;
 	bool debug;
 	dict<Cell*, RegRenameInstance *> children;
+	dict<std::string, std::vector<Dim>> dims; // stamped object -> its declared ranges
 
 	// Constructor
 	// When constructing, it will recursively build the
 	// module hierarchy with correct VCD scope mapping
 	RegRenameInstance(std::string scope, Module *mod, bool dbg = false)
-		: vcd_scope(scope), module(mod), debug(dbg)
+		: vcd_scope(scope), module(mod), debug(dbg),
+		  dims(parse_dims(mod->get_string_attribute(ID(rtl_bind_dims))))
 	{
 		// Loop through all cells in the module
 		for (auto cell : module->cells()) {
@@ -550,7 +610,8 @@ struct RegRenameInstance {
 				int leaf_bit = 0;
 				std::string dump_path;
 				bool placed = obj_it != objects.end() &&
-						resolve(obj_it->second, obj_width, obj_bit, leaf, leaf_bit);
+						resolve(obj_it->second, obj_width, obj_bit, leaf, leaf_bit,
+							dims.count(obj) ? dims.at(obj) : std::vector<Dim>());
 
 				// Q is the net of a pin the dump holds at a parent's actual, so bind through that pin
 				auto pin = resolved_pins.find(sigmap(SigBit(old_wire, qbits.offset + start)));
