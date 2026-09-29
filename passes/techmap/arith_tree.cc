@@ -923,7 +923,9 @@ struct ArithTreePass : public Pass {
 		extra_args(args, argidx, design);
 
 		for (auto mod : design->selected_modules()) {
-			rejoin_stripped_lsbs(mod);
+			// Rejoining moves the parent's other operand up a column, which only -bit-offsets can chain
+			if (opt.bit_offsets)
+				rejoin_stripped_lsbs(mod);
 			ArithTreeWorker worker(opt, mod);
 			worker.run();
 		}

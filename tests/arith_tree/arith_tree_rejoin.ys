@@ -8,7 +8,7 @@ hierarchy -auto-top
 proc
 opt_expr -fine
 opt_clean
-equiv_opt -assert arith_tree
+equiv_opt -assert arith_tree -bit-offsets
 design -load postopt
 select -assert-count 1 t:$fa
 select -assert-count 1 t:$add
@@ -24,7 +24,7 @@ hierarchy -auto-top
 proc
 opt_expr -fine
 opt_clean
-equiv_opt -assert arith_tree
+equiv_opt -assert arith_tree -bit-offsets
 design -load postopt
 select -assert-count 1 t:$fa
 select -assert-count 1 t:$add t:$sub %u
