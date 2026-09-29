@@ -235,7 +235,8 @@ const char *get_message_type(msg_type_t msg_type)
 void msg_func(msg_type_t msg_type, const char *message_id, linefile_type linefile, const char *msg, va_list args)
 {
 	std::string id = message_id ? stringf("[%s] ",message_id) : "";
-	string message = stringf("%s%s\n", id, vstringf(msg, args));
+	string body = vstringf(msg, args);
+	string message = stringf("%s%s\n", id, body);
 	auto src = !linefile ? LogSourceLocation{} : LogSourceLocation{LineFile::GetFileName(linefile),
 #ifdef VERIFIC_LINEFILE_INCLUDES_COLUMNS
 		int(linefile->GetLeftLine()), int(linefile->GetLeftCol()), int(linefile->GetRightLine()), int(linefile->GetRightCol())};
@@ -243,20 +244,23 @@ void msg_func(msg_type_t msg_type, const char *message_id, linefile_type linefil
 		int(LineFile::GetLineNo(linefile))};
 #endif
 
+	// SILIMATE: keep the "VERIFIC-WARNING [VERI-2580] file:line: msg" line and its routing
+	// (errors logged as warnings, on stdout) that preqorsor's logger parses, and report the
+	// first error itself rather than "Design elaboration failed; see full log for details"
+	string located = linefile ? stringf("%s:%d: ", LineFile::GetFileName(linefile), LineFile::GetLineNo(linefile)) : "";
+	located += body;
+
 	if (log_verific_callback) {
 		log_verific_callback(int(msg_type), message_id, src, message.c_str());
 	} else {
-		string message_prefix = stringf("%s: ",get_message_type(msg_type));
-		if (msg_type == VERIFIC_ERROR || msg_type == VERIFIC_PROGRAM_ERROR) {
-			logger().formatted_nonfatal_error(src, message_prefix, "%s%s\n", message);
-		} else if (msg_type == VERIFIC_WARNING) {
-			logger().formatted_warning(src, message_prefix, "%s%s\n", message);
-		} else {
-			logger().formatted_string(LogSeverity::Info, src, message_prefix, "%s%s\n", message);
-		}			
+		string message_prefix = stringf("%s [%s] ", get_message_type(msg_type), message_id ? message_id : "");
+		if (msg_type == VERIFIC_ERROR || msg_type == VERIFIC_WARNING || msg_type == VERIFIC_PROGRAM_ERROR)
+			log_warning_noprefix("%s%s\n", message_prefix, located);
+		else
+			log("%s%s\n", message_prefix, located);
 	}
-	if (msg_type == VERIFIC_ERROR || msg_type == VERIFIC_PROGRAM_ERROR)
-		verific_error_msg = "Design elaboration failed; see full log for details";
+	if (verific_error_msg.empty() && (msg_type == VERIFIC_ERROR || msg_type == VERIFIC_PROGRAM_ERROR))
+		verific_error_msg = located;
 }
 
 void set_verific_logging(void (*cb)(int msg_type, const char *message_id, LogSourceLocation src, const char *msg))
