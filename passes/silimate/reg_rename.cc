@@ -883,19 +883,22 @@ static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 		for (size_t split = rel.find_first_of(".[");; split = rel.find_first_of(".[", split + 1)) {
 			leaf.rel = split == std::string::npos ? "" : rel.substr(split);
 			std::string key = scope + "." + rel.substr(0, split);
-			// An alias of a member already filed here is that member again, as a modport lists it
 			std::string id = key + " " + std::to_string(var.id) + " " + member;
 			auto it = listed.find(id);
-			if (it == listed.end()) {
+			// A modport lists the object's members again; its own listing wins, in its own place
+			if (it == listed.end() || leaf.rel.size() < objects[key][it->second].rel.size()) {
+				if (it != listed.end())
+					objects[key][it->second].width = 0; // dropped once every signal is filed
 				listed[id] = GetSize(objects[key]);
 				objects[key].push_back(leaf);
-			} else if (leaf.rel.size() < objects[key][it->second].rel.size())
-				objects[key][it->second] = leaf; // keep the object's own member over a modport's view
-
+			}
 			if (split == std::string::npos)
 				break;
 		}
 	}
+	for (auto &it : objects)
+		it.second.erase(std::remove_if(it.second.begin(), it.second.end(),
+				[](const DumpLeaf &leaf) { return leaf.width == 0; }), it.second.end());
 	return objects;
 }
 
