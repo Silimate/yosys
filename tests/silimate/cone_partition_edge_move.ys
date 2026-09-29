@@ -1,0 +1,52 @@
+# Both sides have posedge and negedge domains, but gate moves b from the posedge
+# to the negedge domain. The unmatched FFs then sit in different domains, which
+# clkmerge would hide from the proof, so the pass reports inequivalence on the
+# scratchpad and leaves both modules uncut.
+log -header "Unmatched FF moved to another clock edge"
+log -push
+design -reset
+read_verilog <<EOF
+module gold(input clk, input [7:0] d, output reg [7:0] a, b, c);
+    always @(posedge clk) a <= d + 8'd1;
+    always @(posedge clk) b <= d + 8'd2;
+    always @(negedge clk) c <= d + 8'd3;
+endmodule
+
+module gate(input clk, input [7:0] d, output reg [7:0] a, b, c);
+    always @(posedge clk) a <= d + 8'd1;
+    always @(negedge clk) b <= d + 8'd2;
+    always @(negedge clk) c <= d + 8'd3;
+endmodule
+EOF
+proc; opt_clean
+cone_partition -v gold gate
+scratchpad -assert-set cone_partition.inequivalent
+select -assert-none w:*cone*
+design -reset
+log -pop
+
+# Unmatched FFs that stay in their domain leave the verdict unset.
+log -header "Unmatched FF kept on its clock edge"
+log -push
+design -reset
+read_verilog <<EOF
+module gold(input clk, input [7:0] d, output reg [7:0] a, b, c);
+    always @(posedge clk) a <= d + 8'd1;
+    always @(posedge clk) b <= d + 8'd2;
+    always @(negedge clk) c <= d + 8'd3;
+endmodule
+
+module gate(input clk, input [7:0] d, output reg [7:0] a, b, c);
+    always @(posedge clk) a <= d + 8'd1;
+    always @(posedge clk) b <= d - 8'd2;
+    always @(negedge clk) c <= d + 8'd3;
+endmodule
+EOF
+proc; opt_clean
+cone_partition -v gold gate
+scratchpad -assert-unset cone_partition.inequivalent
+select -module gold
+select -assert-any w:*cone*
+select -clear
+design -reset
+log -pop

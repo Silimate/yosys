@@ -22,18 +22,20 @@
  *         every matched FF's Q has become a PI, any backward path through
  *         it now terminates at a module PI or at another cone's PI.
  *
- *    4. Multi-clock-domain handling:
- *       - If both gold and gate have multiple clock domains, unmatched
- *         FFs (those not in any structural cone) are grouped by clock
- *         domain. Each group's Q outputs are XOR-reduced into a single
- *         bit, ANDed with the 1-bit clock guard PI for that domain,
- *         and driven out as one shared PO. This makes the comparison
- *         logic-based rather than name-based.
- *       - If only one module has multiple clock domains while the other
- *         has one, the pass errors out declaring the designs inequivalent.
- *       - Each unique (clock_signal, polarity) pair gets one guard PI
- *         (\clkguard_N). The guard ensures the SAT solver treats FFs in
- *         different domains as distinguishable even after clkmerge.
+ *    4. Unmatched FFs (those not in any structural cone) are left in the
+ *       circuit untouched, so the miter still sees their real state.
+ *       With -strict, a single unmatched FF on either side makes the pass
+ *       leave both modules unchanged: cutting the matched FFs into free
+ *       PIs would drop the relation an unmatched FF (e.g. a retimed
+ *       register) has to them, and the proof would fail spuriously.
+ *
+ *    5. If only one module has multiple clock domains while the other has
+ *       one, the pass errors out declaring the designs inequivalent. With
+ *       multiple domains on both sides, unmatched FFs of gold and gate that
+ *       sit in different domains also mean inequivalence: clkmerge folds every
+ *       domain into one later, so a flop moved to another edge shows only here.
+ *       That verdict goes to the scratchpad (cone_partition.inequivalent) and
+ *       both modules are left uncut.
  *
  *  The result is a pair of modules where every structurally matched
  *  FF cone is individually observable through its own PI/PO pair, ready
@@ -263,57 +265,15 @@ struct ConePartitionWorker {
 	Module *gold_mod;
 	Module *gate_mod;
 	bool verbose;
+	bool strict;
 	FILE *log_file;
 
 	int total_pos = 0;
 	int total_pis = 0;
-	int total_guards = 0;
 
-	// Clock domain guard tracking:
-	// Each unique (clk_signal_string, polarity) pair gets a unique guard index.
-	// A guard PI wire named \clkguard_<idx> is created in each module for each
-	// clock domain that appears in its FFs. The PO for a cone is ANDed with
-	// the guard so that FFs in different clock domains remain structurally
-	// distinguishable even after clkmerge unifies the actual clock signals.
-	dict<std::pair<std::string, bool>, int> clk_domain_to_guard;
-	int next_guard_idx = 0;
-	dict<std::pair<Module*, int>, Wire*> guard_pi_cache;
-
-	ConePartitionWorker(Design *d, Module *gold, Module *gate, bool v, FILE *lf = nullptr)
-		: design(d), gold_mod(gold), gate_mod(gate), verbose(v), log_file(lf) {}
-
-	int get_or_create_guard_idx(const SigSpec &clk, bool pol, SigMap &sigmap) {
-		SigSpec mapped = sigmap(clk);
-		std::string clk_str = log_signal(mapped);
-		auto key = std::make_pair(clk_str, pol);
-		auto it = clk_domain_to_guard.find(key);
-		if (it != clk_domain_to_guard.end())
-			return it->second;
-		int idx = next_guard_idx++;
-		clk_domain_to_guard[key] = idx;
-		return idx;
-	}
-
-	Wire* get_or_create_guard_pi(Module *mod, int guard_idx) {
-		auto key = std::make_pair(mod, guard_idx);
-		auto it = guard_pi_cache.find(key);
-		if (it != guard_pi_cache.end())
-			return it->second;
-		std::string name = stringf("\\clkguard_%d", guard_idx);
-		Wire *w = mod->addWire(name, 1);
-		w->port_input = true;
-		guard_pi_cache[key] = w;
-		total_guards++;
-		return w;
-	}
-
-	// Returns guard index for an FF cell, or -1 if the FF has no clock.
-	int get_ff_guard_idx(Cell *cell, SigMap &sigmap) {
-		FfData ff(nullptr, cell);
-		if (!ff.has_clk)
-			return -1;
-		return get_or_create_guard_idx(ff.sig_clk, ff.pol_clk, sigmap);
-	}
+	ConePartitionWorker(Design *d, Module *gold, Module *gate, bool v, bool s,
+			    FILE *lf = nullptr)
+		: design(d), gold_mod(gold), gate_mod(gate), verbose(v), strict(s), log_file(lf) {}
 
 	void vlog(const char *fmt, ...) __attribute__((format(printf, 2, 3))) {
 		va_list ap;
@@ -327,22 +287,36 @@ struct ConePartitionWorker {
 			log("%s", buf);
 	}
 
+	// Clock domain (clk_signal, polarity) of an FF; unclocked FFs share the empty domain.
+	std::pair<std::string, bool> ff_domain(Cell *cell, SigMap &sigmap) {
+		FfData ff(nullptr, cell);
+		if (!ff.has_clk)
+			return {"", false};
+		return {log_signal(sigmap(ff.sig_clk)), ff.pol_clk};
+	}
+
 	// Collect the set of clock domains (clk_signal, polarity) for all FFs in a module.
 	pool<std::pair<std::string, bool>> collect_clock_domains(ModuleAnalysis &analysis, SigMap &sigmap) {
 		pool<std::pair<std::string, bool>> domains;
-		for (auto cell : analysis.ff_cells) {
-			FfData ff(nullptr, cell);
-			if (!ff.has_clk)
-				continue;
-			SigSpec mapped = sigmap(ff.sig_clk);
-			std::string clk_str = log_signal(mapped);
-			domains.insert({clk_str, ff.pol_clk});
-		}
+		for (auto cell : analysis.ff_cells)
+			if (FfData(nullptr, cell).has_clk)
+				domains.insert(ff_domain(cell, sigmap));
+		return domains;
+	}
+
+	// Clock domains that hold at least one FF outside `matched`.
+	pool<std::pair<std::string, bool>> unmatched_domains(ModuleAnalysis &analysis,
+			const pool<Cell*> &matched, SigMap &sigmap) {
+		pool<std::pair<std::string, bool>> domains;
+		for (auto cell : analysis.ff_cells)
+			if (!matched.count(cell))
+				domains.insert(ff_domain(cell, sigmap));
 		return domains;
 	}
 
 	void run() {
 		StructuralHasher hasher;
+		design->scratchpad_unset("cone_partition.inequivalent");
 
 		vlog("Cone partitioning: analyzing module `%s'.\n", gold_mod->name.c_str());
 		ModuleAnalysis gold_analysis(gold_mod, design);
@@ -376,16 +350,12 @@ struct ConePartitionWorker {
 				(int)gold_domains.size(), (int)gate_domains.size());
 		}
 
-		bool multi_clock = gold_multi && gate_multi;
-		if (multi_clock) {
-			if (gold_domains != gate_domains) {
-				vlog("WARNING: Gold and gate have different clock domain sets.\n");
-				for (auto &d : gold_domains)
-					vlog("  gold domain: %s%s\n", d.second ? "" : "!", d.first.c_str());
-				for (auto &d : gate_domains)
-					vlog("  gate domain: %s%s\n", d.second ? "" : "!", d.first.c_str());
-			}
-			vlog("Multi-clock mode: unmatched FFs will be guarded with clock domain PIs.\n");
+		if (gold_multi && gold_domains != gate_domains) {
+			vlog("WARNING: Gold and gate have different clock domain sets.\n");
+			for (auto &d : gold_domains)
+				vlog("  gold domain: %s%s\n", d.second ? "" : "!", d.first.c_str());
+			for (auto &d : gate_domains)
+				vlog("  gate domain: %s%s\n", d.second ? "" : "!", d.first.c_str());
 		}
 
 		// Only consider FF cells for matching
@@ -421,51 +391,39 @@ struct ConePartitionWorker {
 			vlog("Found %d structurally matched FF groups.\n", (int)groups.size());
 		}
 
+		// Unmatched FFs stay in the circuit. Under -strict, any of them means
+		// no cut at all, since the cut would sever them from the matched FFs.
+		int unmatched_gold = GetSize(gold_analysis.ff_cells) - GetSize(matched_gold_ffs);
+		int unmatched_gate = GetSize(gate_analysis.ff_cells) - GetSize(matched_gate_ffs);
+
+		// A later clkmerge folds every domain into one, so a flop moved to another
+		// clock edge can only show here: unmatched FFs must sit in the same domains.
+		// Reported on the scratchpad, since a pass error would exit a pyosys caller.
+		if (gold_multi && unmatched_domains(gold_analysis, matched_gold_ffs, gold_sigmap) !=
+				unmatched_domains(gate_analysis, matched_gate_ffs, gate_sigmap)) {
+			std::string reason = "unmatched FFs sit in different clock domains";
+			vlog("Designs are inequivalent: %s; leaving both modules uncut.\n", reason.c_str());
+			design->scratchpad_set_string("cone_partition.inequivalent", reason);
+			return;
+		}
+
+		if (strict && (unmatched_gold || unmatched_gate)) {
+			vlog("Strict: %d unmatched gold FFs, %d unmatched gate FFs; leaving both "
+				"modules uncut.\n", unmatched_gold, unmatched_gate);
+			return;
+		}
+
 		int cone_idx = 0;
 		for (auto &group : groups) {
 			expose_matched_ff_group(group.gold_cells, group.gate_cells, cone_idx);
 			cone_idx++;
 		}
 
-		// In multi-clock mode, expose unmatched FFs with clock-domain guard ANDs.
-		// Instead of exposing each unmatched FF individually (which would make
-		// matching name-based), we group all unmatched FFs by clock domain and
-		// XOR-reduce their Q outputs into a single aggregate PO per domain,
-		// ANDed with the clock guard PI. This way the SAT solver compares
-		// unmatched FFs by their logic content, not by name.
-		if (multi_clock) {
-			dict<int, std::vector<Cell*>> gold_unmatched_by_guard, gate_unmatched_by_guard;
-			for (auto cell : gold_analysis.ff_cells) {
-				if (matched_gold_ffs.count(cell))
-					continue;
-				int guard_idx = get_ff_guard_idx(cell, gold_sigmap);
-				gold_unmatched_by_guard[guard_idx].push_back(cell);
-			}
-			for (auto cell : gate_analysis.ff_cells) {
-				if (matched_gate_ffs.count(cell))
-					continue;
-				int guard_idx = get_ff_guard_idx(cell, gate_sigmap);
-				gate_unmatched_by_guard[guard_idx].push_back(cell);
-			}
-
-			int unmatched_gold = 0, unmatched_gate = 0;
-			for (auto &[guard_idx, cells] : gold_unmatched_by_guard) {
-				expose_unmatched_ff_group(gold_mod, cells, guard_idx);
-				unmatched_gold += (int)cells.size();
-			}
-			for (auto &[guard_idx, cells] : gate_unmatched_by_guard) {
-				expose_unmatched_ff_group(gate_mod, cells, guard_idx);
-				unmatched_gate += (int)cells.size();
-			}
-			vlog("Multi-clock: guarded %d unmatched gold FFs, %d unmatched gate FFs.\n",
-				unmatched_gold, unmatched_gate);
-		}
-
 		gold_mod->fixup_ports();
 		gate_mod->fixup_ports();
 
-		vlog("Cone partitioning: created %d POs, %d PIs, %d clock guard PIs.\n",
-			total_pos, total_pis, total_guards);
+		vlog("Cone partitioning: created %d POs, %d PIs; %d gold and %d gate FFs "
+			"left unmatched.\n", total_pos, total_pis, unmatched_gold, unmatched_gate);
 	}
 
 private:
@@ -541,110 +499,6 @@ private:
 			ff_idx++;
 		}
 	}
-
-	// Expose all unmatched FFs in a single clock domain as one aggregate PO.
-	// Each FF's Q is redirected to an internal wire and a PI replaces it for
-	// downstream consumers. All the internal Q wires are XOR-reduced into a
-	// single 1-bit signal, ANDed with the clock guard PI, and driven out as
-	// one shared PO. This makes the comparison logic-based rather than
-	// name-based across gold/gate.
-	void expose_unmatched_ff_group(Module *mod, const std::vector<Cell*> &cells, int guard_idx)
-	{
-		if (cells.empty())
-			return;
-
-		std::string prefix = guard_idx >= 0
-			? stringf("\\uff_domain_%d", guard_idx)
-			: std::string("\\uff_domain_unclocked");
-		std::string po_name = prefix + "_po";
-
-		if (mod->wire(po_name))
-			return;
-
-		// Disconnect each FF's Q, create a PI replacement, and collect
-		// internal Q wires for the reduction.
-		std::vector<Wire*> q_internals;
-		int ff_idx = 0;
-		for (auto cell : cells) {
-			SigSpec old_q = cell->getPort(ID::Q);
-			int q_width = GetSize(old_q);
-			if (q_width == 0) {
-				ff_idx++;
-				continue;
-			}
-
-			std::string pi_name = stringf("%s_ff%d_pi", prefix.c_str(), ff_idx);
-			std::string q_int_name = stringf("%s_ff%d_q", prefix.c_str(), ff_idx);
-
-			if (mod->wire(pi_name)) {
-				ff_idx++;
-				continue;
-			}
-
-			Wire *pi_wire = mod->addWire(pi_name, q_width);
-			pi_wire->port_input = true;
-
-			Wire *q_int = mod->addWire(q_int_name, q_width);
-
-			cell->setPort(ID::Q, SigSpec(q_int));
-			mod->connect(old_q, SigSpec(pi_wire));
-
-			q_internals.push_back(q_int);
-			total_pis++;
-
-			if (verbose) {
-				vlog("  Unmatched FF %s in %s: PI %s (width %d) [guard=%d].\n",
-					cell->name.c_str(), mod->name.c_str(),
-					pi_name.c_str(), q_width, guard_idx);
-			}
-			ff_idx++;
-		}
-
-		if (q_internals.empty())
-			return;
-
-		// XOR-reduce all internal Q bits down to a single bit.
-		SigSpec all_bits;
-		for (auto w : q_internals)
-			for (int i = 0; i < w->width; i++)
-				all_bits.append(SigBit(w, i));
-
-		SigBit reduced;
-		if (GetSize(all_bits) == 1) {
-			reduced = all_bits[0];
-		} else {
-			SigBit acc = all_bits[0];
-			for (int i = 1; i < GetSize(all_bits); i++) {
-				Wire *tmp = mod->addWire(
-					stringf("%s_xor_%d", prefix.c_str(), i), 1);
-				mod->addXor(stringf("%s_xor_%d_cell", prefix.c_str(), i),
-					    acc, all_bits[i], SigBit(tmp, 0));
-				acc = SigBit(tmp, 0);
-			}
-			reduced = acc;
-		}
-
-		Wire *po_wire = mod->addWire(po_name, 1);
-		po_wire->port_output = true;
-
-		if (guard_idx >= 0) {
-			Wire *guard_pi = get_or_create_guard_pi(mod, guard_idx);
-			Wire *guarded = mod->addWire(prefix + "_guarded", 1);
-			mod->addAnd(prefix + "_clkand",
-				    reduced, SigBit(guard_pi, 0), SigBit(guarded, 0));
-			mod->connect(SigSpec(po_wire), SigSpec(guarded));
-		} else {
-			mod->connect(SigBit(po_wire, 0), reduced);
-		}
-
-		total_pos++;
-
-		if (verbose) {
-			vlog("  Unmatched FF group [guard=%d] in %s: %d FFs -> PO %s (1-bit XOR-reduced).\n",
-				guard_idx, mod->name.c_str(), (int)cells.size(), po_name.c_str());
-		}
-	}
-
 };
 
 // ---------------------------------------------------------------------------
@@ -672,26 +526,21 @@ struct ConePartitionPass : public Pass {
 		log("  - Combinational logic is left as it is. Since every matched FF's Q is\n");
 		log("    now a PI, each cone's fanin already terminates at a module PI or at\n");
 		log("    another cone's PI, so no boundary tracing is needed.\n");
+		log("  - FFs with no structural match on the other side are left in the\n");
+		log("    circuit untouched.\n");
 		log("\n");
-		log("Multi-clock-domain handling:\n");
+		log("If only ONE module has multiple clock domains while the other has one,\n");
+		log("the pass errors out, declaring the designs inequivalent. When both have\n");
+		log("multiple domains and the unmatched FFs of the two modules sit in\n");
+		log("different clock domains (e.g. a flop moved to the other edge), which\n");
+		log("clkmerge would hide from a later proof, both modules are left uncut and\n");
+		log("the reason is stored in the scratchpad as cone_partition.inequivalent.\n");
 		log("\n");
-		log("  The pass collects the set of clock domains (signal + polarity) from\n");
-		log("  all FFs in each module. Three cases:\n");
-		log("\n");
-		log("    1. Both modules have a single clock domain (or no clocked FFs):\n");
-		log("       no special handling; cones are created as above.\n");
-		log("\n");
-		log("    2. Only ONE module has multiple clock domains while the other has\n");
-		log("       one: the pass errors out, declaring the designs inequivalent.\n");
-		log("       A design cannot gain/lose clock domains and still be equivalent.\n");
-		log("\n");
-		log("    3. Both modules have multiple clock domains: after creating cones\n");
-		log("       for structurally matched FFs (as above), unmatched FFs are\n");
-		log("       grouped by clock domain. Each group's Q outputs are XOR-\n");
-		log("       reduced into a single bit, ANDed with the 1-bit clock-domain\n");
-		log("       guard PI (clkguard_N), and driven out as one shared PO per\n");
-		log("       domain. This makes the comparison logic-based rather than\n");
-		log("       name-based across gold/gate.\n");
+		log("    -strict\n");
+		log("        if any FF on either side is unmatched, leave both modules\n");
+		log("        unchanged. Cutting matched FFs into free PIs drops the relation\n");
+		log("        an unmatched FF (e.g. a retimed register) has to them, which\n");
+		log("        makes an equivalent pair look inequivalent.\n");
 		log("\n");
 		log("    -v\n");
 		log("        verbose output: log each created port\n");
@@ -711,6 +560,7 @@ struct ConePartitionPass : public Pass {
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		bool verbose = false;
+		bool strict = false;
 		std::string log_file_path;
 
 		log_header(design, "Executing CONE_PARTITION pass.\n");
@@ -719,6 +569,10 @@ struct ConePartitionPass : public Pass {
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-v") {
 				verbose = true;
+				continue;
+			}
+			if (args[argidx] == "-strict") {
+				strict = true;
 				continue;
 			}
 			if (args[argidx] == "-o" && argidx + 1 < args.size()) {
@@ -761,7 +615,7 @@ struct ConePartitionPass : public Pass {
 				log_cmd_error("Cannot open output file `%s'.\n", log_file_path.c_str());
 		}
 
-		ConePartitionWorker worker(design, gold_mod, gate_mod, verbose, log_file);
+		ConePartitionWorker worker(design, gold_mod, gate_mod, verbose, strict, log_file);
 		worker.run();
 
 		if (log_file)
