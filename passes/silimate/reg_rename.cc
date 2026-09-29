@@ -391,12 +391,85 @@ static std::string split_bit_range(const std::string &name, int &offset)
 	return name.substr(0, open);
 }
 
+// Group every dumped signal under the RTL object it belongs to.
+static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
+								const pool<std::string> &scopes,
+								bool debug)
+{
+	dict<std::string, std::vector<DumpLeaf>> objects;
+	pool<std::string> seen; // dumpers may open the same scope twice and repeat declarations
+	dict<std::string, int> listed; // (object, handle, member name) -> where its leaf is filed
+	for (auto &var : fst.getVars()) {
+		int offset = 0;
+		std::string name = split_bit_range(RTLIL::unescape_id(var.name), offset);
+		std::string full = var.scope.empty() ? name : var.scope + "." + name;
+
+		// Longest enclosing module scope: the rest is the object and its member path
+		std::string scope = var.scope;
+		while (!scope.empty() && !scopes.count(scope)) {
+			size_t dot = scope.find_last_of('.');
+			scope = dot == std::string::npos ? "" : scope.substr(0, dot);
+		}
+		if (scope.empty() && !scopes.count(scope))
+			continue; // outside the hierarchy being processed
+
+		std::string rel = full.substr(scope.empty() ? 0 : scope.size() + 1);
+
+		// A repeat of a name already seen is the same signal again, not another member
+		if (!seen.insert(full).second)
+			continue;
+
+		DumpLeaf leaf;
+		leaf.name = rel;
+		// An array dumped as a scope holding its elements (`$scope data_pipes_reg` over
+		// `$var [1]`) files element `data_pipes_reg[1]` under that object, while the renamed
+		// wire keeps the dumped spelling `data_pipes_reg.[1]`, which sim finds from any
+		// instance's own scope.
+		for (size_t pos; (pos = rel.find(".[")) != std::string::npos;)
+			rel.erase(pos, 1);
+		leaf.width = var.width;
+		leaf.offset = offset;
+		if (debug)
+			log("Dumped %s.%s (width %d, lsb %d)\n", scope.c_str(), rel.c_str(), leaf.width, offset);
+		std::string member = rel.substr(rel.find_last_of('.') + 1);
+		for (size_t split = rel.find_first_of(".[");; split = rel.find_first_of(".[", split + 1)) {
+			leaf.rel = split == std::string::npos ? "" : rel.substr(split);
+			std::string key = scope + "." + rel.substr(0, split);
+			std::string id = key + " " + std::to_string(var.id) + " " + member;
+			auto it = listed.find(id);
+			bool repeat = false, shorter = false;
+			if (it != listed.end()) {
+				// A modport lists the object's members again, each under a path ending in the member's own
+				const std::string &kept = objects[key][it->second].rel;
+				repeat = leaf.rel.ends_with(kept) || kept.ends_with(leaf.rel);
+				shorter = leaf.rel.size() < kept.size();
+			}
+			// The object's own listing wins, in its own place
+			if (!repeat || shorter) {
+				if (repeat)
+					objects[key][it->second].width = 0; // dropped once every signal is filed
+				if (it == listed.end() || repeat)
+					listed[id] = GetSize(objects[key]);
+				objects[key].push_back(leaf);
+			}
+			if (split == std::string::npos)
+				break;
+		}
+	}
+	for (auto &it : objects)
+		it.second.erase(std::remove_if(it.second.begin(), it.second.end(),
+				[](const DumpLeaf &leaf) { return leaf.width == 0; }), it.second.end());
+	return objects;
+}
+
 struct RegRenameInstance {
 	std::string vcd_scope;
 	Module *module;
 	bool debug;
 	dict<Cell*, RegRenameInstance *> children;
 	dict<std::string, std::vector<DeclaredRange>> ranges; // stamped object -> its declared ranges
+	SigMap sigmap; // this module's nets, set while its registers are processed
+	dict<SigBit, SigBit> resolved_pins; // pins bind_ports resolved to a whole dumped signal, by net
 
 	// Constructor
 	// When constructing, it will recursively build the
@@ -546,6 +619,38 @@ struct RegRenameInstance {
 		cell->set_string_attribute(ID(rtl_bind_status), rtl_bind_status_compress(words));
 	}
 
+	// Find the dumped signal and bit holding Q bit `q` of `cell`, which the cell's stamp names as `bind`
+	bool find_dumped_bit(DumpLocator &dump, Cell *cell, SigBit q, const RtlBindBit &bind, DumpLeaf &leaf,
+			     int &leaf_bit, std::string &dump_path)
+	{
+		// First by the RTL object the stamp names
+		if (dump.locate(vcd_scope + "." + bind.obj, bind.width, bind.bit,
+				ranges.count(bind.obj) ? ranges.at(bind.obj) : std::vector<DeclaredRange>(), leaf, leaf_bit))
+			return true;
+
+		// Q is the net of a pin the dump holds at a parent's actual, so bind through that pin
+		auto pin = resolved_pins.find(sigmap(q));
+		if (pin != resolved_pins.end()) {
+			Wire *pin_wire = pin->second.wire;
+			dump_path = pin_wire->get_string_attribute(ID(sim_src));
+			leaf = {RTLIL::unescape_id(pin_wire->name), "", GetSize(pin_wire), pin_wire->start_offset};
+			leaf_bit = pin->second.offset;
+			return true;
+		}
+
+		// The stamp may name an object the dump does not hold as such: a layout rebuilt
+		// from wire names takes the generate block of `hw_gen.cnt` for a struct. Q still
+		// drives that net, so bind through the net's own name when the dump has it.
+		if (!q.wire->name.isPublic() || !dump.locate(vcd_scope + "." + RTLIL::unescape_id(q.wire->name),
+				GetSize(q.wire), q.offset, {}, leaf, leaf_bit))
+			return false;
+		if (debug)
+			log("Placing %s[%d] of cell %s by its Q net as %s, not by its RTL bind %s[%d]\n",
+					log_id(q.wire), q.offset, log_id(cell->name), leaf.name.c_str(), bind.obj.c_str(),
+					bind.bit);
+		return true;
+	}
+
 	// Rename each flop's Q wire to the signal the waveform dumped it under.
 	void process_registers(DumpLocator &dump, BindStats &stats)
 	{
@@ -562,8 +667,8 @@ struct RegRenameInstance {
 		pool<Wire *> drop_wires;
 
 		// Pins bind_ports resolved to a whole dumped signal, by the net each bit carries
-		SigMap sigmap(module);
-		dict<SigBit, SigBit> resolved_pins;
+		sigmap.set(module);
+		resolved_pins.clear();
 		for (auto wire : module->wires())
 			if (wire->port_id && wire->has_attribute(ID(sim_src)) && !wire->has_attribute(ID(sim_src_bit)))
 				for (auto bit : SigSpec(wire))
@@ -638,37 +743,12 @@ struct RegRenameInstance {
 				int obj_bit = bind[start].bit, obj_width = bind[start].width;
 
 				// Locate obj[obj_bit] among the signals the waveform dumped for it
-				auto obj_it = dump.objects.find(vcd_scope + "." + obj);
 				DumpLeaf leaf;
 				int leaf_bit = 0;
 				std::string dump_path;
-				bool placed = dump.locate(vcd_scope + "." + obj, obj_width, obj_bit,
-						ranges.count(obj) ? ranges.at(obj) : std::vector<DeclaredRange>(), leaf, leaf_bit);
-
-				// Q is the net of a pin the dump holds at a parent's actual, so bind through that pin
-				auto pin = resolved_pins.find(sigmap(SigBit(old_wire, qbits.offset + start)));
-				if (!placed && pin != resolved_pins.end()) {
-					Wire *pin_wire = pin->second.wire;
-					dump_path = pin_wire->get_string_attribute(ID(sim_src));
-					leaf = {RTLIL::unescape_id(pin_wire->name), "", GetSize(pin_wire), pin_wire->start_offset};
-					leaf_bit = pin->second.offset;
-					end = start + 1; // the pin need not follow the flop's bit order
-					placed = true;
-				}
-
-				// The stamp may name an object the dump does not hold as such: a layout rebuilt
-				// from wire names takes the generate block of `hw_gen.cnt` for a struct. Q still
-				// drives that net, so bind through the net's own name when the dump has it.
-				if (!placed && old_wire->name.isPublic()) {
-					placed = dump.locate(vcd_scope + "." + RTLIL::unescape_id(old_wire->name), GetSize(old_wire),
-							qbits.offset + start, {}, leaf, leaf_bit);
-					if (placed && debug)
-						log("Placing %s[%d] of cell %s by its Q net as %s, not by its RTL bind %s[%d]\n",
-								log_id(old_wire), qbits.offset + start, log_id(cell->name),
-								leaf.name.c_str(), obj.c_str(), obj_bit);
-				}
-
-				if (!placed) {
+				if (!find_dumped_bit(dump, cell, SigBit(old_wire, qbits.offset + start), bind[start], leaf,
+						leaf_bit, dump_path)) {
+					auto obj_it = dump.objects.find(vcd_scope + "." + obj);
 					bool absent = obj_it == dump.objects.end();
 					if (debug)
 						log("%s bit %d of %d-bit object %s, dumped as %d signal(s), for cell %s in scope %s\n",
@@ -680,6 +760,9 @@ struct RegRenameInstance {
 					(absent ? stats.no_object : stats.no_bit)++;
 					continue;
 				}
+				// A parent's pin need not follow the flop's bit order, so it binds one bit at a time
+				if (!dump_path.empty())
+					end = start + 1;
 
 				// A multi-bit flop can straddle dumped signals, e.g. two struct members: bind the
 				// part inside this one and place the rest from where it ends
@@ -865,77 +948,6 @@ struct RegRenameInstance {
 			it.second->process_all(dump, stats, fst);
 	}
 };
-
-// Group every dumped signal under the RTL object it belongs to.
-static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
-								const pool<std::string> &scopes,
-								bool debug)
-{
-	dict<std::string, std::vector<DumpLeaf>> objects;
-	pool<std::string> seen; // dumpers may open the same scope twice and repeat declarations
-	dict<std::string, int> listed; // (object, handle, member name) -> where its leaf is filed
-	for (auto &var : fst.getVars()) {
-		int offset = 0;
-		std::string name = split_bit_range(RTLIL::unescape_id(var.name), offset);
-		std::string full = var.scope.empty() ? name : var.scope + "." + name;
-
-		// Longest enclosing module scope: the rest is the object and its member path
-		std::string scope = var.scope;
-		while (!scope.empty() && !scopes.count(scope)) {
-			size_t dot = scope.find_last_of('.');
-			scope = dot == std::string::npos ? "" : scope.substr(0, dot);
-		}
-		if (scope.empty() && !scopes.count(scope))
-			continue; // outside the hierarchy being processed
-
-		std::string rel = full.substr(scope.empty() ? 0 : scope.size() + 1);
-
-		// A repeat of a name already seen is the same signal again, not another member
-		if (!seen.insert(full).second)
-			continue;
-
-		DumpLeaf leaf;
-		leaf.name = rel;
-		// An array dumped as a scope holding its elements (`$scope data_pipes_reg` over
-		// `$var [1]`) files element `data_pipes_reg[1]` under that object, while the renamed
-		// wire keeps the dumped spelling `data_pipes_reg.[1]`, which sim finds from any
-		// instance's own scope.
-		for (size_t pos; (pos = rel.find(".[")) != std::string::npos;)
-			rel.erase(pos, 1);
-		leaf.width = var.width;
-		leaf.offset = offset;
-		if (debug)
-			log("Dumped %s.%s (width %d, lsb %d)\n", scope.c_str(), rel.c_str(), leaf.width, offset);
-		std::string member = rel.substr(rel.find_last_of('.') + 1);
-		for (size_t split = rel.find_first_of(".[");; split = rel.find_first_of(".[", split + 1)) {
-			leaf.rel = split == std::string::npos ? "" : rel.substr(split);
-			std::string key = scope + "." + rel.substr(0, split);
-			std::string id = key + " " + std::to_string(var.id) + " " + member;
-			auto it = listed.find(id);
-			bool repeat = false, shorter = false;
-			if (it != listed.end()) {
-				// A modport lists the object's members again, each under a path ending in the member's own
-				const std::string &kept = objects[key][it->second].rel;
-				repeat = leaf.rel.ends_with(kept) || kept.ends_with(leaf.rel);
-				shorter = leaf.rel.size() < kept.size();
-			}
-			// The object's own listing wins, in its own place
-			if (!repeat || shorter) {
-				if (repeat)
-					objects[key][it->second].width = 0; // dropped once every signal is filed
-				if (it == listed.end() || repeat)
-					listed[id] = GetSize(objects[key]);
-				objects[key].push_back(leaf);
-			}
-			if (split == std::string::npos)
-				break;
-		}
-	}
-	for (auto &it : objects)
-		it.second.erase(std::remove_if(it.second.begin(), it.second.end(),
-				[](const DumpLeaf &leaf) { return leaf.width == 0; }), it.second.end());
-	return objects;
-}
 
 // `N signal(s) spanning B bit(s): a [3:0], b`, listing at most 8 of them
 static std::string describe_dump(const std::vector<DumpLeaf> &leaves)
