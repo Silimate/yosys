@@ -620,3 +620,54 @@ proc; opt
 sat -seq 8 -prove-asserts -verify
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+# The shape a move-picking driver actually runs in: a candidate that turns out
+# to be illegal, then one that lands, then another on top of it. The point is
+# that a crossing leaves the design in a state the next call can work from -
+# the register is an ordinary cell of hier_src afterwards, and the second move
+# is an ordinary intra-module one that never learns a boundary was involved.
+#
+# moved_from and moved_to come back equal for that second move, which is how
+# a driver tells "the register changed modules" from "the register moved".
+log -header "One after another, the way a driver proposes moves"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+design -save orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+opt_retime -flop f1 -cut xor_t -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert-unset opt.did_something
+scratchpad -assert-unset opt_retime.moved_from
+
+opt_retime -flop f1 -cut u_src -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from top
+scratchpad -assert opt_retime.moved_to hier_src
+check -assert
+
+opt_retime -flop f1 -cut add_s -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from hier_src
+scratchpad -assert opt_retime.moved_to hier_src
+check -assert
+select -assert-count 2 hier_src/t:$dff
+select -assert-count 0 top/t:$dff
+
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
