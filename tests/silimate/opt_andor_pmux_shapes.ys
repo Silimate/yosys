@@ -1,4 +1,4 @@
-read_verilog opt_andor_pmux.v
+read_verilog opt_andor_pmux_shapes.v
 design -save read
 
 design -load read
