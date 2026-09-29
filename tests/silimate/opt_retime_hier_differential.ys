@@ -51,18 +51,30 @@
 #     instance, which relocates the register and touches no logic. Flattening
 #     deletes the boundary, and with it the only thing that move does. Asking
 #     anyway is a hard error rather than a refusal; the last section pins it.
-#   - The oracle never refuses a cross-module move. Every cross-module refusal
-#     in the pass is a case the oracle accepts, and the result it produces is
-#     correct - each one is proved below. So the oracle is an oracle for
-#     acceptance and for what the answer should be, and is worthless as an
+#   - The oracle never refuses a cross-module move. All seven cross-module
+#     refusals the pass can make and the oracle can be asked about - which is
+#     every one in opt_retime_hier_refusal.ys except the blackbox, where there
+#     is nothing to flatten - are cases the oracle accepts, and the result it
+#     produces is correct; each one is proved below. So the oracle is an oracle
+#     for acceptance and for what the answer should be, and is worthless as an
 #     oracle for refusal. It answers "is there a retiming here", and the pass is
 #     answering "is there a retiming here that survives being written back as
 #     hierarchical RTL", which is a strictly smaller question.
 #
 # That last point is the one to carry forward. A driver must not treat a
 # flatten-then-retime result as evidence that the native pass is being too
-# conservative, because for four of the five refusals it is not conservatism at
+# conservative, because for four of the seven refusals it is not conservatism at
 # all - it is hierarchy holding a constraint that flattening threw away.
+#
+# Three of those four carry no marker at all, which by the convention means the
+# answer is no rather than not yet, and all three turn out to have a move: a
+# register can cross into a module with no clock as long as it stops in front of
+# the instance instead of inside it; a gated clock the parent cannot see stops
+# mattering once the logic moves instead of the register; and the init a landing
+# net already carries can be inert. None of that changes what the pass should do
+# - the refusals are right about the form it produces - but a driver sorting
+# candidates by marker reads an unmarked refusal as the end of the search, and
+# for these three it is not.
 
 # ---------------------------------------------------------------------------
 # Part 1: requests both paths can express.
@@ -512,11 +524,15 @@ log -pop
 # driver has to act on:
 #
 #   (a) the pass could make this move and does not - a gap, marked (unsupported)
-#   (b) the move exists but not in the form the pass produces - relocating the
-#       register is impossible, moving the logic instead is not, and the pass
-#       only moves registers
+#   (b) the move exists, and the refusal is about the form the pass would
+#       produce rather than about the move: relocating the register is
+#       impossible or unsafe, keeping it where it is and moving the logic across
+#       instead is neither, and this pass only moves registers
 #   (c) the oracle is the one that is wrong - its netlist is correct and cannot
 #       be written back as hierarchical RTL at all
+#
+# Three of each of (a) and (b), and one (c). Together with the blackbox in
+# Part 3 that is every refusal in opt_retime_hier_refusal.ys.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -637,11 +653,17 @@ log -pop
 # has the clock.
 #
 # So the oracle is right that the retiming exists and wrong about how to have
-# it. The RTL that expresses this move keeps the register in top and brings the
-# adder out of noclk, which needs no clock in noclk and is a move this pass does
-# not make because it moves registers rather than logic. Refusing is correct;
-# the number the oracle puts on it is the size of what a logic-moving pass, or
-# an LLM told to prefer that form, would be worth here.
+# it. Refusing is correct; the number the oracle puts on it is the size of what
+# a logic-moving pass, or an LLM told to prefer that form, would be worth here.
+#
+# The RTL that expresses it is smaller than "bring the adder out of noclk",
+# which is what the flat netlist looks like it is asking for. The register pair
+# can sit in front of the instance instead of behind it and noclk does not
+# change at all: reg(a) + reg(b) is reg(a + b) for any function of a and b that
+# the module happens to compute. That form is written out and proved at the end
+# of this section, because a refusal whose stated reason is "the register
+# cannot be clocked there" is worth pairing with the move where the register
+# never goes there.
 log -header "Differ: the destination has no clock"
 log -push
 design -reset
@@ -694,6 +716,214 @@ miter -equiv -flatten -make_assert gold gate miter
 hierarchy -top miter
 proc; opt
 sat -seq 8 -prove-asserts -verify
+design -reset
+
+# The hierarchical form of the same retiming. noclk is the module it was, byte
+# for byte, and the two registers the oracle's move produced are in top in front
+# of the instance rather than inside it. Nothing is clocked anywhere new and no
+# logic changed modules, so the destination never needed the clock the refusal
+# is about.
+read_verilog -icells <<EOF
+module noclk (a, b, y);
+  input [7:0] a, b;
+  output [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    n_add (.A(a), .B(b), .Y(y));
+endmodule
+module top (clk, a, b, out);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] out;
+  (* init = 8'h00 *) wire [7:0] qa;
+  (* init = 8'h00 *) wire [7:0] qb;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(qa));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(qb));
+  noclk u (.a(qa), .b(qb), .y(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+select -assert-count 0 noclk/t:$dff
+select -assert-count 2 top/t:$dff
+select -assert-count 1 noclk/c:n_add %x:+[Y] noclk/w:y %i
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# (b) The case the clock check was written for, and the one where relocating
+# really is impossible: \gated is made by an $icg inside gater, so there is no
+# net in top carrying it and nothing for the resolver to find however far it
+# looks. Punching a clock port would be building a clock tree and generating the
+# gate again in top would be duplicating it; neither is retiming.
+#
+# The oracle gets the clock for free by deleting the boundary that was keeping
+# it out, and the register it produces sits in the one remaining module reading
+# \u.gated. That is the disagreement stated exactly: the move needs the gated
+# clock wherever the register is, and only one of the two paths has to care.
+#
+# The form that does exist brings the xor into gater and behind fg, which never
+# moves and keeps the clock it always had - the same "move logic, not state"
+# answer as the section above, on the refusal where it is the only answer.
+#
+# Checked structurally rather than by SAT, following opt_retime_clockgate.ys:29
+# - $icg has no SAT model, so a miter holding one cannot be solved. The section
+# above is the same claim about the same refusal with the gating taken out, and
+# it is proved there.
+log -header "Differ: the clock is gated inside the child"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module gater (clk, en, x, y);
+  input clk, en;
+  input [7:0] x;
+  output [7:0] y;
+  wire gated;
+  $icg g0 (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(gated));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(gated), .D(x), .Q(y));
+endmodule
+module top (clk, en, a, out);
+  input clk, en;
+  input [7:0] a;
+  output [7:0] out;
+  wire [7:0] pre;
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    t_xor (.A(a), .B(8'h0f), .Y(pre));
+  gater u (.clk(clk), .en(en), .x(pre), .y(out));
+endmodule
+EOF
+hierarchy -top top
+setattr -set init 8'h00 gater/w:y
+select -clear
+check -assert
+design -save orig
+
+scratchpad -unset opt.did_something
+opt_retime -flop fg -cut t_xor -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fg takes its clock from \gated, which is not a net of top, so the register cannot be clocked there."
+scratchpad -assert-unset opt.did_something
+
+design -load orig
+flatten -noscopeinfo top/c:u
+select -clear
+opt_retime -flop u.fg -cut t_xor -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 1 top/t:$dff
+select -assert-count 1 top/t:$icg
+# the register reads top's input and the xor is behind it, and it is clocked by
+# the net the $icg makes, which after the flatten is a net of the only module
+select -assert-count 1 top/c:u.fg %x:+[D] top/w:a %i
+select -assert-count 1 top/c:u.fg %x:+[CLK] top/w:u.gated %i
+select -assert-count 1 top/c:u.g0 %x:+[GCLK] top/w:u.gated %i
+design -reset
+
+# The form that keeps the hierarchy: fg still reads gater's input port under
+# \gated, the xor that used to be top's is behind it, and top holds the instance
+# and nothing else.
+read_verilog -icells <<EOF
+module gater (clk, en, x, y);
+  input clk, en;
+  input [7:0] x;
+  output [7:0] y;
+  wire gated;
+  (* init = 8'h0f *) wire [7:0] xq;
+  $icg g0 (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(gated));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(gated), .D(x), .Q(xq));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    g_xor (.A(xq), .B(8'h0f), .Y(y));
+endmodule
+module top (clk, en, a, out);
+  input clk, en;
+  input [7:0] a;
+  output [7:0] out;
+  gater u (.clk(clk), .en(en), .x(a), .y(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+select -assert-count 1 gater/c:fg %x:+[CLK] gater/w:gated %i
+select -assert-count 1 gater/c:fg %x:+[D] gater/w:x %i
+select -assert-count 1 gater/c:g_xor %x:+[A] gater/w:xq %i
+select -assert-count 0 top/t:$xor
+select -assert-count 0 top/t:$dff
+select -assert-count 1 top/c:u %x:+[x] top/w:a %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# (b) The last refusal, and the one where the oracle's success is a technicality
+# worth reading carefully.
+#
+# FfData::emit writes the register's init onto its Q net, and FfInitVals
+# log_errors on a sigmap group holding two different init values, so a landing
+# net that already carries one is a crash a command later rather than a wrong
+# answer now. The pass therefore checks before it touches anything, and refuses.
+#
+# The oracle moves. It can, because the init the refusal is protecting sits on a
+# net the adder drives combinationally, where an initial value is inert - proc
+# says so out loud on the gold side, and the warning is asserted below. So the
+# flat pass overwrites a value that never meant anything and the result is
+# equivalent to the original.
+#
+# The refusal is still load-bearing: without it the crash is real. But it is a
+# check about a net that has an attribute, not about whether the move exists,
+# and on this design the move does - so it wants the marker that says so rather
+# than no marker at all.
+log -header "Differ: an inert init on the landing net"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+setattr -set init 8'h55 hier_src/w:y
+select -clear
+check -assert
+design -save orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+scratchpad -unset opt.did_something
+opt_retime -flop f1 -cut add_s -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Net \y in hier_src starts at 8'01010101 and flop f1 would land on it starting at 8'00000000, and a net cannot hold two initial values."
+scratchpad -assert-unset opt.did_something
+select -assert-count 1 hier_src/w:y a:init=8'h55 %i
+select -assert-count 0 hier_src/t:$dff
+
+design -load orig
+flatten -noscopeinfo top/c:u_src
+select -clear
+opt_retime -flop f1 -cut u_src.add_s -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+# the 8'h55 is gone, replaced by the folded init of the register that landed
+select -assert-count 1 top/w:u_src.y a:init=8'h00 %i
+select -assert-count 2 top/t:$dff
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc
+# The gold side says out loud that the 8'h55 never meant anything: proc_init
+# drops an init on a wire no register drives. That is the argument of this
+# section, so it is asserted rather than tolerated - if the attribute ever does
+# become load-bearing here, this line is what notices.
+logger -expect warning "ignoring initial value on non-register: .gold\.u_src\.y" 1
+opt
+sat -seq 8 -prove-asserts -verify
+logger -check-expected
 design -reset
 log -pop
 
