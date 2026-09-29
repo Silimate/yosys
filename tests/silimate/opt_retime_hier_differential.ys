@@ -14,6 +14,28 @@
 # the fact; gate is the flat netlist the oracle produced. Same ports, so the
 # miter is the ordinary one.
 #
+# The miter on its own would not be enough, and it is worth being precise about
+# why. Any two correct retimings of one design are equivalent to each other -
+# that is what makes retiming retiming - so a proof that the two results agree
+# says both paths made *a* correct move, never that they made the *same* one.
+# Deleting the oracle's opt_retime call entirely still passes the miter in the
+# first section, which was checked rather than argued.
+#
+# So each section carries three claims and needs all three. The flop count and
+# the cell census say the two results are the same size. Two selections say the
+# register is in the same place: which cell drives its D and which reads its Q,
+# named by cell rather than by net, because flattening gives the combinational
+# cells the same names on both paths and only the flop's own name differs. And
+# the miter says the place they agree on is the right one. Dropping the oracle's
+# move, or pointing it at a different cut, fails the position assertions; a
+# wrong netlist fails the miter.
+#
+# Hop counts in those selections are not uniform, and the reason is worth
+# knowing: flatten leaves an instance-port net as an alias of the parent net
+# rather than merging the two, so a register whose D or Q crossed a boundary
+# sits one hop further back than one that did not. The depths are commented
+# where they differ.
+#
 # "The same request" needs one qualification. A request is a flop and a cut
 # cell, and flattening renames cells: inv_d inside hier_dst becomes u_dst.inv_d
 # in top. So the two paths spell the same cut differently and there is no way
@@ -70,6 +92,9 @@ select -assert-count 1 t:$dff
 flatten
 hierarchy -top top
 select -assert-count 1 t:$dff
+select -assert-count 4 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u_dst.inv_d %i
+select -assert-count 0 t:$dff %ci2 c:u_src.add_s %i
 design -save native
 
 design -load orig
@@ -85,6 +110,9 @@ check -assert
 flatten
 hierarchy -top top
 select -assert-count 1 t:$dff
+select -assert-count 4 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u_dst.inv_d %i
+select -assert-count 0 t:$dff %ci2 c:u_src.add_s %i
 rename top gate
 design -import native -as gold
 miter -equiv -flatten -make_assert gold gate miter
@@ -117,6 +145,11 @@ select -assert-count 2 hier_src/t:$dff
 flatten
 hierarchy -top top
 select -assert-count 2 t:$dff
+select -assert-count 5 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:u_src.add_s %i
+# one hop further than the others: the register's D is an instance-port net,
+# and flatten leaves those as an alias of the parent net rather than merging
+select -assert-count 1 t:$dff %ci3 c:xor_t %i
 design -save native
 
 design -load orig
@@ -128,6 +161,11 @@ check -assert
 flatten
 hierarchy -top top
 select -assert-count 2 t:$dff
+select -assert-count 5 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:u_src.add_s %i
+# one hop further than the others: the register's D is an instance-port net,
+# and flatten leaves those as an alias of the parent net rather than merging
+select -assert-count 1 t:$dff %ci3 c:xor_t %i
 rename top gate
 design -import native -as gold
 miter -equiv -flatten -make_assert gold gate miter
@@ -191,6 +229,9 @@ select -assert-count 1 top/t:$dff
 flatten
 hierarchy -top top
 select -assert-count 2 t:$dff
+select -assert-count 7 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:p1 %i
+select -assert-count 0 t:$dff %ci2 c:p1 %i
 design -save native
 
 design -load orig
@@ -202,6 +243,9 @@ check -assert
 flatten
 hierarchy -top top
 select -assert-count 2 t:$dff
+select -assert-count 7 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:p1 %i
+select -assert-count 0 t:$dff %ci2 c:p1 %i
 rename top gate
 design -import native -as gold
 miter -equiv -flatten -make_assert gold gate miter
@@ -224,6 +268,9 @@ select -assert-count 1 top/t:$dff
 flatten
 hierarchy -top top
 select -assert-count 2 t:$dff
+select -assert-count 7 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:t2 %i
+select -assert-count 0 t:$dff %co2 c:t2 %i
 design -save native
 
 design -load orig
@@ -235,6 +282,9 @@ check -assert
 flatten
 hierarchy -top top
 select -assert-count 2 t:$dff
+select -assert-count 7 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:t2 %i
+select -assert-count 0 t:$dff %co2 c:t2 %i
 rename top gate
 design -import native -as gold
 miter -equiv -flatten -make_assert gold gate miter
@@ -292,6 +342,9 @@ select -assert-count 1 t:$dff
 flatten
 hierarchy -top top
 select -assert-count 1 t:$dff
+select -assert-count 3 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u_b.b_not %i
+select -assert-count 0 t:$dff %co2 c:u_b.b_not %i
 design -save native
 
 design -load orig
@@ -303,6 +356,9 @@ check -assert
 flatten
 hierarchy -top top
 select -assert-count 1 t:$dff
+select -assert-count 3 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u_b.b_not %i
+select -assert-count 0 t:$dff %co2 c:u_b.b_not %i
 rename top gate
 design -import native -as gold
 miter -equiv -flatten -make_assert gold gate miter
@@ -351,6 +407,9 @@ select -assert-count 1 sel_kid/c:f1 %x:+[D] sel_kid/w:s %i
 flatten
 hierarchy -top top
 select -assert-count 1 t:$dff
+select -assert-count 3 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:u.m0 %i
+select -assert-count 0 t:$dff %ci2 c:u.m0 %i
 design -save native
 
 design -load orig
@@ -362,6 +421,9 @@ check -assert
 flatten
 hierarchy -top top
 select -assert-count 1 t:$dff
+select -assert-count 3 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:u.m0 %i
+select -assert-count 0 t:$dff %ci2 c:u.m0 %i
 rename top gate
 design -import native -as gold
 miter -equiv -flatten -make_assert gold gate miter
@@ -412,6 +474,9 @@ select -assert-count 1 kid/w:x_reg
 flatten
 hierarchy -top top
 select -assert-count 2 t:$dff
+select -assert-count 4 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u.k_not %i
+select -assert-count 0 t:$dff %co2 c:u.k_not %i
 design -save native
 
 design -load orig
@@ -423,6 +488,9 @@ check -assert
 flatten
 hierarchy -top top
 select -assert-count 2 t:$dff
+select -assert-count 4 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u.k_not %i
+select -assert-count 0 t:$dff %co2 c:u.k_not %i
 rename top gate
 design -import native -as gold
 miter -equiv -flatten -make_assert gold gate miter
