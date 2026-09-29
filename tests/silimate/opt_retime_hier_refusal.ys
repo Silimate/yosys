@@ -69,11 +69,12 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
-# The net the register sits on shifts by a cycle when the register crosses, so
-# a second reader of it would start seeing a different value. There is a
-# version of this move that punches a second port and hands that reader the
-# value it had; there is no version that quietly gives it the new one.
-log -header "Refused: something else reads the net the register would vacate"
+# A cell reading the net the register vacates gets a port punched for it, and
+# keeps the value it had. A module output does not: it is the interface, and
+# handing it the old value would mean the latency through top is unchanged
+# only if something outside top compensates. Nothing here knows whether
+# anything does, so the answer is no rather than a guess.
+log -header "Refused: the vacated net drives an output of the module too"
 log -push
 design -reset
 read_verilog -icells <<EOF
@@ -87,24 +88,50 @@ module top (clk, a, out1, out2);
   input clk;
   input [7:0] a;
   output [7:0] out1, out2;
-  wire [7:0] midq;
-  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(midq));
-  kid u (.clk(clk), .x(midq), .z(out1));
-  $buf #(.WIDTH(8)) tap (.A(midq), .Y(out2));
+  kid u (.clk(clk), .x(a), .z(out2));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(out2), .Q(out1));
 endmodule
 EOF
 hierarchy -top top
 check -assert
-opt_retime -flop f1 -cut u -forward
+opt_retime -flop f1 -cut u -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Net \midq is read by something other than flop f1's own path, so moving the register across the u boundary would hand those readers a value one cycle out (unsupported)."
+scratchpad -assert opt_retime.refusal "Net \out2 drives an output of top as well as flop f1, so moving the register across the u boundary would change what that output is worth on every cycle (unsupported)."
+scratchpad -assert-unset opt.did_something
+scratchpad -assert-unset opt_retime.moved_from
+scratchpad -assert-unset opt_retime.moved_to
+select -assert-count 1 t:$dff
+select -assert-count 1 top/c:f1 %x:+[D] top/w:out2 %i
+select -assert-count 1 top/c:u %x:+[z] top/w:out2 %i
+select -assert-count 1 kid/c:k_not %x:+[Y] kid/w:z %i
+select -assert-count 0 kid/t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# FfData::emit writes the register's init onto its Q net, and the next time
+# FfInitVals is built over a module whose sigmap group holds two different
+# init values it calls log_error. So a landing net that already carries one is
+# a hard crash a command later rather than a wrong answer here, and it has to
+# be caught before anything is touched.
+log -header "Refused: the landing net already has an init of its own"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+setattr -set init 8'h55 hier_src/w:y
+select -clear
+check -assert
+opt_retime -flop f1 -cut u_src -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Net \y in hier_src starts at 8'01010101 and flop f1 would land on it starting at 8'00000000, and a net cannot hold two initial values."
 scratchpad -assert-unset opt.did_something
 select -assert-count 1 t:$dff
-select -assert-count 1 top/c:f1 %x:+[Q] top/w:midq %i
-select -assert-count 1 top/c:u %x:+[x] top/w:midq %i
-select -assert-count 1 top/c:tap %x:+[A] top/w:midq %i
-select -assert-count 1 kid/c:k_not %x:+[A] kid/w:x %i
-select -assert-count 0 kid/t:$dff
+select -assert-count 1 top/c:f1 %x:+[D] top/w:mid %i
+select -assert-count 1 top/w:midq a:init=8'h00 %i
+select -assert-count 1 hier_src/w:y a:init=8'h55 %i
+select -assert-count 1 hier_src/c:add_s %x:+[Y] hier_src/w:y %i
+select -assert-count 0 hier_src/t:$dff
 design -reset
 log -pop
 
@@ -252,6 +279,12 @@ log -pop
 # is missing: the register would have to cross into hier_src, move across the
 # adder, and cross back out, and the chain walk that finds a path is still one
 # module wide. Refused where the walk gives out, and the message says where.
+#
+# This is the marker that had to change. Before crossings existed the walk
+# reported no unique cell Y and called the request invalid, which tells a
+# driver the two cells do not name a move - they do. It is a gap in the pass,
+# so it is "unsupported", and a driver sorting by marker now sorts it with
+# the other gaps instead of with the malformed requests.
 log -header "Refused: the path leaves the module and comes back"
 log -push
 design -reset
@@ -260,7 +293,7 @@ hierarchy -top top
 check -assert
 opt_retime -flop f1 -cut xor_t -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "The before-path of flop f1 is not a unique cell Y at \mid (invalid request)."
+scratchpad -assert opt_retime.refusal "The before-path of flop f1 leaves top at port y of instance u_src, and opt_retime follows a chain within one module (unsupported)."
 scratchpad -assert-unset opt.did_something
 select -assert-count 1 t:$dff
 select -assert-count 1 top/c:f1 %x:+[D] top/w:mid %i

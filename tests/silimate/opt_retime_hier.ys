@@ -47,6 +47,11 @@ opt_retime -flop f1 -cut u_src -backward
 scratchpad -assert opt_retime.moved true
 scratchpad -assert-unset opt_retime.refusal
 scratchpad -assert opt.did_something true
+# Both ends, not just the landing. The same retiming can be written in RTL by
+# relocating the register or by keeping it and moving the logic the other way,
+# and only the pair says which boundary moved.
+scratchpad -assert opt_retime.moved_from top
+scratchpad -assert opt_retime.moved_to hier_src
 check -assert
 
 # Still one register, and it is a cell of hier_src now.
@@ -296,6 +301,177 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
+# A crossing never resizes the register - it is the same register, one module
+# over - but the move after it can, and the sharpest case is the one where it
+# is meant to. Both of the mux's data inputs are constant, so there is no data
+# port for the flop to land on, and the landing is the select: the register
+# stops holding eight bits of mux output and holds the one bit that picks
+# between them.
+#
+# Worth a section because the crossing and the resize disagree about width by
+# design, and the crossing runs first: it moves eight bits through an eight-bit
+# port, and then the move it hands over to narrows them to one.
+log -header "Across a boundary and then down to one bit on a mux select"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module sel_kid (clk, s, y);
+  input clk, s;
+  output [7:0] y;
+  $mux #(.WIDTH(8)) m0 (.A(8'h00), .B(8'hff), .S(s), .Y(y));
+endmodule
+module top (clk, sin, out);
+  input clk, sin;
+  output [7:0] out;
+  wire [7:0] mid;
+  (* init = 8'hff *) wire [7:0] midq;
+  sel_kid u (.clk(clk), .s(sin), .y(mid));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(mid), .Q(midq));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) o1 (.A(midq), .Y(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+design -save orig
+opt_retime -flop f1 -cut m0 -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from top
+scratchpad -assert opt_retime.moved_to sel_kid
+check -assert
+
+select -assert-count 1 t:$dff
+select -assert-count 1 sel_kid/c:f1 %x:+[D] sel_kid/w:s %i
+select -assert-count 1 sel_kid/c:m0 %x:+[Y] sel_kid/w:y %i
+# 8'hff was what the register held, and 1 is the select that picks it, so the
+# resize carried the init rather than dropping it
+select -assert-count 1 sel_kid/w:f1_retimed a:init=1'b1 %i
+select -assert-count 1 sel_kid/c:f1 %x:+[Q] sel_kid/w:f1_retimed %i
+select -assert-count 0 top/w:midq a:init %i
+
+rename top gate
+flatten gate
+design -import orig -as gold
+flatten gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A second reader of the net the register vacates does not stop the crossing.
+# The net shifts by a cycle, and the reader keeps the value it had through a
+# port punched for it.
+#
+# One rule covers all four shapes. The net that still carries the old value is
+# the unregistered side going backward and the registered side going forward,
+# and it is a net of the child when the register went in and a net of the
+# parent when it came out. So the punched port is an output of the child in
+# the first case and an input in the second, and the stranded readers are on
+# the other end of it either way.
+#
+# Both sections below prove with -set-init-zero: the registers on the two
+# sides start undefined, and two undefined registers are independent free
+# variables that need not agree on cycle 0.
+log -header "Port punching: a reader the crossing would have stranded"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module kid (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) k_not (.A(x), .Y(z));
+endmodule
+module top (clk, a, out1, out2);
+  input clk;
+  input [7:0] a;
+  output [7:0] out1, out2;
+  wire [7:0] midq;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(midq));
+  kid u (.clk(clk), .x(midq), .z(out1));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) tap (.A(midq), .Y(out2));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+design -save orig
+opt_retime -flop f1 -cut u -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_to kid
+check -assert
+
+select -assert-count 1 t:$dff
+# the register is inside kid, and the port it came in through is unregistered
+select -assert-count 1 kid/c:f1 %x:+[D] kid/w:x %i
+select -assert-count 1 kid/c:f1 %x:+[Q] kid/w:x_q %i
+select -assert-count 1 top/c:u %x:+[x] top/w:midq %i
+# the punched output carries what the register holds, and the tap reads it
+# instead of the net it used to, so it sees the value it always saw
+select -assert-count 1 kid/w:x_reg
+select -assert-count 1 top/c:tap %x:+[A] top/w:u_x_reg %i
+select -assert-count 1 top/c:u %x:+[x_reg] top/w:u_x_reg %i
+
+rename top gate
+flatten gate
+design -import orig -as gold
+flatten gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+
+# Coming out of a child, the stranded reader is inside it and the port that
+# keeps its value is an input.
+read_verilog -icells <<EOF
+module kid (clk, x, y, w);
+  input clk;
+  input [7:0] x;
+  output [7:0] y, w;
+  wire [7:0] xq;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(x), .Q(xq));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) k_not (.A(xq), .Y(y));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) k_tap (.A(x), .Y(w));
+endmodule
+module top (clk, a, o1, o2);
+  input clk;
+  input [7:0] a;
+  output [7:0] o1, o2;
+  kid u (.clk(clk), .x(a), .y(o1), .w(o2));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+design -save orig
+opt_retime -flop fb -cut u -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from kid
+scratchpad -assert opt_retime.moved_to top
+check -assert
+
+select -assert-count 1 t:$dff
+select -assert-count 1 top/c:fb %x:+[D] top/w:a %i
+select -assert-count 1 top/c:u %x:+[x] top/w:fb_q %i
+# x carries the registered value now, and the tap that wanted the
+# unregistered one reads the punched input, wired to what fed x before
+select -assert-count 1 kid/c:k_not %x:+[A] kid/w:xq %i
+select -assert-count 1 kid/c:k_tap %x:+[A] kid/w:x_unreg %i
+select -assert-count 1 top/c:u %x:+[x_unreg] top/w:a %i
+
+rename top gate
+flatten gate
+design -import orig -as gold
+flatten gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
 # Sibling to sibling: out of one child, across the parent, into the other. The
 # parent is a place the register passes through rather than a place it stops,
 # and the only reason it can pass through is that a crossing is a complete
@@ -374,6 +550,9 @@ setattr -set init 8'h00 sib_a/w:y
 select -clear
 opt_retime -flop fa -cut b_not -forward
 scratchpad -assert opt_retime.moved true
+# two boundaries, and the pair names the ends rather than the route
+scratchpad -assert opt_retime.moved_from sib_a
+scratchpad -assert opt_retime.moved_to sib_b
 check -assert
 # one register, two boundaries crossed, and it is in the far sibling
 select -assert-count 1 t:$dff

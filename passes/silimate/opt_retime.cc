@@ -1499,9 +1499,23 @@ std::vector<ChainStep> collect_backward_chain(Module *module, SigMap &sigmap,
 	extra.clear();
 	SigSpec cur = sigmap(start);
 	Cell *first = unique_y_driver(drivers, sigmap, cur);
-	if (first == nullptr)
+	if (first == nullptr) {
+		// An instance behind the path is a boundary, not a malformed request,
+		// and once boundaries are crossable the difference decides what a
+		// driver does next: retry with a different cut, or stop. Only the
+		// chain walk gives out here - a cut in the instance's module would
+		// have been a crossing.
+		IdString dport;
+		Cell *drv = unique_full_driver(drivers, sigmap, cur, dport);
+		if (drv != nullptr && module->design != nullptr &&
+				module->design->module(drv->type) != nullptr)
+			refuse("The before-path of flop %s leaves %s at port %s of instance "
+					"%s, and opt_retime follows a chain within one module%s.\n",
+					log_id(flop), log_id(module), log_id(dport), log_id(drv),
+					mark::unsupported);
 		refuse("The before-path of flop %s is not a unique cell Y at %s%s.\n",
 				log_id(flop), log_signal(cur), mark::invalid);
+	}
 
 	// parent[cell] is the hop whose named port is driven by cell's Y, and the
 	// seed has none: it drives start. Breadth-first so the reconstructed path
@@ -3270,16 +3284,16 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 				log_id(flop), log_id(inst), log_id(named_inst), mark::invalid);
 
 	// The near-side net shifts by a cycle, so anything still reading it reads
-	// something else afterwards. There is a version of this move that punches a
-	// second port and hands those readers the value they had; there is no
-	// version that quietly gives them the new one.
+	// something else afterwards. Those readers get a port punched for them
+	// below, carrying the value they had; what they must not get is the new
+	// one, silently.
 	//
 	// Which reader is the move's own differs by case, and one case cannot use
 	// has_other_readers at all: a register leaving through its module's output
 	// port has the port itself as the net in question, and a port is exactly
 	// what that helper counts as a reader that stops the move.
+	std::vector<CellPort> stranded;
 	{
-		std::vector<CellPort> others;
 		bool drives_output = false;
 		Cell *mine = flop;
 		IdString mine_port = backward ? ID::D : ID::Q;
@@ -3287,13 +3301,19 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 			mine = inst;
 			mine_port = port;
 		}
-		scan_extra_readers(module, sigmap, near, mine, mine_port, others, drives_output);
+		scan_extra_readers(module, sigmap, near, mine, mine_port, stranded, drives_output);
+		// A module output is not a reader a port can be punched for: it is the
+		// module's own interface, and handing it the value it had means the
+		// latency through it is unchanged only if something outside
+		// compensates. That is a decision for whoever owns the module above
+		// this one, not for the move.
 		bool port_is_the_net = !backward && own_port != nullptr;
-		if (!others.empty() || (drives_output && !port_is_the_net))
-			refuse("Net %s is read by something other than flop %s's own path, "
-					"so moving the register across the %s boundary would hand "
-					"those readers a value one cycle out%s.\n",
-					log_signal(near), log_id(flop), log_id(inst), mark::unsupported);
+		if (drives_output && !port_is_the_net)
+			refuse("Net %s drives an output of %s as well as flop %s, so moving "
+					"the register across the %s boundary would change what that "
+					"output is worth on every cycle%s.\n",
+					log_signal(near), log_id(module), log_id(flop), log_id(inst),
+					mark::unsupported);
 	}
 
 	PortMap map = port_map(h, inst);
@@ -3334,6 +3354,16 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 	moved.name = dest->uniquify(ff.name);
 	resolve_controls(into_child ? map.down : map.up, sigmap, moved, flop, dest);
 
+	// Where the register will land, worked out before it lands, because the
+	// only two shapes that can land on a net that already exists are the two
+	// that can find an init already on it. The other two land on a wire this
+	// function is about to create, which has none.
+	SigSpec landing = into_child
+			? (backward ? SigSpec(port_wire) : SigSpec())
+			: (backward ? SigSpec() : outside);
+	if (!landing.empty())
+		check_landing_init(dest_initvals, landing, moved.val_init, flop, dest);
+
 	// Everything above is a question. Nothing below is, which is what keeps a
 	// refused crossing from leaving two modules and an instance site half
 	// rewritten - there is no undoing a register that has been rebuilt.
@@ -3372,7 +3402,6 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 
 	moved.sig_d = far_d;
 	moved.sig_q = far_q;
-	check_landing_init(dest_initvals, far_q, moved.val_init, flop, dest);
 
 	// The register goes before the new one is built, so its init comes off the
 	// old net rather than being left behind on a net that is combinational now.
@@ -3387,6 +3416,57 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 	if (!moved.emit())
 		log_error("Flop %s did not survive being rebuilt in %s.\n",
 				log_id(flop_name), log_id(dest));
+
+	// The readers the crossing would have stranded, handed the value they had
+	// through a port punched for them.
+	//
+	// One rule covers all four shapes. The net that still carries the old
+	// value is far_d going backward and far_q going forward - the unregistered
+	// side and the registered side respectively - and it is a net of the child
+	// when the register went in and a net of the parent when it came out. So
+	// the punched port is an output of the child in the first case and an
+	// input in the second, and the readers are on the other end of it either
+	// way.
+	if (!stranded.empty()) {
+		SigSpec kept = backward ? far_d : far_q;
+		const char *what = backward ? "unreg" : "reg";
+		Wire *punched = child->addWire(
+				child->uniquify(stringf("\\%s_%s",
+						RTLIL::unescape_id(port).c_str(), what)),
+				ff.width);
+		SigSpec seen;
+		if (into_child) {
+			punched->port_output = true;
+			child->connect(SigSpec(punched), kept);
+			Wire *outer = module->addWire(
+					module->uniquify(stringf("\\%s_%s_%s",
+							RTLIL::unescape_id(inst->name).c_str(),
+							RTLIL::unescape_id(port).c_str(), what)),
+					ff.width);
+			seen = SigSpec(outer);
+		} else {
+			punched->port_input = true;
+			seen = SigSpec(punched);
+		}
+		child->fixup_ports();
+		inst->setPort(punched->name, into_child ? seen : kept);
+
+		dict<SigBit, SigBit> subst;
+		for (int i = 0; i < GetSize(near); i++)
+			subst[near[i]] = seen[i];
+		for (auto &rd : stranded) {
+			SigSpec neu;
+			for (auto bit : rd.cell->getPort(rd.port)) {
+				auto it = subst.find(sigmap(bit));
+				neu.append(it == subst.end() ? bit : it->second);
+			}
+			rd.cell->setPort(rd.port, neu);
+		}
+		log("Punched %s port %s on %s for %d reader(s) of %s that keep the "
+				"value they had.\n", into_child ? "output" : "input",
+				log_id(punched->name), log_id(child), GetSize(stranded),
+				log_signal(near));
+	}
 
 	log("Moved %s %s the boundary at %s and %s %s, where it registers %s.\n",
 			log_id(flop_name), backward ? "backward across" : "forward across",
@@ -3405,13 +3485,14 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 // the crossing on its own, which is the move with no cells in it: the register
 // changes modules and nothing else changes at all.
 void apply_hier_move(Design *design, Module *module, Cell *flop, Module *cut_module,
-		Cell *cut, bool backward)
+		Cell *cut, bool backward, IdString &landed)
 {
 	Hier h(design);
 	Module *cut_child = design->module(cut->type);
 
 	if (cut_child != nullptr) {
 		cross_boundary(h, module, flop, backward, cut);
+		landed = module->name;
 		return;
 	}
 
@@ -3429,6 +3510,7 @@ void apply_hier_move(Design *design, Module *module, Cell *flop, Module *cut_mod
 		apply_backward_move(module, flop, cut);
 	else
 		apply_forward_move(module, flop, cut);
+	landed = module->name;
 }
 
 struct OptRetimePass : public Pass {
@@ -3516,12 +3598,15 @@ struct OptRetimePass : public Pass {
 		log("modules and nothing else changes at all.\n");
 		log("\n");
 		log("A crossing needs the register's clock, enable and resets to exist\n");
-		log("as nets on the far side, needs the net it vacates to have no other\n");
-		log("reader, and needs the destination module to have one instance\n");
-		log("site, since a move edits the body every instance shares. It is\n");
-		log("rehearsed on a copy of the design, so a move that crosses two\n");
-		log("boundaries and is refused at the second leaves nothing behind at\n");
-		log("the first.\n");
+		log("as nets on the far side, and needs the destination module to have\n");
+		log("one instance site, since a move edits the body every instance\n");
+		log("shares. The net the register vacates shifts by a cycle, so any\n");
+		log("other cell reading it gets a port punched for it carrying the\n");
+		log("value it had; a module output on that net is refused instead,\n");
+		log("since changing an interface's latency is not this pass's call.\n");
+		log("A crossing is rehearsed on a copy of the design, so a move that\n");
+		log("crosses two boundaries and is refused at the second leaves\n");
+		log("nothing behind at the first.\n");
 		log("\n");
 		log("The selection is where the two named cells are looked up, and both\n");
 		log("have to be in it. The cut is looked for in the flop's module\n");
@@ -3554,7 +3639,10 @@ struct OptRetimePass : public Pass {
 		log("        which the pass would otherwise have made.\n");
 		log("\n");
 		log("Scratchpad: opt_retime.moved, opt_retime.refusal (unset on\n");
-		log("success), and opt.did_something when a move is made.\n");
+		log("success), opt_retime.moved_from and opt_retime.moved_to naming\n");
+		log("the modules the register left and landed in (unset on refusal,\n");
+		log("and equal for a move that stays in one module), and\n");
+		log("opt.did_something when a move is made.\n");
 		log("\n");
 	}
 
@@ -3669,6 +3757,11 @@ struct OptRetimePass : public Pass {
 					backward ? "backward" : "forward", log_id(cut),
 					log_id(cut_module), all_fanouts ? " all-fanouts" : "");
 
+		// Where the register ended up, which for a cross-module move is not
+		// the module it started in and is the thing a driver most needs to
+		// know. Set below whether or not the move crossed anything.
+		IdString landed = module->name;
+
 		std::string refused;
 		if (all_fanouts && cross)
 			// The sibling registers are found by their shared D net and then
@@ -3699,7 +3792,7 @@ struct OptRetimePass : public Pass {
 				Module *cmod = target->module(cmod_name);
 				return try_move([&] {
 					apply_hier_move(target, fmod, fmod->cell(flop_name), cmod,
-							cmod->cell(cut_name), backward);
+							cmod->cell(cut_name), backward, landed);
 				});
 			};
 			Design *rehearsal = new Design;
@@ -3756,9 +3849,20 @@ struct OptRetimePass : public Pass {
 		// one left by an earlier call cannot be read as belonging to this one.
 		// Trailing newline trimmed, which the log wants and a scratchpad
 		// comparison does not.
+		//
+		// Both ends of the move are named, not just the landing. A driver
+		// mirroring the result back into RTL has a choice the netlist does
+		// not: it can relocate the register, or it can keep the register where
+		// it is and move the logic across the boundary instead. The second is
+		// usually the better patch, and it is only expressible if the driver
+		// knows which boundary moved rather than only where the flop ended up.
 		design->scratchpad_set_bool("opt_retime.moved", refused.empty());
 		if (refused.empty()) {
 			design->scratchpad_unset("opt_retime.refusal");
+			design->scratchpad_set_string("opt_retime.moved_from",
+					RTLIL::unescape_id(module->name));
+			design->scratchpad_set_string("opt_retime.moved_to",
+					RTLIL::unescape_id(landed));
 			// The convention opt and its passes drive their fixpoint loop on.
 			design->scratchpad_set_bool("opt.did_something", true);
 			return;
@@ -3767,6 +3871,10 @@ struct OptRetimePass : public Pass {
 		while (!reason.empty() && reason.back() == '\n')
 			reason.pop_back();
 		design->scratchpad_set_string("opt_retime.refusal", reason);
+		// Unset rather than emptied, so a pair left by an earlier call cannot
+		// be read as belonging to this one.
+		design->scratchpad_unset("opt_retime.moved_from");
+		design->scratchpad_unset("opt_retime.moved_to");
 
 		// Same as the other opt_* passes: an illegal hop is a skip, not a
 		// command error. The reason is the answer and the script keeps going
