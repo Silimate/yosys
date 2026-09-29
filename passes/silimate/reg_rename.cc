@@ -34,6 +34,7 @@ struct DumpLeaf {
 	std::string rel;
 	int width = 0;
 	int offset = 0;
+	int id = -1; // position in its object's list, which a layout refers to it by
 };
 
 // What reg_rename made of one Q bit, stamped on every sequential cell it visits as the
@@ -206,25 +207,31 @@ struct Dim {
 
 static bool parse_bound(const std::string &text, int &out);
 
-// Locate `bit` of an object that the waveform dumped as `leaves`, given the width the
-// netlist says the object has and, when known, its declared ranges.
-static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, DumpLeaf &out,
-		    int &leaf_bit, const std::vector<Dim> &dims = {})
-{
-	if (leaves.empty() || bit < 0 || bit >= width)
-		return false;
+// Where one bit of an object was dumped: which of its signals (-1 for none), and which bit of it
+struct BitSrc {
+	int leaf = -1;
+	int bit = 0;
+};
 
-	// A single leaf covering the object: the bit indexes straight into it
+// Lay out every bit of an object that the waveform dumped as `leaves` into out[base, base + width),
+// given the width the netlist says the object has and, when known, its declared ranges.
+static void lay_out(const std::vector<DumpLeaf> &leaves, int width, const std::vector<Dim> &dims,
+		    std::vector<BitSrc> &out, int base)
+{
+	if (leaves.empty())
+		return;
+
+	// A single leaf covering the object: the bits index straight into it
 	if (leaves.size() == 1 && leaves[0].rel.empty()) {
-		// A converter may dump fewer bits than the object holds; bind those and leave the rest
-		if (leaves[0].width > width || bit >= leaves[0].width)
-			return false;
+		// A converter may dump fewer bits than the object holds; lay out those and leave the rest
+		if (leaves[0].width > width)
+			return;
 		// A narrow leaf at a nonzero index needs the object's own LSB to align against
 		if (leaves[0].width != width && leaves[0].offset != 0)
-			return false;
-		out = leaves[0];
-		leaf_bit = bit;
-		return true;
+			return;
+		for (int bit = 0; bit < leaves[0].width; bit++)
+			out[base + bit] = {leaves[0].id, bit};
+		return;
 	}
 
 	// Several signals all named for the object itself is an ambiguous dump rather than a
@@ -233,14 +240,13 @@ static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, Dum
 	for (auto &leaf : leaves)
 		flat = flat && leaf.rel.empty();
 	if (flat)
-		return false;
+		return;
 
 	// An index says where a member sits in the declared range, whatever order the dump lists it in
 	if (!dims.empty()) {
 		const Dim &dim = dims.front();
 		int lo = std::min(dim.msb, dim.lsb), hi = std::max(dim.msb, dim.lsb), count = hi - lo + 1;
-		int span = width / count, pos = span ? bit / span : -1;
-		std::vector<DumpLeaf> member;
+		std::vector<std::vector<DumpLeaf>> slots(count);
 		bool indexed = width % count == 0;
 		for (auto &leaf : leaves) {
 			std::string head = first_component(leaf.rel);
@@ -250,14 +256,16 @@ static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, Dum
 			if (!indexed)
 				break;
 			// Packed ranges count from their LSB; unpacked ones put the lowest index on top
-			if ((dim.packed ? std::abs(index - dim.lsb) : hi - index) == pos) {
-				DumpLeaf child = leaf;
-				child.rel = leaf.rel.substr(head.size());
-				member.push_back(child);
-			}
+			DumpLeaf child = leaf;
+			child.rel = leaf.rel.substr(head.size());
+			slots[dim.packed ? std::abs(index - dim.lsb) : hi - index].push_back(child);
 		}
-		if (indexed)
-			return resolve(member, span, bit % span, out, leaf_bit, {dims.begin() + 1, dims.end()});
+		if (indexed) {
+			int span = width / count;
+			for (int pos = 0; pos < count; pos++)
+				lay_out(slots[pos], span, {dims.begin() + 1, dims.end()}, out, base + pos * span);
+			return;
+		}
 	}
 
 	auto groups = group_children(leaves);
@@ -270,10 +278,9 @@ static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, Dum
 		int high = width;
 		for (auto &group : groups) {
 			high -= span(group);
-			if (bit >= high)
-				return resolve(group, span(group), bit - high, out, leaf_bit);
+			lay_out(group, span(group), {}, out, base + high);
 		}
-		return false;
+		return;
 	}
 
 	// Union: every member spans the whole object, so read whichever is a plain signal
@@ -283,12 +290,40 @@ static bool resolve(const std::vector<DumpLeaf> &leaves, int width, int bit, Dum
 	if (overlay) {
 		for (auto &group : groups)
 			if (group.size() == 1 && group[0].rel.empty())
-				return resolve(group, width, bit, out, leaf_bit);
-		return resolve(groups.front(), width, bit, out, leaf_bit);
+				return lay_out(group, width, {}, out, base);
+		lay_out(groups.front(), width, {}, out, base);
 	}
-
-	return false;
 }
+
+// The waveform's objects, each laid out once, the first time a flop or port asks for it
+struct DumpLayouts {
+	const dict<std::string, std::vector<DumpLeaf>> &objects;
+	dict<std::string, std::vector<BitSrc>> cache; // object, width and ranges -> its layout
+
+	// Locate bit `bit` of object `key`, `width` bits wide, among the signals dumped for it
+	bool find(const std::string &key, int width, int bit, const std::vector<Dim> &dims, DumpLeaf &leaf,
+		  int &leaf_bit)
+	{
+		auto obj_it = objects.find(key);
+		if (obj_it == objects.end() || bit < 0 || bit >= width)
+			return false;
+		std::string id = stringf("%s %d%s", key.c_str(), width, dims.empty() ? "" : " dims");
+		auto it = cache.find(id);
+		if (it == cache.end()) {
+			std::vector<DumpLeaf> leaves = obj_it->second;
+			for (int i = 0; i < GetSize(leaves); i++)
+				leaves[i].id = i;
+			it = cache.insert(std::make_pair(id, std::vector<BitSrc>(width))).first;
+			lay_out(leaves, width, dims, it->second, 0);
+		}
+		const BitSrc &src = it->second[bit];
+		if (src.leaf < 0)
+			return false;
+		leaf = obj_it->second[src.leaf];
+		leaf_bit = src.bit;
+		return true;
+	}
+};
 
 // First component of a netlist name, i.e. the RTL object before `.` or `[`
 static std::string object_root(const std::string &name)
@@ -513,8 +548,7 @@ struct RegRenameInstance {
 	}
 
 	// Rename each flop's Q wire to the signal the waveform dumped it under.
-	void process_registers(const dict<std::string, std::vector<DumpLeaf>> &objects,
-			       BindStats &stats)
+	void process_registers(DumpLayouts &dump, BindStats &stats)
 	{
 		if (debug)
 			log("Processing registers in scope: %s (module: %s)\n", vcd_scope.c_str(),
@@ -605,13 +639,12 @@ struct RegRenameInstance {
 				int obj_bit = bind[start].bit, obj_width = bind[start].width;
 
 				// Locate obj[obj_bit] among the signals the waveform dumped for it
-				auto obj_it = objects.find(vcd_scope + "." + obj);
+				auto obj_it = dump.objects.find(vcd_scope + "." + obj);
 				DumpLeaf leaf;
 				int leaf_bit = 0;
 				std::string dump_path;
-				bool placed = obj_it != objects.end() &&
-						resolve(obj_it->second, obj_width, obj_bit, leaf, leaf_bit,
-							dims.count(obj) ? dims.at(obj) : std::vector<Dim>());
+				bool placed = dump.find(vcd_scope + "." + obj, obj_width, obj_bit,
+						dims.count(obj) ? dims.at(obj) : std::vector<Dim>(), leaf, leaf_bit);
 
 				// Q is the net of a pin the dump holds at a parent's actual, so bind through that pin
 				auto pin = resolved_pins.find(sigmap(SigBit(old_wire, qbits.offset + start)));
@@ -628,9 +661,8 @@ struct RegRenameInstance {
 				// from wire names takes the generate block of `hw_gen.cnt` for a struct. Q still
 				// drives that net, so bind through the net's own name when the dump has it.
 				if (!placed && old_wire->name.isPublic()) {
-					auto net_it = objects.find(vcd_scope + "." + RTLIL::unescape_id(old_wire->name));
-					placed = net_it != objects.end() &&
-							resolve(net_it->second, GetSize(old_wire), qbits.offset + start, leaf, leaf_bit);
+					placed = dump.find(vcd_scope + "." + RTLIL::unescape_id(old_wire->name), GetSize(old_wire),
+							qbits.offset + start, {}, leaf, leaf_bit);
 					if (placed && debug)
 						log("Placing %s[%d] of cell %s by its Q net as %s, not by its RTL bind %s[%d]\n",
 								log_id(old_wire), qbits.offset + start, log_id(cell->name),
@@ -638,7 +670,7 @@ struct RegRenameInstance {
 				}
 
 				if (!placed) {
-					bool absent = obj_it == objects.end();
+					bool absent = obj_it == dump.objects.end();
 					if (debug)
 						log("%s bit %d of %d-bit object %s, dumped as %d signal(s), for cell %s in scope %s\n",
 								absent ? "No waveform object for" : "Cannot place", obj_bit, obj_width,
@@ -783,7 +815,7 @@ struct RegRenameInstance {
 	}
 
 	// Handle packed inputs.
-	void bind_packed_inputs(const dict<std::string, std::vector<DumpLeaf>> &objects, FstData &fst)
+	void bind_packed_inputs(DumpLayouts &dump, FstData &fst)
 	{
 		// Split input ports whose dump is one packed vector
 		dict<std::string, std::vector<std::tuple<int, int, Wire*>>> groups;
@@ -803,16 +835,13 @@ struct RegRenameInstance {
 			int total = 0;
 			for (auto &m : members)
 				total += GetSize(std::get<2>(m));
-			auto obj_it = objects.find(vcd_scope + "." + kv.first);
-			if (obj_it == objects.end())
-				continue;
 			int high = total;
 			for (auto &m : members) {
 				Wire *wire = std::get<2>(m);
 				high -= GetSize(wire);
 				DumpLeaf leaf;
 				int leaf_bit = 0;
-				if (!resolve(obj_it->second, total, high, leaf, leaf_bit))
+				if (!dump.find(vcd_scope + "." + kv.first, total, high, {}, leaf, leaf_bit))
 					continue;
 				std::string dump_path = leaf.name;
 				if (dump_path.compare(0, vcd_scope.size(), vcd_scope) != 0)
@@ -829,13 +858,12 @@ struct RegRenameInstance {
 		}
 	}
 
-	void process_all(const dict<std::string, std::vector<DumpLeaf>> &objects,
-			 BindStats &stats, FstData &fst)
+	void process_all(DumpLayouts &dump, BindStats &stats, FstData &fst)
 	{
-		bind_packed_inputs(objects, fst);
-		process_registers(objects, stats);
+		bind_packed_inputs(dump, fst);
+		process_registers(dump, stats);
 		for (auto &it : children)
-			it.second->process_all(objects, stats, fst);
+			it.second->process_all(dump, stats, fst);
 	}
 };
 
@@ -1077,7 +1105,8 @@ struct RegRenamePass : public Pass {
 			root.count_uses(uses);
 			root.bind_ports(fst, uses);
 			BindStats stats;
-			root.process_all(objects, stats, fst);
+			DumpLayouts dump{objects, {}};
+			root.process_all(dump, stats, fst);
 			report_unbound(stats, objects, debug);
 			log("Bound %d flop(s); unstamped %d, object absent %d, bit unplaced %d\n",
 				stats.bound, stats.no_stamp, stats.no_object, stats.no_bit);
