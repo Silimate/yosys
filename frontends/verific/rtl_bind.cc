@@ -138,6 +138,17 @@ bool RtlBinder::Shape::bit(long long flat, long long &dump) const
 	return true;
 }
 
+// Declared ranges as `rtl_bind_dims` spells them
+std::string RtlBinder::Shape::spell() const
+{
+	std::string out;
+	for (auto &range : unpacked)
+		out += stringf("%su%d:%d", out.empty() ? "" : ",", range.first, range.second);
+	for (auto &range : packed)
+		out += stringf("%sp%d:%d", out.empty() ? "" : ",", range.first, range.second);
+	return out;
+}
+
 // Q bit `b` of this location -> bit index in the whole variable
 bool RtlBinder::Location::var_bit(long long b, long long &out) const
 {
@@ -228,6 +239,9 @@ std::optional<RtlBinder::Location> RtlBinder::locate(const std::string &var, con
 	}
 	if (!decl_shape(points[depth].node, loc.shape) || loc.shape.width() != points[depth].span)
 		return std::nullopt;
+	Shape obj_shape;
+	if (decl_shape(points[anchor].node, obj_shape))
+		loc.dims = obj_shape.spell();
 	loc.offset = points[depth].offset; // where this span sits in the variable
 	loc.obj_offset = points[anchor].offset;
 	loc.obj_width = points[anchor].span; // dump width of that unpacked element
@@ -369,10 +383,12 @@ void RtlBinder::stamp(Instance *inst, const RTLIL::SigSpec &sig_q, const std::ve
 	// Name decode if it survived; else place each Q bit from the net it drives
 	std::vector<RtlBindBit> binds(q_width);
 	for (int b = 0; b < q_width; b++) {
-		if (reg)
-			binds[b] = reg->bind(b);
-		else if (const Location *net = place_net(sig_q[b].wire))
-			binds[b] = net->bind(sig_q[b].offset);
+		const Location *loc = reg ? &*reg : place_net(sig_q[b].wire);
+		if (loc) {
+			binds[b] = reg ? reg->bind(b) : loc->bind(sig_q[b].offset);
+			if (binds[b].valid && !loc->dims.empty())
+				obj_dims[loc->obj] = loc->dims;
+		}
 		(!binds[b].valid ? missing_bits : reg ? decoded_bits : fallback_bits)++;
 	}
 
@@ -395,8 +411,14 @@ void RtlBinder::finish(RTLIL::Module *module)
 	if (decoded_bits || fallback_bits || missing_bits)
 		log("  RTL bind of module %s: %d register bit(s) placed from their register name, %d from their net, %d unbound.\n",
 				log_id(module->name), decoded_bits, fallback_bits, missing_bits);
+	std::string dims;
+	for (auto &it : obj_dims)
+		dims += (dims.empty() ? "" : " ") + it.first + "=" + it.second;
+	if (!dims.empty())
+		module->set_string_attribute(ID(rtl_bind_dims), dims);
 	decoded_bits = fallback_bits = missing_bits = 0;
 	net_places.clear();
+	obj_dims.clear();
 }
 
 #endif /* YOSYS_ENABLE_VERIFIC */

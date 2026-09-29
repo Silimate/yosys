@@ -1,0 +1,140 @@
+# reg_rename places a register that the waveform dumps one index per signal (`a[0]`, `a[1]`, ...)
+# by that index, reading the declared ranges RTL bind records on the module, in whatever order
+# the dump lists the signals. reg_rename_per_bit.vcd dumps scope tb.dut.
+#
+#   object  declared           dump                           expected
+#   a       [3:0]              a[0] .. a[3]                   bit 0 -> a[0], bit 3 -> a[3]
+#   b       [0:3]              b[0] .. b[3]                   bit 0 -> b[3], bit 3 -> b[0]
+#   c       [5:2]              c[2] .. c[5]                   bit 0 -> c[2], bit 3 -> c[5]
+#   d       [3:0]              d[3] .. d[0], high index first bit 0 -> d[0], bit 3 -> d[3]
+#   m       [1:0] m [0:1]      m[1] [1:0], then m[0] [1:0]    bit 0 -> m[1], bit 3 -> m[0]
+#   n       [3:0]              n[0], n[1] only                bound*2 unplaced*2
+
+read_rtlil <<EOT
+attribute \rtl_bind_dims "a=p3:0 b=p0:3 c=p5:2 d=p3:0 m=u0:1,p1:0 n=p3:0"
+module \top
+  wire input 1 \clk
+  wire input 2 \din
+  wire width 4 input 3 \d4
+  wire \a0_q
+  wire \a3_q
+  wire \b0_q
+  wire \b3_q
+  wire \c0_q
+  wire \c3_q
+  wire \d0_q
+  wire \d3_q
+  wire \m0_q
+  wire \m3_q
+  wire width 4 \n_q
+  attribute \rtl_bind "a/4[0]"
+  cell $dff \a0
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \a0_q
+  end
+  attribute \rtl_bind "a/4[3]"
+  cell $dff \a3
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \a3_q
+  end
+  attribute \rtl_bind "b/4[0]"
+  cell $dff \b0
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \b0_q
+  end
+  attribute \rtl_bind "b/4[3]"
+  cell $dff \b3
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \b3_q
+  end
+  attribute \rtl_bind "c/4[0]"
+  cell $dff \c0
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \c0_q
+  end
+  attribute \rtl_bind "c/4[3]"
+  cell $dff \c3
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \c3_q
+  end
+  attribute \rtl_bind "d/4[0]"
+  cell $dff \d0
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \d0_q
+  end
+  attribute \rtl_bind "d/4[3]"
+  cell $dff \d3
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \d3_q
+  end
+  attribute \rtl_bind "m/4[0]"
+  cell $dff \m0
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \m0_q
+  end
+  attribute \rtl_bind "m/4[3]"
+  cell $dff \m3
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \din
+    connect \Q \m3_q
+  end
+  attribute \rtl_bind "n/4[0:3]"
+  cell $dff \n_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d4
+    connect \Q \n_q
+  end
+end
+EOT
+hierarchy -top top
+
+logger -expect warning "Cannot place 2 bit\(s\) of 4-bit object n, 1 cell\(s\), e\.g\. n_ff, in scope tb\.dut: the waveform has n as 2 signal\(s\) spanning 2 bit\(s\): n\[0\], n\[1\]" 1
+logger -expect log "Bound 12 of 14 Q bit\(s\); unstamped 0, absent 0, unplaced 2, conflict 0, unwired 0" 1
+reg_rename -waveform reg_rename_per_bit.vcd -scope tb.dut
+logger -check-expected
+
+# Each flop's Q now carries the dumped signal its index names
+select -assert-count 1 c:a0 %x:+[Q] w:a?0? %i
+select -assert-count 1 c:a3 %x:+[Q] w:a?3? %i
+select -assert-count 1 c:b0 %x:+[Q] w:b?3? %i
+select -assert-count 1 c:b3 %x:+[Q] w:b?0? %i
+select -assert-count 1 c:c0 %x:+[Q] w:c?2? %i
+select -assert-count 1 c:c3 %x:+[Q] w:c?5? %i
+select -assert-count 1 c:d0 %x:+[Q] w:d?0? %i
+select -assert-count 1 c:d3 %x:+[Q] w:d?3? %i
+select -assert-count 1 c:m0 %x:+[Q] w:m?1? %i
+select -assert-count 1 c:m3 %x:+[Q] w:m?0? %i
+select -assert-count 10 t:$dff a:rtl_bind_status=bound %i
+# The dumped bits of a partial dump bind, and only the rest stay unplaced
+select -assert-count 1 c:n_ff a:rtl_bind_status=bound*2\ unplaced*2 %i

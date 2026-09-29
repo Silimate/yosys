@@ -21,6 +21,8 @@ YOSYS_NAMESPACE_BEGIN
 
 // Stamps the `rtl_bind` attribute (kernel/ff.h) on the cells imported for the register
 // primitives of one netlist, decoding each primitive's name through the netlist's type ranges.
+// The module's `rtl_bind_dims` lists each stamped object's declared ranges, e.g.
+// `data_q=p15:0 mem=u0:3,p7:0`: unpacked (u) then packed (p), outermost first.
 struct RtlBinder
 {
 	void begin(Verific::Netlist *nl);
@@ -43,6 +45,7 @@ private:
 		long long elements = 1, packed_bits = 1;
 		long long width() const { return elements * packed_bits; }
 		bool bit(long long flat, long long &dump) const;
+		std::string spell() const;
 	};
 
 	// A node reached by walking steps: the bits below it, the variable bit of its LSB,
@@ -60,6 +63,7 @@ private:
 	// it is anchored at
 	struct Location {
 		std::string var, obj;
+		std::string dims; // obj's declared ranges, as `rtl_bind_dims` spells them
 		Shape shape;
 		long long offset = 0, obj_offset = 0, obj_width = 0;
 		bool var_bit(long long b, long long &out) const;
@@ -70,6 +74,7 @@ private:
 	bool vhdl = false;
 	std::map<RTLIL::Wire *, std::optional<Location>> net_places;
 	std::map<std::string, std::string> flattened; // `q0_sel` -> `q0.sel`
+	std::map<std::string, std::string> obj_dims; // stamped obj -> its declared ranges
 	int decoded_bits = 0, fallback_bits = 0, missing_bits = 0;
 
 	bool parse_steps(const std::string &path, size_t pos, std::vector<Step> &steps) const;
