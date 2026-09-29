@@ -4,6 +4,7 @@
 #   object  dump                                             expected
 #   bus_q   data, mask, and each again under transmit and    bound*6, as data + mask
 #           receive with the same handles
+#   bus_r   the transmit scope first, then data and mask     bound*6, on bus_r's own members
 #   pair    a and b sharing one handle                       bound*2: two members, not one
 
 read_rtlil <<EOT
@@ -12,6 +13,7 @@ module \top
   wire width 6 input 2 \d6
   wire width 2 input 3 \d2
   wire width 6 \bus_q_q
+  wire width 6 \bus_r_q
   wire width 2 \pair_q
   attribute \rtl_bind "bus_q/6[0:5]"
   cell $dff \bus_q_ff
@@ -20,6 +22,14 @@ module \top
     connect \CLK \clk
     connect \D \d6
     connect \Q \bus_q_q
+  end
+  attribute \rtl_bind "bus_r/6[0:5]"
+  cell $dff \bus_r_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 6
+    connect \CLK \clk
+    connect \D \d6
+    connect \Q \bus_r_q
   end
   attribute \rtl_bind "pair/2[0:1]"
   cell $dff \pair_ff
@@ -33,10 +43,14 @@ end
 EOT
 hierarchy -top top
 
-logger -expect log "Bound 8 of 8 Q bit\(s\); unstamped 0, absent 0, unplaced 0, conflict 0, unwired 0" 1
+logger -expect log "Bound 14 of 14 Q bit\(s\); unstamped 0, absent 0, unplaced 0, conflict 0, unwired 0" 1
 reg_rename -waveform reg_rename_modport_alias.vcd -scope tb.dut
 logger -check-expected
 
 select -assert-count 1 c:bus_q_ff a:rtl_bind_status=bound*6 %i
 select -assert-count 2 w:bus_q.data w:bus_q.mask %u
+# Whichever the dump lists first, the member binds under the object's own name
+select -assert-count 1 c:bus_r_ff a:rtl_bind_status=bound*6 %i
+select -assert-count 2 w:bus_r.data w:bus_r.mask %u
+select -assert-none w:*transmit*
 select -assert-count 1 c:pair_ff a:rtl_bind_status=bound*2 %i

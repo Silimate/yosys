@@ -14,6 +14,14 @@ $var wire 4 " data [3:0] $end
 $var wire 2 # mask [1:0] $end
 $upscope $end
 $upscope $end
+$scope module bus_r $end
+$scope module transmit $end
+$var wire 4 & data [3:0] $end
+$var wire 2 ' mask [1:0] $end
+$upscope $end
+$var wire 4 & data [3:0] $end
+$var wire 2 ' mask [1:0] $end
+$upscope $end
 $scope module pair $end
 $var wire 1 $ a $end
 $var wire 1 $ b $end
@@ -26,3 +34,5 @@ $enddefinitions $end
 b0000 "
 b00 #
 0$
+b0000 &
+b00 '
