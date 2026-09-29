@@ -12,6 +12,7 @@ select -assert-mod-count 1 A:rtl_bind_dims=a?p3:0?b?p0:3?c?p5:2?m?u0:1,p1:0
 # reg_rename places a dump that lists these registers one index per signal by those ranges,
 # whatever order it lists them in: bit 0 is the LSB, which is b[3] for `logic [0:3] b`
 design -reset
+verific -cfg db_synopsys_register_names 1
 verific -sv rtl_bind_dims.sv
 verific -import -all -top top
 splitcells -blast t:$dff
@@ -24,5 +25,5 @@ select -assert-count 1 a:rtl_bind=b/4?0? %x:+[Q] w:b?3? %i
 select -assert-count 1 a:rtl_bind=b/4?3? %x:+[Q] w:b?0? %i
 select -assert-count 1 a:rtl_bind=c/4?0? %x:+[Q] w:c?2? %i
 select -assert-count 1 a:rtl_bind=c/4?3? %x:+[Q] w:c?5? %i
-select -assert-count 1 a:rtl_bind=m?0?/2?1? %x:+[Q] w:m?0? %i
-select -assert-count 1 a:rtl_bind=m?1?/2?0? %x:+[Q] w:m?1? %i
+select -assert-count 1 a:rtl_bind=m/4?3? %x:+[Q] w:m?0? %i
+select -assert-count 1 a:rtl_bind=m/4?0? %x:+[Q] w:m?1? %i
