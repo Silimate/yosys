@@ -28,7 +28,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/cut_region.h"
+#include "passes/silimate/cut_region.h"
 
 // Priority-encoder variants the pass recognises. The CLO/CTO forms count a
 // leading/trailing run of ONES; by De Morgan they are CLZ/CTZ of ~x, so they

@@ -24,7 +24,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/cut_region.h"
+#include "passes/silimate/cut_region.h"
 
 struct OptDisjointAddWorker : CutRegionWorker
 {

@@ -26,7 +26,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/cut_region.h"
+#include "passes/silimate/cut_region.h"
 
 // opt_xor_fold: flatten an in-place XOR fold over dynamically indexed bits of
 // a vector into a balanced masked-XOR tree.

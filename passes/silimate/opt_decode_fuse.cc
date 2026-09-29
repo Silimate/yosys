@@ -23,7 +23,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/rewrite_utils.h"
+#include "passes/silimate/rewrite_utils.h"
 
 // opt_decode_fuse: collapse an encode/decode round trip on a narrow code.
 //

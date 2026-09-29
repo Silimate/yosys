@@ -29,7 +29,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/cut_region.h"
+#include "passes/silimate/cut_region.h"
 
 // opt_modred: re-emit reductions modulo a Mersenne number C = 2^k - 1 as an
 // end-around-carry carry-save tree, and push the reduction back through the

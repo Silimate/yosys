@@ -27,7 +27,7 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#include "passes/opt/cut_region.h"
+#include "passes/silimate/cut_region.h"
 
 // opt_modadd_tree: rebalance a serial narrow-state accumulate cascade into a
 // log-depth tree.
