@@ -37,6 +37,14 @@ static std::pair<SigSpec, SigSpec> emit_fa(Module *module, SigSpec a, SigSpec b,
 		bool repeat = i > 0 && a[i] == a[i - 1] && b[i] == b[i - 1] && c[i] == c[i - 1];
 		int zeros = (a[i] == State::S0) + (b[i] == State::S0) + (c[i] == State::S0);
 
+		// Two signals where nothing carries in need no adder: one stays, the other takes the free carry slot
+		if (zeros == 1 && i > 0 && GetSize(cout) == i && cout[i - 1] == State::S0) {
+			sum.append(a[i] != State::S0 ? a[i] : b[i]);
+			cout.replace(i - 1, c[i] != State::S0 ? c[i] : b[i]);
+			cout.append(State::S0);
+			continue;
+		}
+
 		// A column with real adding to do joins the run
 		if (!repeat && zeros < 2) {
 			bool is_fa = a[i].wire && b[i].wire && c[i].wire;
