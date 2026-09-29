@@ -785,6 +785,7 @@ static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 {
 	dict<std::string, std::vector<DumpLeaf>> objects;
 	pool<std::string> seen; // dumpers may open the same scope twice and repeat declarations
+	pool<std::string> listed; // (object, handle, member name) already filed
 	for (auto &var : fst.getVars()) {
 		int offset = 0;
 		std::string name = split_bit_range(RTLIL::unescape_id(var.name), offset);
@@ -817,9 +818,13 @@ static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 		leaf.offset = offset;
 		if (debug)
 			log("Dumped %s.%s (width %d, lsb %d)\n", scope.c_str(), rel.c_str(), leaf.width, offset);
+		std::string member = rel.substr(rel.find_last_of('.') + 1);
 		for (size_t split = rel.find_first_of(".[");; split = rel.find_first_of(".[", split + 1)) {
 			leaf.rel = split == std::string::npos ? "" : rel.substr(split);
-			objects[scope + "." + rel.substr(0, split)].push_back(leaf);
+			std::string key = scope + "." + rel.substr(0, split);
+			// An alias of a member already filed here is that member again, as a modport lists it
+			if (listed.insert(key + " " + std::to_string(var.id) + " " + member).second)
+				objects[key].push_back(leaf);
 			if (split == std::string::npos)
 				break;
 		}
