@@ -59,6 +59,15 @@ template <typename... Args>
 // Everything else that gives out is this pass's walk, its type lists or its
 // widths, and says so.
 //
+// A crossing adds a third thing that can give out, and a trap with it: the
+// register has to be put somewhere, and where it can be put is a question
+// about the destination module rather than about the retiming. A clock the
+// destination cannot see, or an init already sitting on the landing net, stops
+// the register moving and does not stop the move - the same retiming can be
+// written with the logic crossing the boundary instead, or with the register
+// staying in front of the instance. Those refusals name the form that works
+// and carry a marker for it; see other_form.
+//
 // A reason that ends in another reason - the -all-fanouts sibling, the forward
 // read-whole fallback - inherits the inner marker by quoting it, so those
 // carry no marker of their own, and neither does a final no.
@@ -69,17 +78,22 @@ template <typename... Args>
 namespace mark {
 	// A move exists and needs no cells beyond the register: a gap in this
 	// pass, such as a cell type missing from its lists or a width it does
-	// not resize.
+	// not resize. Across a boundary it also covers a move that exists in a
+	// form this pass does not write - the logic moved across instead of the
+	// register - since that form builds nothing either.
 	constexpr const char *unsupported = " (unsupported)";
 	// A move exists but has to build logic or add a register, such as
-	// pushing an async load through a cell, or forcing cycle 0 where a
-	// stored value has no preimage.
+	// pushing an async load through a cell, forcing cycle 0 where a stored
+	// value has no preimage, or registering every input of an instance
+	// because the register cannot be put inside it.
 	constexpr const char *extra_logic = " (unsupported, needs extra logic)";
 	// The two cells do not name a move at all, so there is nothing to
 	// judge. Not a statement about retiming.
 	constexpr const char *invalid = " (invalid request)";
 	// The move is well-formed and no version of it preserves behaviour.
-	// The only "no" that is final, so it is the one that says nothing.
+	// The only "no" that is final, so it is the one that says nothing. At a
+	// boundary the only one left is a blackbox destination: no body to put a
+	// register in, and none to move logic into either.
 	constexpr const char *none = "";
 }
 
@@ -3064,25 +3078,134 @@ bool resolve_across(const dict<SigBit, SigBit> &map, SigMap &sigmap,
 	return true;
 }
 
+// The internal cell types that compute and remember nothing: the eval-able
+// set, plus the two that drive a bus. Everything else - a register, a memory,
+// a clock gate, or a type that is not Yosys's at all - holds state or might.
+const CellTypes &combinational_types()
+{
+	static CellTypes types;
+	if (types.cell_types.empty()) {
+		types.setup_internals_eval();
+		types.setup_stdcells_eval();
+		types.setup_type(ID($tribuf), {ID::A, ID::EN}, {ID::Y});
+		types.setup_type(ID($_TBUF_), {ID::A, ID::E}, {ID::Y});
+		types.setup_type(ID($scopeinfo), {}, {});
+	}
+	return types;
+}
+
+// Whether mod computes a function of its inputs and nothing else, following
+// instances down.
+//
+// Asked only to decide which move a refused relocation still has. A module
+// that holds no state registers nothing, so registering every input of an
+// instance of it is the same circuit as registering its output - the identity
+// the whole pass rests on, read at an instance rather than at a cell.
+//
+// Conservative in the one direction that matters: a module this cannot see
+// into counts as holding state, so the alternative is named where it is known
+// to exist rather than where it might.
+bool holds_no_state(Design *design, Module *mod, pool<Module *> &seen)
+{
+	if (mod->get_blackbox_attribute() || !mod->processes.empty())
+		return false;
+	// Already on the stack, so whatever state it holds has been counted where
+	// it was entered.
+	if (!seen.insert(mod).second)
+		return true;
+	for (auto cell : mod->cells()) {
+		Module *child = design->module(cell->type);
+		if (child != nullptr) {
+			if (!holds_no_state(design, child, seen))
+				return false;
+			continue;
+		}
+		if (!combinational_types().cell_known(cell->type))
+			return false;
+	}
+	return true;
+}
+
+// Where the register is going, for the two checks that can refuse to put it
+// there. One argument rather than five, because both want the same five.
+struct Crossing {
+	Hier &h;
+	Module *source;
+	Module *dest;
+	Cell *inst;
+	bool into_child;
+	bool backward;
+};
+
+// The move that is still there when the register cannot be relocated: the
+// clause a refusal ends with, and the marker that follows it.
+//
+// Both refusals below are about the register landing somewhere and neither is
+// about the retiming - the identity holds either way, and what fails is the
+// form this pass writes it in. So both can name a form that does not fail, and
+// neither is a final no. That is the whole of the reclassification: the
+// behaviour is unchanged and the refusals stand.
+//
+// Two forms, and which one a boundary has decides the marker:
+//
+//   destination holds no state  register every input of the instance instead
+//                               of its output, in the module the register is
+//                               already in. The child does not change at all,
+//                               and the price is a register per net: extra
+//                               logic.
+//   anything else               leave the register where it is and move the
+//                               logic across instead. Nothing is built and
+//                               nothing is clocked anywhere new, so it is an
+//                               ordinary gap in this pass.
+//
+// Both are proved in tests/silimate/opt_retime_hier_differential.ys, which is
+// where this classification comes from: three refusals that carried no marker
+// turned out to have a hierarchical form, and an unmarked refusal is the end
+// of a driver's search.
+struct OtherForm {
+	std::string form;
+	const char *marker;
+};
+
+OtherForm other_form(const Crossing &x)
+{
+	pool<Module *> seen;
+	if (x.into_child && holds_no_state(x.h.design, x.dest, seen))
+		return {stringf("one register on each %s of instance %s in %s, which "
+				"leaves %s as it is since it holds no state",
+				x.backward ? "input" : "output", log_id(x.inst),
+				log_id(x.source), log_id(x.dest)), mark::extra_logic};
+	return {stringf("the logic moved across the %s boundary with the register "
+			"left in %s", log_id(x.inst), log_id(x.source)), mark::unsupported};
+}
+
 // Every control the register carries, read on the far side of the boundary.
 //
 // Availability is a precondition and not a gap: sig_clk and the rest are
 // SigSpecs in the register's own module, and a clock generated inside a child
-// has no parent net at all. There is no version of the move that preserves
-// behaviour without one, so this is a plain no rather than something a later
-// version of the pass fills in. Punching a clock port would be inventing a
-// clock tree, which is not retiming.
+// has no parent net at all. Punching a clock port would be inventing a clock
+// tree, and generating the gate again on the far side would be duplicating it.
+// Neither is retiming, so the register does not go there.
+//
+// Which is a refusal about the register rather than about the move. The same
+// retiming has a form the destination's clock has nothing to do with, so the
+// reason names it and carries its marker: read as a final no, this refusal
+// would stop a driver at a boundary that still has a move behind it.
 void resolve_controls(const dict<SigBit, SigBit> &map, SigMap &sigmap,
-		FfData &ff, Cell *flop, Module *dest)
+		FfData &ff, Cell *flop, const Crossing &x)
 {
 	auto carry = [&](bool present, SigSpec &sig, const char *what) {
 		if (!present)
 			return;
 		SigSpec moved;
-		if (!resolve_across(map, sigmap, sig, moved))
+		if (!resolve_across(map, sigmap, sig, moved)) {
+			OtherForm other = other_form(x);
 			refuse("Flop %s takes its %s from %s, which is not a net of %s, so "
-					"the register cannot be clocked there%s.\n",
-					log_id(flop), what, log_signal(sig), log_id(dest), mark::none);
+					"the register cannot be clocked there. The same retiming "
+					"is %s%s.\n",
+					log_id(flop), what, log_signal(sig), log_id(x.dest),
+					other.form.c_str(), other.marker);
+		}
 		sig = moved;
 	};
 	carry(ff.has_clk || ff.has_gclk, ff.sig_clk, "clock");
@@ -3156,8 +3279,13 @@ void steal_net(Module *mod, SigMap &sigmap, const SigSpec &from, const SigSpec &
 // two different init values. So a Q net that already has one is a hard crash
 // one command later, not a wrong answer here, and it has to be refused before
 // anything is touched.
+//
+// Load-bearing and still not final: it is a check about a net that carries an
+// attribute, not about whether the retiming exists. Nothing lands on that net
+// in the form the reason names, so the refusal carries its marker rather than
+// reading as a no.
 void check_landing_init(FfInitVals &initvals, const SigSpec &sig_q,
-		const Const &val_init, Cell *flop, Module *dest)
+		const Const &val_init, Cell *flop, const Crossing &x)
 {
 	Const there = initvals(sig_q);
 	if (there.is_fully_undef())
@@ -3165,10 +3293,13 @@ void check_landing_init(FfInitVals &initvals, const SigSpec &sig_q,
 	for (int i = 0; i < GetSize(there) && i < GetSize(val_init); i++) {
 		if (there[i] == State::Sx || there[i] == val_init[i])
 			continue;
+		OtherForm other = other_form(x);
 		refuse("Net %s in %s starts at %s and flop %s would land on it starting "
-				"at %s, and a net cannot hold two initial values%s.\n",
-				log_signal(sig_q), log_id(dest), log_const(there), log_id(flop),
-				log_const(val_init), mark::none);
+				"at %s, and a net cannot hold two initial values. The same "
+				"retiming is %s, and lands no register on %s%s.\n",
+				log_signal(sig_q), log_id(x.dest), log_const(there), log_id(flop),
+				log_const(val_init), other.form.c_str(), log_signal(sig_q),
+				other.marker);
 	}
 }
 
@@ -3352,7 +3483,11 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 	moved.module = dest;
 	moved.initvals = &dest_initvals;
 	moved.name = dest->uniquify(ff.name);
-	resolve_controls(into_child ? map.down : map.up, sigmap, moved, flop, dest);
+	// The boundary as the two checks below describe it when they refuse. They
+	// are the ones that can stop the register landing without stopping the
+	// move, so both of them name what the move is instead.
+	Crossing crossing{h, module, dest, inst, into_child, backward};
+	resolve_controls(into_child ? map.down : map.up, sigmap, moved, flop, crossing);
 
 	// Where the register will land, worked out before it lands, because the
 	// only two shapes that can land on a net that already exists are the two
@@ -3362,7 +3497,7 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 			? (backward ? SigSpec(port_wire) : SigSpec())
 			: (backward ? SigSpec() : outside);
 	if (!landing.empty())
-		check_landing_init(dest_initvals, landing, moved.val_init, flop, dest);
+		check_landing_init(dest_initvals, landing, moved.val_init, flop, crossing);
 
 	// Everything above is a question. Nothing below is, which is what keeps a
 	// refused crossing from leaving two modules and an instance site half

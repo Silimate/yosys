@@ -66,15 +66,18 @@
 # conservative, because for four of the seven refusals it is not conservatism at
 # all - it is hierarchy holding a constraint that flattening threw away.
 #
-# Three of those four carry no marker at all, which by the convention means the
-# answer is no rather than not yet, and all three turn out to have a move: a
-# register can cross into a module with no clock as long as it stops in front of
-# the instance instead of inside it; a gated clock the parent cannot see stops
-# mattering once the logic moves instead of the register; and the init a landing
-# net already carries can be inert. None of that changes what the pass should do
-# - the refusals are right about the form it produces - but a driver sorting
-# candidates by marker reads an unmarked refusal as the end of the search, and
-# for these three it is not.
+# Three of those four used to carry no marker at all, which by the convention
+# means the answer is no rather than not yet, and all three turn out to have a
+# move: a register can cross into a module with no clock as long as it stops in
+# front of the instance instead of inside it; a gated clock the parent cannot
+# see stops mattering once the logic moves instead of the register; and the init
+# a landing net already carries can be inert. That was this file's finding and
+# the pass has since been corrected to it. None of it changed what the pass does
+# - the refusals are right about the form it produces, and every one of them is
+# still a refusal - but a driver sorting candidates by marker reads an unmarked
+# refusal as the end of the search, and for these three it is not. Each now
+# carries a marker and a sentence naming the form that does exist, and the
+# assertions below pin both.
 
 # ---------------------------------------------------------------------------
 # Part 1: requests both paths can express.
@@ -527,7 +530,12 @@ log -pop
 #   (b) the move exists, and the refusal is about the form the pass would
 #       produce rather than about the move: relocating the register is
 #       impossible or unsafe, keeping it where it is and moving the logic across
-#       instead is neither, and this pass only moves registers
+#       instead is neither, and this pass only moves registers. Marked too,
+#       since the reading a driver needs is the same one - there is something
+#       here - and the reason names the form: (unsupported) where the logic
+#       crosses and the register stays, (unsupported, needs extra logic) where
+#       the destination holds no state and the registers sit in front of the
+#       instance, one per net, rather than inside it
 #   (c) the oracle is the one that is wrong - its netlist is correct and cannot
 #       be written back as hierarchical RTL at all
 #
@@ -656,6 +664,9 @@ log -pop
 # it. Refusing is correct; the number the oracle puts on it is the size of what
 # a logic-moving pass, or an LLM told to prefer that form, would be worth here.
 #
+# The refusal now says so: it names this form and carries a marker for it,
+# which is the one thing about this section that did change the pass.
+#
 # The RTL that expresses it is smaller than "bring the adder out of noclk",
 # which is what the flat netlist looks like it is asking for. The register pair
 # can sit in front of the instance instead of behind it and noclk does not
@@ -691,9 +702,12 @@ design -save orig
 
 opt_retime -flop f1 -cut n_add -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop f1 takes its clock from \clk, which is not a net of noclk, so the register cannot be clocked there."
+scratchpad -assert opt_retime.refusal "Flop f1 takes its clock from \clk, which is not a net of noclk, so the register cannot be clocked there. The same retiming is one register on each input of instance u in top, which leaves noclk as it is since it holds no state (unsupported, needs extra logic)."
 scratchpad -assert-unset opt.did_something
-# no marker: this is the answer being no rather than not yet
+# The marker this section is the argument for: not yet rather than no, and the
+# reason names the form written out at the end of the section. The extra
+# register is the one the form costs - two in front of the instance where there
+# was one behind it.
 select -assert-count 0 noclk/t:$dff
 
 design -load orig
@@ -808,7 +822,10 @@ design -save orig
 scratchpad -unset opt.did_something
 opt_retime -flop fg -cut t_xor -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Flop fg takes its clock from \gated, which is not a net of top, so the register cannot be clocked there."
+# gater holds state, so the registers-in-front form the section above uses is
+# not available here and the marker says only that the move exists: the logic
+# crosses the boundary and the register stays where it is, building nothing.
+scratchpad -assert opt_retime.refusal "Flop fg takes its clock from \gated, which is not a net of top, so the register cannot be clocked there. The same retiming is the logic moved across the u boundary with the register left in gater (unsupported)."
 scratchpad -assert-unset opt.did_something
 
 design -load orig
@@ -876,8 +893,9 @@ log -pop
 #
 # The refusal is still load-bearing: without it the crash is real. But it is a
 # check about a net that has an attribute, not about whether the move exists,
-# and on this design the move does - so it wants the marker that says so rather
-# than no marker at all.
+# and on this design the move does - so it carries the marker that says so
+# rather than no marker at all, and the reason names a form that lands nothing
+# on \y to land on.
 log -header "Differ: an inert init on the landing net"
 log -push
 design -reset
@@ -895,7 +913,7 @@ design -load orig
 scratchpad -unset opt.did_something
 opt_retime -flop f1 -cut add_s -backward
 scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Net \y in hier_src starts at 8'01010101 and flop f1 would land on it starting at 8'00000000, and a net cannot hold two initial values."
+scratchpad -assert opt_retime.refusal "Net \y in hier_src starts at 8'01010101 and flop f1 would land on it starting at 8'00000000, and a net cannot hold two initial values. The same retiming is one register on each input of instance u_src in top, which leaves hier_src as it is since it holds no state, and lands no register on \y (unsupported, needs extra logic)."
 scratchpad -assert-unset opt.did_something
 select -assert-count 1 hier_src/w:y a:init=8'h55 %i
 select -assert-count 0 hier_src/t:$dff
