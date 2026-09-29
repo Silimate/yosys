@@ -2876,6 +2876,561 @@ std::string try_move(Apply apply)
 	return "";
 }
 
+// ---------------------------------------------------------------------------
+// Nets that belong to a design rather than to a module.
+//
+// Everything above this line is keyed on a bare SigBit, which is a wire and an
+// offset and says nothing about where that wire lives. Handing one module's
+// bit to another module's index does not raise: it misses, and a miss reads as
+// "nothing drives this". That is the whole of why a boundary comes back as an
+// invalid request today - not a decision about retiming, an index answering a
+// question it was never asked.
+//
+// Pairing the bit with its module is what makes the question askable. The
+// per-module state an answer needs is memoised beside the module and looked up
+// from the same pair, so there is one SigMap and one driver index per module
+// per move rather than one per query.
+
+struct ModuleCtx {
+	Module *module;
+	SigMap sigmap;
+	dict<SigBit, BitSrc> drivers;
+
+	explicit ModuleCtx(Module *mod) : module(mod), sigmap(mod)
+	{
+		drivers = index_output_bits(mod, sigmap);
+	}
+};
+
+struct HierBit {
+	Module *module = nullptr;
+	SigBit bit;
+
+	bool operator==(const HierBit &other) const
+	{
+		return module == other.module && bit == other.bit;
+	}
+	bool operator!=(const HierBit &other) const { return !(*this == other); }
+	explicit operator bool() const { return module != nullptr; }
+	[[nodiscard]] Hasher hash_into(Hasher h) const
+	{
+		h.eat(module);
+		h.eat(bit);
+		return h;
+	}
+};
+
+// The design as a graph of modules: memoised per-module state, and the
+// instance sites that join them.
+//
+// Every site of every module is recorded, not just the first, because the
+// count is the refusal. A move edits a module body, and a body is shared by
+// every instance of it, so making the move at a module with two sites makes it
+// at both - and only one of them was asked for.
+struct Hier {
+	Design *design;
+	std::vector<ModuleCtx *> owned;
+	dict<Module *, ModuleCtx *> ctxs;
+	dict<Module *, std::vector<Cell *>> sites;
+	dict<Cell *, Module *> parent_of;
+
+	explicit Hier(Design *design) : design(design)
+	{
+		for (auto mod : design->modules())
+			for (auto cell : mod->cells()) {
+				Module *child = design->module(cell->type);
+				if (child == nullptr)
+					continue;
+				sites[child].push_back(cell);
+				parent_of[cell] = mod;
+			}
+	}
+
+	Hier(const Hier &) = delete;
+	Hier &operator=(const Hier &) = delete;
+
+	~Hier() { drop_ctxs(); }
+
+	ModuleCtx &ctx(Module *mod)
+	{
+		auto it = ctxs.find(mod);
+		if (it != ctxs.end())
+			return *it->second;
+		ModuleCtx *made = new ModuleCtx(mod);
+		owned.push_back(made);
+		ctxs[mod] = made;
+		return *made;
+	}
+
+	// A SigMap and a driver index are snapshots of a module, and a move
+	// rewrites two of them. Reusing a stale one is the same silent wrong
+	// answer a bare SigBit gives, so a crossing drops them all.
+	void drop_ctxs()
+	{
+		for (auto ctx : owned)
+			delete ctx;
+		owned.clear();
+		ctxs.clear();
+	}
+
+	// The one place mod is instantiated, or the reason there is no such place.
+	Cell *only_site(Module *mod)
+	{
+		auto it = sites.find(mod);
+		if (it == sites.end() || it->second.empty())
+			refuse("Module %s is not instantiated anywhere, so a move out of it "
+					"has no parent to move into%s.\n",
+					log_id(mod), mark::invalid);
+		if (GetSize(it->second) != 1)
+			refuse("Module %s has %d instance sites and opt_retime would be "
+					"moving a register at every one of them, having only the "
+					"one body to edit. Uniquify first%s.\n",
+					log_id(mod), GetSize(it->second), mark::unsupported);
+		return it->second.front();
+	}
+};
+
+// The bit-for-bit correspondence an instance sets up between a child's port
+// wires and the parent nets tied to them.
+//
+// Built from the connections and not from the names, so a port wired to a
+// slice or to a concatenation resolves per bit the way the netlist actually
+// joins them. A port left unconnected simply does not appear, which is what
+// makes a control with no net on the far side a refusal rather than a guess.
+struct PortMap {
+	// Parent bit to child bit, over the instance's inputs only: a net that
+	// reaches into the child is a net the child can be made to read.
+	dict<SigBit, SigBit> down;
+	// Child bit to parent bit, over every port.
+	dict<SigBit, SigBit> up;
+};
+
+PortMap port_map(Hier &h, Cell *inst)
+{
+	Module *parent = h.parent_of.at(inst);
+	Module *child = h.design->module(inst->type);
+	SigMap &psig = h.ctx(parent).sigmap;
+	SigMap &csig = h.ctx(child).sigmap;
+
+	PortMap map;
+	for (auto &conn : inst->connections()) {
+		Wire *pw = child->wire(conn.first);
+		if (pw == nullptr || pw->port_id == 0)
+			continue;
+		SigSpec outside = psig(conn.second);
+		SigSpec inside = csig(SigSpec(pw));
+		for (int i = 0; i < GetSize(outside) && i < GetSize(inside); i++) {
+			if (!inside[i].is_wire())
+				continue;
+			map.up[inside[i]] = outside[i];
+			if (pw->port_input && outside[i].is_wire() && !map.down.count(outside[i]))
+				map.down[outside[i]] = inside[i];
+		}
+	}
+	return map;
+}
+
+// A signal of one module read in the other. Constant bits pass straight
+// through: a control tied to a constant needs no net on either side, which is
+// most of why a reset that is hard-wired off never blocks a crossing.
+bool resolve_across(const dict<SigBit, SigBit> &map, SigMap &sigmap,
+		const SigSpec &sig, SigSpec &out)
+{
+	out = SigSpec();
+	for (auto bit : sigmap(sig)) {
+		if (!bit.is_wire()) {
+			out.append(bit);
+			continue;
+		}
+		auto it = map.find(bit);
+		if (it == map.end())
+			return false;
+		out.append(it->second);
+	}
+	return true;
+}
+
+// Every control the register carries, read on the far side of the boundary.
+//
+// Availability is a precondition and not a gap: sig_clk and the rest are
+// SigSpecs in the register's own module, and a clock generated inside a child
+// has no parent net at all. There is no version of the move that preserves
+// behaviour without one, so this is a plain no rather than something a later
+// version of the pass fills in. Punching a clock port would be inventing a
+// clock tree, which is not retiming.
+void resolve_controls(const dict<SigBit, SigBit> &map, SigMap &sigmap,
+		FfData &ff, Cell *flop, Module *dest)
+{
+	auto carry = [&](bool present, SigSpec &sig, const char *what) {
+		if (!present)
+			return;
+		SigSpec moved;
+		if (!resolve_across(map, sigmap, sig, moved))
+			refuse("Flop %s takes its %s from %s, which is not a net of %s, so "
+					"the register cannot be clocked there%s.\n",
+					log_id(flop), what, log_signal(sig), log_id(dest), mark::none);
+		sig = moved;
+	};
+	carry(ff.has_clk || ff.has_gclk, ff.sig_clk, "clock");
+	carry(ff.has_ce, ff.sig_ce, "clock enable");
+	carry(ff.has_arst, ff.sig_arst, "async reset");
+	carry(ff.has_srst, ff.sig_srst, "sync reset");
+	carry(ff.has_aload, ff.sig_aload, "async load enable");
+	carry(ff.has_aload, ff.sig_ad, "async load data");
+	carry(ff.has_sr, ff.sig_clr, "async clear");
+	carry(ff.has_sr, ff.sig_set, "async set");
+}
+
+// Point everything inside `mod` that touches `from` at `to`, leaving `from`
+// with no user at all. The caller then wires the register onto it.
+//
+// Ports and module connections both, because the net being freed is a port
+// wire and an output port tied straight to an input port is a connection
+// rather than a cell. Substituting only cells would leave that alias behind,
+// reading the net the register is about to take over.
+void steal_net(Module *mod, SigMap &sigmap, const SigSpec &from, const SigSpec &to)
+{
+	dict<SigBit, SigBit> subst;
+	for (int i = 0; i < GetSize(from); i++)
+		subst[sigmap(from[i])] = to[i];
+
+	auto fix = [&](const SigSpec &sig, bool &changed) {
+		SigSpec out;
+		for (auto bit : sig) {
+			auto it = subst.find(sigmap(bit));
+			if (it == subst.end()) {
+				out.append(bit);
+			} else {
+				out.append(it->second);
+				changed = true;
+			}
+		}
+		return out;
+	};
+
+	for (auto cell : mod->cells()) {
+		std::vector<std::pair<IdString, SigSpec>> updates;
+		for (auto &conn : cell->connections()) {
+			bool changed = false;
+			SigSpec neu = fix(conn.second, changed);
+			if (changed)
+				updates.emplace_back(conn.first, neu);
+		}
+		for (auto &up : updates)
+			cell->setPort(up.first, up.second);
+	}
+
+	std::vector<SigSig> conns;
+	for (auto &conn : mod->connections()) {
+		bool changed = false;
+		SigSpec lhs = fix(conn.first, changed);
+		SigSpec rhs = fix(conn.second, changed);
+		// An alias of the net being freed collapses to a self-connection,
+		// which is not a connection.
+		if (lhs == rhs)
+			continue;
+		conns.emplace_back(lhs, rhs);
+	}
+	mod->new_connections(conns);
+}
+
+// The init the destination net already carries, where that is a decision
+// rather than a formality.
+//
+// FfData::emit writes val_init onto the register's Q net, and FfInitVals
+// log_errors the next time it is built over a module whose sigmap group holds
+// two different init values. So a Q net that already has one is a hard crash
+// one command later, not a wrong answer here, and it has to be refused before
+// anything is touched.
+void check_landing_init(FfInitVals &initvals, const SigSpec &sig_q,
+		const Const &val_init, Cell *flop, Module *dest)
+{
+	Const there = initvals(sig_q);
+	if (there.is_fully_undef())
+		return;
+	for (int i = 0; i < GetSize(there) && i < GetSize(val_init); i++) {
+		if (there[i] == State::Sx || there[i] == val_init[i])
+			continue;
+		refuse("Net %s in %s starts at %s and flop %s would land on it starting "
+				"at %s, and a net cannot hold two initial values%s.\n",
+				log_signal(sig_q), log_id(dest), log_const(there), log_id(flop),
+				log_const(val_init), mark::none);
+	}
+}
+
+// A register moved across one instance boundary, with the logic on both sides
+// left exactly as it was.
+//
+// This is the whole of a cross-module move that crosses no cells. The register
+// stops being a cell of one module and becomes a cell of the other; the net it
+// used to register becomes a port net registered on the far side. Nothing is
+// folded and nothing is built, so every net carries the value it carried, one
+// boundary over.
+//
+// Four shapes, the two directions of data flow times the two directions of
+// hierarchy:
+//
+//   backward into a child    the flop reads an instance output; the register
+//                            goes inside and registers what drove that port
+//   backward out of a child  the flop reads its module's input port; the
+//                            register goes out and registers what feeds it
+//   forward into a child     the flop drives an instance input; the register
+//                            goes inside and registers the port wire
+//   forward out of a child   the flop drives its module's output port; the
+//                            register goes out and registers the parent net
+//
+// All four ask the same three questions, and the answers are what the refusals
+// are made of: the net crossing the boundary has to be the flop's D or Q in
+// full, nothing on the near side may still be reading the value that is about
+// to shift by a cycle, and the register's controls have to exist as nets on
+// the far side.
+//
+// module and flop come back pointing at where the register landed, so a move
+// that crosses two boundaries is this twice.
+void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
+		Cell *named_inst)
+{
+	ModuleCtx &ctx = h.ctx(module);
+	SigMap &sigmap = ctx.sigmap;
+	FfInitVals initvals(&sigmap, module);
+
+	if (!flop->is_builtin_ff())
+		refuse("Cell %s is not a built-in flip-flop%s.\n", log_id(flop), mark::invalid);
+	FfData ff(&initvals, flop);
+	if (!ff.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
+		refuse("Cell %s is not a clocked flop with D and Q%s.\n",
+				log_id(flop), mark::invalid);
+	refuse_if_shared(flop, "a move across a module boundary");
+
+	// The net the move is about to shift by a cycle, on the near side.
+	SigSpec near = sigmap(backward ? ff.sig_d : ff.sig_q);
+
+	// Which boundary, worked out from the data path rather than from the
+	// hierarchy: a register crosses the port its own value travels through,
+	// and which side of the tree that port is on follows from that.
+	Cell *inst = nullptr;
+	IdString port;
+	bool into_child = false;
+
+	if (backward) {
+		Cell *drv = unique_full_driver(ctx.drivers, sigmap, near, port);
+		if (drv != nullptr && h.design->module(drv->type) != nullptr) {
+			inst = drv;
+			into_child = true;
+		}
+	} else {
+		// Any instance reading the whole net names the boundary, even when
+		// something else reads it too. Insisting on a unique reader here would
+		// report a missing boundary for what is really a second reader, and
+		// the second reader has a refusal of its own below that says so.
+		std::vector<CellPort> full;
+		bool partial = false, drives_out = false;
+		scan_readers(module, sigmap, near, full, partial, drives_out);
+		for (auto &rd : full)
+			if (h.design->module(rd.cell->type) != nullptr) {
+				inst = rd.cell;
+				port = rd.port;
+				into_child = true;
+				break;
+			}
+	}
+
+	// Not an instance on the near side, so the boundary is this module's own:
+	// the register leaves through the port its value arrives on or departs on.
+	Wire *own_port = nullptr;
+	if (inst == nullptr) {
+		Wire *w = near.empty() || !near[0].is_wire() ? nullptr : near[0].wire;
+		bool right_way = w != nullptr && (backward ? w->port_input : w->port_output);
+		if (right_way && GetSize(near) == GetSize(w) && near == sigmap(SigSpec(w)))
+			own_port = w;
+		if (own_port == nullptr)
+			refuse("Flop %s %s %s, which is neither an instance port nor a port "
+					"of %s in full, so there is no boundary for the register to "
+					"cross%s.\n", log_id(flop),
+					backward ? "reads" : "drives", log_signal(near),
+					log_id(module), mark::unsupported);
+		inst = h.only_site(module);
+		port = own_port->name;
+	}
+
+	Module *child = into_child ? h.design->module(inst->type) : module;
+	Module *parent = h.parent_of.at(inst);
+	Module *dest = into_child ? child : parent;
+	// Said plainly, because the alternative is the walk finding no cell Y
+	// behind the instance and reporting a malformed request. A blackbox is a
+	// port list with nothing behind it, and there is no version of this move
+	// that puts a register inside one.
+	if (dest->get_blackbox_attribute())
+		refuse("Module %s is a blackbox, so it has no body for flop %s to move "
+				"into%s.\n", log_id(dest), log_id(flop), mark::none);
+	if (into_child)
+		h.only_site(child);
+	if (named_inst != nullptr && named_inst != inst)
+		refuse("Flop %s crosses the boundary at instance %s, not at %s%s.\n",
+				log_id(flop), log_id(inst), log_id(named_inst), mark::invalid);
+
+	// The near-side net shifts by a cycle, so anything still reading it reads
+	// something else afterwards. There is a version of this move that punches a
+	// second port and hands those readers the value they had; there is no
+	// version that quietly gives them the new one.
+	//
+	// Which reader is the move's own differs by case, and one case cannot use
+	// has_other_readers at all: a register leaving through its module's output
+	// port has the port itself as the net in question, and a port is exactly
+	// what that helper counts as a reader that stops the move.
+	{
+		std::vector<CellPort> others;
+		bool drives_output = false;
+		Cell *mine = flop;
+		IdString mine_port = backward ? ID::D : ID::Q;
+		if (!backward && into_child) {
+			mine = inst;
+			mine_port = port;
+		}
+		scan_extra_readers(module, sigmap, near, mine, mine_port, others, drives_output);
+		bool port_is_the_net = !backward && own_port != nullptr;
+		if (!others.empty() || (drives_output && !port_is_the_net))
+			refuse("Net %s is read by something other than flop %s's own path, "
+					"so moving the register across the %s boundary would hand "
+					"those readers a value one cycle out%s.\n",
+					log_signal(near), log_id(flop), log_id(inst), mark::unsupported);
+	}
+
+	PortMap map = port_map(h, inst);
+	ModuleCtx &dctx = h.ctx(dest);
+	FfInitVals dest_initvals(&dctx.sigmap, dest);
+
+	// Where the register lands, as a net of the destination module. Going into
+	// a child that is the child's own port wire; coming out of one it is a
+	// fresh net on the instance connection, because the parent net on the far
+	// side is the one that has to keep the registered value.
+	SigSpec far_d, far_q;
+	Wire *port_wire = nullptr;
+	SigSpec outside;
+
+	if (into_child) {
+		port_wire = child->wire(port);
+		if (port_wire == nullptr || port_wire->port_id == 0)
+			refuse("Port %s of instance %s is not a port of %s%s.\n",
+					log_id(port), log_id(inst), log_id(child), mark::invalid);
+		if (GetSize(port_wire) != ff.width)
+			refuse("Flop %s is %d bits and port %s of %s is %d, and a crossing "
+					"does not resize the register%s.\n",
+					log_id(flop), ff.width, log_id(port), log_id(child),
+					GetSize(port_wire), mark::unsupported);
+	} else {
+		outside = inst->getPort(port);
+		if (GetSize(outside) != ff.width)
+			refuse("Flop %s is %d bits and instance %s connects %d to port "
+					"%s, and a crossing does not resize the register%s.\n",
+					log_id(flop), ff.width, log_id(inst), GetSize(outside),
+					log_id(port), mark::unsupported);
+	}
+
+	FfData moved = ff;
+	moved.cell = nullptr;
+	moved.module = dest;
+	moved.initvals = &dest_initvals;
+	moved.name = dest->uniquify(ff.name);
+	resolve_controls(into_child ? map.down : map.up, sigmap, moved, flop, dest);
+
+	// Everything above is a question. Nothing below is, which is what keeps a
+	// refused crossing from leaving two modules and an instance site half
+	// rewritten - there is no undoing a register that has been rebuilt.
+	IdString flop_name = ff.name;
+
+	if (into_child) {
+		SigSpec pw = SigSpec(port_wire);
+		Wire *fresh = child->addWire(
+				child->uniquify(stringf("%s_%s", port_wire->name.c_str(),
+						backward ? "pre" : "q")),
+				ff.width);
+		// Everything the child did with the port net it now does with the
+		// fresh one, and the port net is left for the register.
+		steal_net(child, dctx.sigmap, pw, SigSpec(fresh));
+		if (backward) {
+			far_d = SigSpec(fresh);
+			far_q = pw;
+		} else {
+			far_d = pw;
+			far_q = SigSpec(fresh);
+		}
+	} else {
+		Wire *fresh = parent->addWire(
+				parent->uniquify(stringf("\\%s_%s", RTLIL::unescape_id(flop_name).c_str(),
+						backward ? "q" : "d")),
+				ff.width);
+		if (backward) {
+			far_d = outside;
+			far_q = SigSpec(fresh);
+		} else {
+			far_d = SigSpec(fresh);
+			far_q = outside;
+		}
+		inst->setPort(port, SigSpec(fresh));
+	}
+
+	moved.sig_d = far_d;
+	moved.sig_q = far_q;
+	check_landing_init(dest_initvals, far_q, moved.val_init, flop, dest);
+
+	// The register goes before the new one is built, so its init comes off the
+	// old net rather than being left behind on a net that is combinational now.
+	SigSpec old_d = ff.sig_d, old_q = ff.sig_q;
+	ff.remove();
+	// Taking a register out of a module is shorting its Q to its D, whichever
+	// way it went and whichever side of the boundary it landed on.
+	module->connect(old_q, old_d);
+	// Fatal rather than refused, the way every other emit in this pass is:
+	// emit only declines on a zero width or a register with no control at all,
+	// and both were ruled out before anything was touched.
+	if (!moved.emit())
+		log_error("Flop %s did not survive being rebuilt in %s.\n",
+				log_id(flop_name), log_id(dest));
+
+	log("Moved %s %s the boundary at %s and %s %s, where it registers %s.\n",
+			log_id(flop_name), backward ? "backward across" : "forward across",
+			log_id(inst), into_child ? "into" : "out of", log_id(dest),
+			log_signal(far_q));
+
+	module = dest;
+	flop = moved.cell;
+	h.drop_ctxs();
+}
+
+// The move the command named, when its two ends are not in the same module.
+//
+// A boundary is crossed for as long as the register is not where the cut is,
+// and then the ordinary move is made. Naming an instance as the cut asks for
+// the crossing on its own, which is the move with no cells in it: the register
+// changes modules and nothing else changes at all.
+void apply_hier_move(Design *design, Module *module, Cell *flop, Module *cut_module,
+		Cell *cut, bool backward)
+{
+	Hier h(design);
+	Module *cut_child = design->module(cut->type);
+
+	if (cut_child != nullptr) {
+		cross_boundary(h, module, flop, backward, cut);
+		return;
+	}
+
+	// One crossing per module between the two ends, and a design cannot have
+	// more boundaries between two cells than it has modules.
+	int budget = GetSize(design->modules()) + 1;
+	while (module != cut_module) {
+		if (budget-- <= 0)
+			refuse("Flop %s and cut %s are further apart than the design is "
+					"deep%s.\n", log_id(flop), log_id(cut), mark::invalid);
+		cross_boundary(h, module, flop, backward, nullptr);
+	}
+
+	if (backward)
+		apply_backward_move(module, flop, cut);
+	else
+		apply_forward_move(module, flop, cut);
+}
+
 struct OptRetimePass : public Pass {
 	OptRetimePass() : Pass("opt_retime", "retime sequential circuits") { }
 
@@ -2954,8 +3509,24 @@ struct OptRetimePass : public Pass {
 		log("        are lowered, and only when the move then succeeds. Async\n");
 		log("        controls and unequal clocks are refused either way.\n");
 		log("\n");
+		log("The two cells may be in different modules. The register then\n");
+		log("crosses the boundaries between them first, one instance port at a\n");
+		log("time, and the move is made where it lands. Naming an instance as\n");
+		log("-cut asks for the crossing on its own: the register changes\n");
+		log("modules and nothing else changes at all.\n");
+		log("\n");
+		log("A crossing needs the register's clock, enable and resets to exist\n");
+		log("as nets on the far side, needs the net it vacates to have no other\n");
+		log("reader, and needs the destination module to have one instance\n");
+		log("site, since a move edits the body every instance shares. It is\n");
+		log("rehearsed on a copy of the design, so a move that crosses two\n");
+		log("boundaries and is refused at the second leaves nothing behind at\n");
+		log("the first.\n");
+		log("\n");
 		log("The selection is where the two named cells are looked up, and both\n");
-		log("have to be in it. The cells between them travel with the move.\n");
+		log("have to be in it. The cut is looked for in the flop's module\n");
+		log("first, so a name two modules share still means the nearer one.\n");
+		log("The cells between them travel with the move.\n");
 		log("\n");
 		log("A refused move is reported and leaves the design unchanged. The\n");
 		log("reason ends in a marker saying what kind of no it is, so a caller\n");
@@ -3040,7 +3611,6 @@ struct OptRetimePass : public Pass {
 
 		Module *module = nullptr;
 		Cell *flop_cell = nullptr;
-		Cell *cut = nullptr;
 		for (auto mod : design->selected_modules()) {
 			Cell *found = mod->cell(RTLIL::escape_id(flop));
 			// A partially selected module is still handed over, so whether the
@@ -3054,24 +3624,98 @@ struct OptRetimePass : public Pass {
 				log_cmd_error("Flop cell '%s' found in more than one selected module.\n", flop.c_str());
 			module = mod;
 			flop_cell = found;
-			cut = mod->cell(RTLIL::escape_id(cut_cell));
 		}
 		if (!flop_cell)
 			log_cmd_error("Flop cell '%s' not found in the selection.\n", flop.c_str());
-		if (!cut)
-			log_cmd_error("Cut cell '%s' not found in module %s.\n", cut_cell.c_str(), log_id(module));
-		if (!module->selected(cut))
-			log_cmd_error("Cut cell '%s' is in module %s but not in the selection.\n",
-					cut_cell.c_str(), log_id(module));
 
-		log("Move: module=%s flop=%s direction=%s cut=%s%s\n",
-				log_id(module), log_id(flop_cell),
-				backward ? "backward" : "forward", log_id(cut),
-				all_fanouts ? " all-fanouts" : "");
+		// The flop's own module first, so a name two modules share still means
+		// the one the register is in. The search only widens when the name is
+		// not there at all, which is what turns a cut inside a child from a
+		// dead script into a move.
+		Module *cut_module = module;
+		Cell *cut = module->cell(RTLIL::escape_id(cut_cell));
+		if (!cut) {
+			for (auto mod : design->selected_modules()) {
+				Cell *found = mod->cell(RTLIL::escape_id(cut_cell));
+				if (!found || !mod->selected(found))
+					continue;
+				if (cut)
+					log_cmd_error("Cut cell '%s' found in more than one selected module.\n",
+							cut_cell.c_str());
+				cut_module = mod;
+				cut = found;
+			}
+		}
+		if (!cut)
+			log_cmd_error("Cut cell '%s' not found in module %s or in any other "
+					"selected module.\n", cut_cell.c_str(), log_id(module));
+		if (!cut_module->selected(cut))
+			log_cmd_error("Cut cell '%s' is in module %s but not in the selection.\n",
+					cut_cell.c_str(), log_id(cut_module));
+
+		// Two ends in two modules, or one end naming an instance: either way
+		// the register has a boundary to cross before the ordinary move can be
+		// made, and the ordinary move's walk cannot see past one.
+		bool cross = cut_module != module || design->module(cut->type) != nullptr;
+
+		if (cut_module == module)
+			log("Move: module=%s flop=%s direction=%s cut=%s%s\n",
+					log_id(module), log_id(flop_cell),
+					backward ? "backward" : "forward", log_id(cut),
+					all_fanouts ? " all-fanouts" : "");
+		else
+			log("Move: module=%s flop=%s direction=%s cut=%s in %s%s\n",
+					log_id(module), log_id(flop_cell),
+					backward ? "backward" : "forward", log_id(cut),
+					log_id(cut_module), all_fanouts ? " all-fanouts" : "");
 
 		std::string refused;
-		if (all_fanouts)
+		if (all_fanouts && cross)
+			// The sibling registers are found by their shared D net and then
+			// re-derived at each one by replaying the route as a list of port
+			// names, which is a walk inside one module. Across a boundary the
+			// route would have to name the instance ports it passes through as
+			// well, and it does not.
+			refused = try_move([&] {
+				refuse("-all-fanouts replays the route to the cut as port names "
+						"within one module, so it cannot widen a move that "
+						"crosses the boundary at %s%s.\n",
+						log_id(cut_module == module ? cut : cut), mark::unsupported);
+			});
+		else if (all_fanouts)
 			refused = try_move([&] { apply_backward_all_fanouts(module, flop_cell, cut); });
+		else if (cross) {
+			// Two modules and every instance site between them are places a
+			// half-made move can leave something behind, and a move that
+			// crosses two boundaries can refuse at the second with the first
+			// already made. Nothing puts a rebuilt register back, so the whole
+			// move is rehearsed on a copy of the design and only repeated here
+			// once it has worked. Same reasoning as the control-lowering
+			// rehearsal below, one module wider.
+			IdString fmod_name = module->name, flop_name = flop_cell->name;
+			IdString cmod_name = cut_module->name, cut_name = cut->name;
+			auto hier_move = [&](Design *target) {
+				Module *fmod = target->module(fmod_name);
+				Module *cmod = target->module(cmod_name);
+				return try_move([&] {
+					apply_hier_move(target, fmod, fmod->cell(flop_name), cmod,
+							cmod->cell(cut_name), backward);
+				});
+			};
+			Design *rehearsal = new Design;
+			for (auto mod : design->modules())
+				rehearsal->add(mod->clone());
+			{
+				// Muted the way tee -q is, so the rehearsal does not narrate a
+				// move the caller is about to see made for real.
+				auto quiet = logger().sink_scope();
+				logger().clear();
+				refused = hier_move(rehearsal);
+			}
+			delete rehearsal;
+			if (refused.empty())
+				refused = hier_move(design);
+		}
 		else if (backward)
 			refused = try_move([&] { apply_backward_move(module, flop_cell, cut); });
 		else
@@ -3082,7 +3726,7 @@ struct OptRetimePass : public Pass {
 		// is rehearsed on a copy of the module and only repeated here once it
 		// has worked. The reason kept on failure is the one the plain move
 		// gave, since that is the move the caller asked for.
-		if (!refused.empty() && forward && lower_controls) {
+		if (!refused.empty() && forward && lower_controls && !cross) {
 			IdString flop_name = flop_cell->name, cut_name = cut->name;
 			auto lowered_move = [&](Module *mod) {
 				return try_move([&] {
