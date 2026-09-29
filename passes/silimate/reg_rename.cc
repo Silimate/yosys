@@ -200,7 +200,7 @@ static int span(const std::vector<DumpLeaf> &leaves)
 }
 
 // One declared range of an object from `rtl_bind_dims`, which place_bits uses to put `x[N]` on bit N
-struct Dim {
+struct DeclaredRange {
 	int msb = 0, lsb = 0;
 	bool packed = false;
 };
@@ -214,8 +214,8 @@ struct DumpBit {
 };
 
 // Record in out[base, base + width) which dumped signal and bit hold each bit of an object
-static void place_bits(const std::vector<DumpLeaf> &leaves, int width, const std::vector<Dim> &dims,
-		       std::vector<DumpBit> &out, int base)
+static void place_bits(const std::vector<DumpLeaf> &leaves, int width,
+		       const std::vector<DeclaredRange> &ranges, std::vector<DumpBit> &out, int base)
 {
 	if (leaves.empty())
 		return;
@@ -242,9 +242,9 @@ static void place_bits(const std::vector<DumpLeaf> &leaves, int width, const std
 		return;
 
 	// An index says where a member sits in the declared range, whatever order the dump lists it in
-	if (!dims.empty()) {
-		const Dim &dim = dims.front();
-		int lo = std::min(dim.msb, dim.lsb), hi = std::max(dim.msb, dim.lsb), count = hi - lo + 1;
+	if (!ranges.empty()) {
+		const DeclaredRange &range = ranges.front();
+		int lo = std::min(range.msb, range.lsb), hi = std::max(range.msb, range.lsb), count = hi - lo + 1;
 		std::vector<std::vector<DumpLeaf>> slots(count);
 		bool indexed = width % count == 0;
 		for (auto &leaf : leaves) {
@@ -257,12 +257,12 @@ static void place_bits(const std::vector<DumpLeaf> &leaves, int width, const std
 			// Packed ranges count from their LSB; unpacked ones put the lowest index on top
 			DumpLeaf child = leaf;
 			child.rel = leaf.rel.substr(head.size());
-			slots[dim.packed ? std::abs(index - dim.lsb) : hi - index].push_back(child);
+			slots[range.packed ? std::abs(index - range.lsb) : hi - index].push_back(child);
 		}
 		if (indexed) {
 			int span = width / count;
 			for (int pos = 0; pos < count; pos++)
-				place_bits(slots[pos], span, {dims.begin() + 1, dims.end()}, out, base + pos * span);
+				place_bits(slots[pos], span, {ranges.begin() + 1, ranges.end()}, out, base + pos * span);
 			return;
 		}
 	}
@@ -300,20 +300,20 @@ struct DumpLocator {
 	dict<std::string, std::vector<DumpBit>> cache; // object, width and ranges -> its placed bits
 
 	// Locate bit `bit` of object `key`, `width` bits wide, among the signals dumped for it
-	bool locate(const std::string &key, int width, int bit, const std::vector<Dim> &dims, DumpLeaf &leaf,
-		    int &leaf_bit)
+	bool locate(const std::string &key, int width, int bit, const std::vector<DeclaredRange> &ranges,
+		    DumpLeaf &leaf, int &leaf_bit)
 	{
 		auto obj_it = objects.find(key);
 		if (obj_it == objects.end() || bit < 0 || bit >= width)
 			return false;
-		std::string id = stringf("%s %d%s", key.c_str(), width, dims.empty() ? "" : " dims");
+		std::string id = stringf("%s %d%s", key.c_str(), width, ranges.empty() ? "" : " ranges");
 		auto it = cache.find(id);
 		if (it == cache.end()) {
 			std::vector<DumpLeaf> leaves = obj_it->second;
 			for (int i = 0; i < GetSize(leaves); i++)
 				leaves[i].id = i;
 			it = cache.insert(std::make_pair(id, std::vector<DumpBit>(width))).first;
-			place_bits(leaves, width, dims, it->second, 0);
+			place_bits(leaves, width, ranges, it->second, 0);
 		}
 		const DumpBit &src = it->second[bit];
 		if (src.leaf < 0)
@@ -343,28 +343,28 @@ static bool parse_bound(const std::string &text, int &out)
 }
 
 // Each object's declared ranges from a module's `rtl_bind_dims`, e.g. `mem=u0:3,p7:0`
-static dict<std::string, std::vector<Dim>> parse_dims(const std::string &value)
+static dict<std::string, std::vector<DeclaredRange>> parse_declared_ranges(const std::string &value)
 {
-	dict<std::string, std::vector<Dim>> dims;
+	dict<std::string, std::vector<DeclaredRange>> ranges;
 	for (auto &entry : split_tokens(value, " ")) {
 		size_t eq = entry.rfind('=');
-		std::vector<Dim> ranges;
+		std::vector<DeclaredRange> declared;
 		for (auto &text : split_tokens(eq == std::string::npos ? "" : entry.substr(eq + 1), ",")) {
-			Dim dim;
+			DeclaredRange range;
 			size_t colon = text.find(':', 2);
 			if ((text[0] != 'u' && text[0] != 'p') || colon == std::string::npos ||
-					!parse_bound(text.substr(1, colon - 1), dim.msb) ||
-					!parse_bound(text.substr(colon + 1), dim.lsb)) {
-				ranges.clear();
+					!parse_bound(text.substr(1, colon - 1), range.msb) ||
+					!parse_bound(text.substr(colon + 1), range.lsb)) {
+				declared.clear();
 				break;
 			}
-			dim.packed = text[0] == 'p';
-			ranges.push_back(dim);
+			range.packed = text[0] == 'p';
+			declared.push_back(range);
 		}
-		if (!ranges.empty())
-			dims[entry.substr(0, eq)] = ranges;
+		if (!declared.empty())
+			ranges[entry.substr(0, eq)] = declared;
 	}
-	return dims;
+	return ranges;
 }
 
 // Strip a trailing bit range and report the declared lsb. A range written with no space
@@ -396,14 +396,14 @@ struct RegRenameInstance {
 	Module *module;
 	bool debug;
 	dict<Cell*, RegRenameInstance *> children;
-	dict<std::string, std::vector<Dim>> dims; // stamped object -> its declared ranges
+	dict<std::string, std::vector<DeclaredRange>> ranges; // stamped object -> its declared ranges
 
 	// Constructor
 	// When constructing, it will recursively build the
 	// module hierarchy with correct VCD scope mapping
 	RegRenameInstance(std::string scope, Module *mod, bool dbg = false)
 		: vcd_scope(scope), module(mod), debug(dbg),
-		  dims(parse_dims(mod->get_string_attribute(ID(rtl_bind_dims))))
+		  ranges(parse_declared_ranges(mod->get_string_attribute(ID(rtl_bind_dims))))
 	{
 		// Loop through all cells in the module
 		for (auto cell : module->cells()) {
@@ -643,7 +643,7 @@ struct RegRenameInstance {
 				int leaf_bit = 0;
 				std::string dump_path;
 				bool placed = dump.locate(vcd_scope + "." + obj, obj_width, obj_bit,
-						dims.count(obj) ? dims.at(obj) : std::vector<Dim>(), leaf, leaf_bit);
+						ranges.count(obj) ? ranges.at(obj) : std::vector<DeclaredRange>(), leaf, leaf_bit);
 
 				// Q is the net of a pin the dump holds at a parent's actual, so bind through that pin
 				auto pin = resolved_pins.find(sigmap(SigBit(old_wire, qbits.offset + start)));
