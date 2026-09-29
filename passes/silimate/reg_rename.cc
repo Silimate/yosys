@@ -34,7 +34,7 @@ struct DumpLeaf {
 	std::string rel;
 	int width = 0;
 	int offset = 0;
-	int id = -1; // position in its object's list, which a layout refers to it by
+	int id = -1; // position in its object's list, which a DumpBit refers to it by
 };
 
 // What reg_rename made of one Q bit, stamped on every sequential cell it visits as the
@@ -199,7 +199,7 @@ static int span(const std::vector<DumpLeaf> &leaves)
 	return total;
 }
 
-// One declared range of an object, from its module's `rtl_bind_dims` (frontends/verific/rtl_bind.h)
+// One declared range of an object from `rtl_bind_dims`, which place_bits uses to put `x[N]` on bit N
 struct Dim {
 	int msb = 0, lsb = 0;
 	bool packed = false;
@@ -207,23 +207,22 @@ struct Dim {
 
 static bool parse_bound(const std::string &text, int &out);
 
-// Where one bit of an object was dumped: which of its signals (-1 for none), and which bit of it
-struct BitSrc {
+// The dumped signal (leaf -1 for none) and the bit of it that hold one bit of an object
+struct DumpBit {
 	int leaf = -1;
 	int bit = 0;
 };
 
-// Lay out every bit of an object that the waveform dumped as `leaves` into out[base, base + width),
-// given the width the netlist says the object has and, when known, its declared ranges.
-static void lay_out(const std::vector<DumpLeaf> &leaves, int width, const std::vector<Dim> &dims,
-		    std::vector<BitSrc> &out, int base)
+// Record in out[base, base + width) which dumped signal and bit hold each bit of an object
+static void place_bits(const std::vector<DumpLeaf> &leaves, int width, const std::vector<Dim> &dims,
+		       std::vector<DumpBit> &out, int base)
 {
 	if (leaves.empty())
 		return;
 
 	// A single leaf covering the object: the bits index straight into it
 	if (leaves.size() == 1 && leaves[0].rel.empty()) {
-		// A converter may dump fewer bits than the object holds; lay out those and leave the rest
+		// A converter may dump fewer bits than the object holds; place those and leave the rest
 		if (leaves[0].width > width)
 			return;
 		// A narrow leaf at a nonzero index needs the object's own LSB to align against
@@ -263,7 +262,7 @@ static void lay_out(const std::vector<DumpLeaf> &leaves, int width, const std::v
 		if (indexed) {
 			int span = width / count;
 			for (int pos = 0; pos < count; pos++)
-				lay_out(slots[pos], span, {dims.begin() + 1, dims.end()}, out, base + pos * span);
+				place_bits(slots[pos], span, {dims.begin() + 1, dims.end()}, out, base + pos * span);
 			return;
 		}
 	}
@@ -278,7 +277,7 @@ static void lay_out(const std::vector<DumpLeaf> &leaves, int width, const std::v
 		int high = width;
 		for (auto &group : groups) {
 			high -= span(group);
-			lay_out(group, span(group), {}, out, base + high);
+			place_bits(group, span(group), {}, out, base + high);
 		}
 		return;
 	}
@@ -290,19 +289,19 @@ static void lay_out(const std::vector<DumpLeaf> &leaves, int width, const std::v
 	if (overlay) {
 		for (auto &group : groups)
 			if (group.size() == 1 && group[0].rel.empty())
-				return lay_out(group, width, {}, out, base);
-		lay_out(groups.front(), width, {}, out, base);
+				return place_bits(group, width, {}, out, base);
+		place_bits(groups.front(), width, {}, out, base);
 	}
 }
 
-// The waveform's objects, each laid out once, the first time a flop or port asks for it
-struct DumpLayouts {
+// Finds which dumped signal holds a flop or port bit, placing each object's bits only once
+struct DumpLocator {
 	const dict<std::string, std::vector<DumpLeaf>> &objects;
-	dict<std::string, std::vector<BitSrc>> cache; // object, width and ranges -> its layout
+	dict<std::string, std::vector<DumpBit>> cache; // object, width and ranges -> its placed bits
 
 	// Locate bit `bit` of object `key`, `width` bits wide, among the signals dumped for it
-	bool find(const std::string &key, int width, int bit, const std::vector<Dim> &dims, DumpLeaf &leaf,
-		  int &leaf_bit)
+	bool locate(const std::string &key, int width, int bit, const std::vector<Dim> &dims, DumpLeaf &leaf,
+		    int &leaf_bit)
 	{
 		auto obj_it = objects.find(key);
 		if (obj_it == objects.end() || bit < 0 || bit >= width)
@@ -313,10 +312,10 @@ struct DumpLayouts {
 			std::vector<DumpLeaf> leaves = obj_it->second;
 			for (int i = 0; i < GetSize(leaves); i++)
 				leaves[i].id = i;
-			it = cache.insert(std::make_pair(id, std::vector<BitSrc>(width))).first;
-			lay_out(leaves, width, dims, it->second, 0);
+			it = cache.insert(std::make_pair(id, std::vector<DumpBit>(width))).first;
+			place_bits(leaves, width, dims, it->second, 0);
 		}
-		const BitSrc &src = it->second[bit];
+		const DumpBit &src = it->second[bit];
 		if (src.leaf < 0)
 			return false;
 		leaf = obj_it->second[src.leaf];
@@ -548,7 +547,7 @@ struct RegRenameInstance {
 	}
 
 	// Rename each flop's Q wire to the signal the waveform dumped it under.
-	void process_registers(DumpLayouts &dump, BindStats &stats)
+	void process_registers(DumpLocator &dump, BindStats &stats)
 	{
 		if (debug)
 			log("Processing registers in scope: %s (module: %s)\n", vcd_scope.c_str(),
@@ -643,7 +642,7 @@ struct RegRenameInstance {
 				DumpLeaf leaf;
 				int leaf_bit = 0;
 				std::string dump_path;
-				bool placed = dump.find(vcd_scope + "." + obj, obj_width, obj_bit,
+				bool placed = dump.locate(vcd_scope + "." + obj, obj_width, obj_bit,
 						dims.count(obj) ? dims.at(obj) : std::vector<Dim>(), leaf, leaf_bit);
 
 				// Q is the net of a pin the dump holds at a parent's actual, so bind through that pin
@@ -661,7 +660,7 @@ struct RegRenameInstance {
 				// from wire names takes the generate block of `hw_gen.cnt` for a struct. Q still
 				// drives that net, so bind through the net's own name when the dump has it.
 				if (!placed && old_wire->name.isPublic()) {
-					placed = dump.find(vcd_scope + "." + RTLIL::unescape_id(old_wire->name), GetSize(old_wire),
+					placed = dump.locate(vcd_scope + "." + RTLIL::unescape_id(old_wire->name), GetSize(old_wire),
 							qbits.offset + start, {}, leaf, leaf_bit);
 					if (placed && debug)
 						log("Placing %s[%d] of cell %s by its Q net as %s, not by its RTL bind %s[%d]\n",
@@ -815,7 +814,7 @@ struct RegRenameInstance {
 	}
 
 	// Handle packed inputs.
-	void bind_packed_inputs(DumpLayouts &dump, FstData &fst)
+	void bind_packed_inputs(DumpLocator &dump, FstData &fst)
 	{
 		// Split input ports whose dump is one packed vector
 		dict<std::string, std::vector<std::tuple<int, int, Wire*>>> groups;
@@ -841,7 +840,7 @@ struct RegRenameInstance {
 				high -= GetSize(wire);
 				DumpLeaf leaf;
 				int leaf_bit = 0;
-				if (!dump.find(vcd_scope + "." + kv.first, total, high, {}, leaf, leaf_bit))
+				if (!dump.locate(vcd_scope + "." + kv.first, total, high, {}, leaf, leaf_bit))
 					continue;
 				std::string dump_path = leaf.name;
 				if (dump_path.compare(0, vcd_scope.size(), vcd_scope) != 0)
@@ -858,7 +857,7 @@ struct RegRenameInstance {
 		}
 	}
 
-	void process_all(DumpLayouts &dump, BindStats &stats, FstData &fst)
+	void process_all(DumpLocator &dump, BindStats &stats, FstData &fst)
 	{
 		bind_packed_inputs(dump, fst);
 		process_registers(dump, stats);
@@ -1113,7 +1112,7 @@ struct RegRenamePass : public Pass {
 			root.count_uses(uses);
 			root.bind_ports(fst, uses);
 			BindStats stats;
-			DumpLayouts dump{objects, {}};
+			DumpLocator dump{objects, {}};
 			root.process_all(dump, stats, fst);
 			report_unbound(stats, objects, debug);
 			log("Bound %d flop(s); unstamped %d, object absent %d, bit unplaced %d\n",
