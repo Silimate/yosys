@@ -785,7 +785,7 @@ static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 {
 	dict<std::string, std::vector<DumpLeaf>> objects;
 	pool<std::string> seen; // dumpers may open the same scope twice and repeat declarations
-	pool<std::string> listed; // (object, handle, member name) already filed
+	dict<std::string, int> listed; // (object, handle, member name) -> where its leaf is filed
 	for (auto &var : fst.getVars()) {
 		int offset = 0;
 		std::string name = split_bit_range(RTLIL::unescape_id(var.name), offset);
@@ -823,8 +823,14 @@ static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 			leaf.rel = split == std::string::npos ? "" : rel.substr(split);
 			std::string key = scope + "." + rel.substr(0, split);
 			// An alias of a member already filed here is that member again, as a modport lists it
-			if (listed.insert(key + " " + std::to_string(var.id) + " " + member).second)
+			std::string id = key + " " + std::to_string(var.id) + " " + member;
+			auto it = listed.find(id);
+			if (it == listed.end()) {
+				listed[id] = GetSize(objects[key]);
 				objects[key].push_back(leaf);
+			} else if (leaf.rel.size() < objects[key][it->second].rel.size())
+				objects[key][it->second] = leaf; // keep the object's own member over a modport's view
+
 			if (split == std::string::npos)
 				break;
 		}
