@@ -7,6 +7,7 @@
 #   bus_r   the transmit scope first, then data and mask     bound*6, on bus_r's own members
 #   bus_s   transmit lists mask before data, then the        bit 5 on data, bit 0 on mask
 #           instance lists data, mask
+#   twin    left.data and right.data sharing one handle      bound*4: two members, not one
 #   pair    a and b sharing one handle                       bound*2: two members, not one
 
 read_rtlil <<EOT
@@ -18,6 +19,7 @@ module \top
   wire width 6 \bus_r_q
   wire \bus_s_hi_q
   wire \bus_s_lo_q
+  wire width 4 \twin_q
   wire width 2 \pair_q
   attribute \rtl_bind "bus_q/6[0:5]"
   cell $dff \bus_q_ff
@@ -51,6 +53,14 @@ module \top
     connect \D \d2 [1]
     connect \Q \bus_s_lo_q
   end
+  attribute \rtl_bind "twin/4[0:3]"
+  cell $dff \twin_ff
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 4
+    connect \CLK \clk
+    connect \D \d6 [3:0]
+    connect \Q \twin_q
+  end
   attribute \rtl_bind "pair/2[0:1]"
   cell $dff \pair_ff
     parameter \CLK_POLARITY 1
@@ -63,7 +73,7 @@ end
 EOT
 hierarchy -top top
 
-logger -expect log "Bound 16 of 16 Q bit\(s\); unstamped 0, absent 0, unplaced 0, conflict 0, unwired 0" 1
+logger -expect log "Bound 20 of 20 Q bit\(s\); unstamped 0, absent 0, unplaced 0, conflict 0, unwired 0" 1
 reg_rename -waveform reg_rename_modport_alias.vcd -scope tb.dut
 logger -check-expected
 
@@ -76,4 +86,5 @@ select -assert-none w:*transmit*
 # And the members keep the instance's own order, not the order the modport listed them in
 select -assert-count 1 c:bus_s_hi %x:+[Q] w:bus_s.data %i
 select -assert-count 1 c:bus_s_lo %x:+[Q] w:bus_s.mask %i
+select -assert-count 1 c:twin_ff a:rtl_bind_status=bound*4 %i
 select -assert-count 1 c:pair_ff a:rtl_bind_status=bound*2 %i

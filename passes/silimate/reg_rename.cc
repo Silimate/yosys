@@ -913,11 +913,19 @@ static dict<std::string, std::vector<DumpLeaf>> collect_objects(FstData &fst,
 			std::string key = scope + "." + rel.substr(0, split);
 			std::string id = key + " " + std::to_string(var.id) + " " + member;
 			auto it = listed.find(id);
-			// A modport lists the object's members again; its own listing wins, in its own place
-			if (it == listed.end() || leaf.rel.size() < objects[key][it->second].rel.size()) {
-				if (it != listed.end())
+			bool repeat = false, shorter = false;
+			if (it != listed.end()) {
+				// A modport lists the object's members again, each under a path ending in the member's own
+				const std::string &kept = objects[key][it->second].rel;
+				repeat = leaf.rel.ends_with(kept) || kept.ends_with(leaf.rel);
+				shorter = leaf.rel.size() < kept.size();
+			}
+			// The object's own listing wins, in its own place
+			if (!repeat || shorter) {
+				if (repeat)
 					objects[key][it->second].width = 0; // dropped once every signal is filed
-				listed[id] = GetSize(objects[key]);
+				if (it == listed.end() || repeat)
+					listed[id] = GetSize(objects[key]);
 				objects[key].push_back(leaf);
 			}
 			if (split == std::string::npos)

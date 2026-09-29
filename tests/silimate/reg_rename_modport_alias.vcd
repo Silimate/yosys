@@ -30,6 +30,10 @@ $upscope $end
 $var wire 4 ( data [3:0] $end
 $var wire 2 ) mask [1:0] $end
 $upscope $end
+$scope module twin $end
+$var wire 2 * left.data [1:0] $end
+$var wire 2 * right.data [1:0] $end
+$upscope $end
 $scope module pair $end
 $var wire 1 $ a $end
 $var wire 1 $ b $end
@@ -46,3 +50,4 @@ b0000 &
 b00 '
 b0000 (
 b00 )
+b00 *
