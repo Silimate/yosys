@@ -1,0 +1,35 @@
+# A full adder written with one-bit $xor, $and and $or cells, as abc -word returns them
+read_verilog <<EOT
+module fa1(input a, b, c, output s, cy);
+	assign s = a ^ b ^ c;
+	assign cy = (a & b) | (b & c) | (a & c);
+endmodule
+EOT
+proc
+opt_clean
+select -assert-none t:$_XOR_ t:$_AND_ t:$_OR_ %u %u
+equiv_opt -assert extract_fa -fa
+design -load postopt
+select -assert-count 1 t:$fa
+design -reset
+
+# A one-bit cell with a wider input is not a gate, so it is left alone
+read_rtlil <<EOT
+module \wide
+  wire input 1 \a
+  wire width 2 input 2 \b
+  wire output 3 \y
+  cell $and $and0
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 2
+    parameter \Y_WIDTH 1
+    connect \A \a
+    connect \B \b
+    connect \Y \y
+  end
+end
+EOT
+extract_fa -fa
+select -assert-count 0 t:$fa
