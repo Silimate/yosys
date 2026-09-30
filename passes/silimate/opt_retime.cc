@@ -3374,8 +3374,9 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut, IdString *landed 
 		log("Left %d register(s) on the chain for readers off the after-path.\n", nheld);
 }
 
-// -cone: one register on the cut's output in place of every register feeding
-// its combinational fan-in, however that fan-in branches and meets again.
+// -cone, or a chain move that was refused: one register on the cut's output in
+// place of every register feeding its combinational fan-in, however that
+// fan-in branches and meets again.
 //
 // The cone is copied rather than rewired. The copy reads each register's D
 // where the original read its Q, so it computes a cycle early, and the new
@@ -3640,6 +3641,8 @@ struct OptRetimePass : public Pass {
 		log("        with -forward, move across the whole combinational fan-in\n");
 		log("        of -cut rather than along one chain, so paths from the flop\n");
 		log("        may branch and meet again, as a decoded mux select does.\n");
+		log("        Without -cone this move is still tried when the chain move\n");
+		log("        is refused; -cone skips the chain move.\n");
 		log("        Every register at the edge of that fan-in is merged into\n");
 		log("        one register on the cut's output, and all of them have to\n");
 		log("        share the flop's clock and controls (see\n");
@@ -3648,6 +3651,10 @@ struct OptRetimePass : public Pass {
 		log("        still reads them. A cut whose fan-in cannot all move is\n");
 		log("        moved towards, stopping at the furthest cell on the way\n");
 		log("        whose fan-in can.\n");
+		log("\n");
+		log("    -no-cone\n");
+		log("        with -forward, make the chain move only, and do not try the\n");
+		log("        whole fan-in when it is refused.\n");
 		log("\n");
 		log("    -backward\n");
 		log("        move the register upstream onto the path input of -cut.\n");
@@ -3727,7 +3734,7 @@ struct OptRetimePass : public Pass {
 
 		std::string flop, cut_cell;
 		bool forward = false, backward = false;
-		bool all_fanouts = false, lower_controls = true, cone = false;
+		bool all_fanouts = false, lower_controls = true, cone = false, no_cone = false;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -3759,6 +3766,10 @@ struct OptRetimePass : public Pass {
 				cone = true;
 				continue;
 			}
+			if (args[argidx] == "-no-cone") {
+				no_cone = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -3777,6 +3788,10 @@ struct OptRetimePass : public Pass {
 			log_cmd_error("-no-lower-controls only applies to -forward moves.\n");
 		if (cone && !forward)
 			log_cmd_error("-cone only applies to -forward moves.\n");
+		if (no_cone && !forward)
+			log_cmd_error("-no-cone only applies to -forward moves.\n");
+		if (cone && no_cone)
+			log_cmd_error("-cone and -no-cone cannot be used together.\n");
 
 		Module *module = nullptr;
 		Cell *flop_cell = nullptr;
@@ -3807,31 +3822,28 @@ struct OptRetimePass : public Pass {
 		log("Move: module=%s flop=%s direction=%s cut=%s%s%s\n",
 				log_id(module), log_id(flop_cell),
 				backward ? "backward" : "forward", log_id(cut),
-				all_fanouts ? " all-fanouts" : "", cone ? " cone" : "");
+				all_fanouts ? " all-fanouts" : "", cone ? " cone" : no_cone ? " no-cone" : "");
 
 		IdString landed = cut->name;
-		auto forward_move = [&](Module *mod, Cell *f, Cell *c) {
-			if (cone)
-				apply_forward_cone_move(mod, f, c, lower_controls, &landed);
-			else
-				apply_forward_move(mod, f, c, &landed);
-		};
+		IdString flop_name = flop_cell->name, cut_name = cut->name;
+		auto run_forward = [&](bool cone) {
+			auto forward_move = [&](Module *mod, Cell *f, Cell *c) {
+				if (cone)
+					apply_forward_cone_move(mod, f, c, lower_controls, &landed);
+				else
+					apply_forward_move(mod, f, c, &landed);
+			};
+			std::string refused = try_move([&] {
+				forward_move(module, module->cell(flop_name), module->cell(cut_name));
+			});
 
-		std::string refused;
-		if (all_fanouts)
-			refused = try_move([&] { apply_backward_all_fanouts(module, flop_cell, cut); });
-		else if (backward)
-			refused = try_move([&] { apply_backward_move(module, flop_cell, cut, false, &landed); });
-		else
-			refused = try_move([&] { forward_move(module, flop_cell, cut); });
-
-		// Lowering rewrites the registers before the move is known to be
-		// legal, which a refusal has no way to take back, so the whole thing
-		// is rehearsed on a copy of the module and only repeated here once it
-		// has worked. The reason kept on failure is the one the plain move
-		// gave, since that is the move the caller asked for.
-		if (!refused.empty() && forward && lower_controls) {
-			IdString flop_name = flop_cell->name, cut_name = cut->name;
+			// Lowering rewrites the registers before the move is known to be
+			// legal, which a refusal has no way to take back, so the whole
+			// thing is rehearsed on a copy of the module and only repeated
+			// here once it has worked. The reason kept on failure is the one
+			// the plain move gave, since that is the move the caller asked for.
+			if (refused.empty() || !lower_controls)
+				return refused;
 			auto lowered_move = [&](Module *mod) {
 				return try_move([&] {
 					if (!lower_path_controls(mod, mod->cell(flop_name), mod->cell(cut_name), cone))
@@ -3852,6 +3864,26 @@ struct OptRetimePass : public Pass {
 			delete rehearsal;
 			if (works)
 				refused = lowered_move(module);
+			return refused;
+		};
+
+		std::string refused;
+		if (all_fanouts)
+			refused = try_move([&] { apply_backward_all_fanouts(module, flop_cell, cut); });
+		else if (backward)
+			refused = try_move([&] { apply_backward_move(module, flop_cell, cut, false, &landed); });
+		else if (cone)
+			refused = run_forward(true);
+		else {
+			// The chain move first, since where it works it keeps the flop and
+			// its name; the cone move is for the fan-in a chain cannot follow.
+			// A refusal from both reports the chain's reason.
+			refused = run_forward(false);
+			if (!refused.empty() && !no_cone) {
+				log("Trying the whole fan-in of cut %s instead.\n", log_id(cut_name));
+				if (run_forward(true).empty())
+					refused.clear();
+			}
 		}
 
 		// What happened, for a caller that cannot read the log: opt_retime.moved

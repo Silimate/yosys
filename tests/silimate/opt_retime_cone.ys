@@ -50,8 +50,8 @@ setattr -set init 4'b1010 w:pend
 setattr -set init 2'b01 w:idx
 design -save orig
 
-# Without -cone the chain walk forks at the three comparators straight away
-opt_retime -flop idx_reg -cut o1 -forward
+# With -no-cone the chain walk forks at the three comparators straight away
+opt_retime -flop idx_reg -cut o1 -forward -no-cone
 scratchpad -assert opt_retime.moved false
 select -assert-count 2 t:$sdffe
 

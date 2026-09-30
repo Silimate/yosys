@@ -203,7 +203,7 @@ check -assert
 select -assert-count 1 t:$dff
 # Forward starts at Q, and the registers in a shared cell fan out to unrelated
 # places, so there is no cut to pick between them the way -backward has.
-opt_retime -flop r -cut after -forward
+opt_retime -flop r -cut after -forward -no-cone
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Flop r is 2 registers sharing one cell, which opt_retime can take apart for a plain -backward move but not for -forward (unsupported)."
 select -assert-count 1 t:$dff
