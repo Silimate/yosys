@@ -515,8 +515,9 @@ struct OptHierPass : Pass {
 		log("        which just became constant, but also feeds its own D (a hold mux shared\n");
 		log("        with other logic, or an enable folded into the D cone), is only stuck\n");
 		log("        at that constant by induction, which plain opt_dff cannot prove.\n");
-		log("        opt_expr runs again after it, so the logic a folded register feeds\n");
-		log("        folds before the next round looks for constant outputs.\n");
+		log("        opt_dff -sat and opt_expr repeat until opt_dff changes nothing, so the\n");
+		log("        logic and registers a folded register feeds fold before the next round\n");
+		log("        looks for constant outputs.\n");
 		log("\n");
 		log("The number of rounds that changed something is left in the scratchpad as\n");
 		log("opt_hier.rounds, and opt_hier.saturated is set when the last round found\n");
@@ -584,12 +585,21 @@ struct OptHierPass : Pass {
 			RTLIL::Selection sel = RTLIL::Selection::EmptySelection(d);
 			for (auto module : changed)
 				sel.select(module);
-			Pass::call_on_selection(d, sel, full ? "opt_expr -full" : "opt_expr");
-			Pass::call_on_selection(d, sel, sat ? "opt_dff -sat" : "opt_dff");
+			std::string opt_expr_cmd = full ? "opt_expr -full" : "opt_expr";
+			Pass::call_on_selection(d, sel, opt_expr_cmd);
+			if (!sat)
+				Pass::call_on_selection(d, sel, "opt_dff");
 			// A register opt_dff just folded feeds logic the opt_expr above already passed
-			// over; it must fold too, or the next round sees no constant output and stops.
-			if (sat)
-				Pass::call_on_selection(d, sel, full ? "opt_expr -full" : "opt_expr");
+			// over, and that logic can hold another register's D. Both must fold before the
+			// next round, or it sees no constant output and stops. Unsetting the flag here is
+			// safe: rounds > 0, so it is set again once the rounds finish.
+			while (sat) {
+				d->scratchpad_unset("opt.did_something");
+				Pass::call_on_selection(d, sel, "opt_dff -sat");
+				if (!d->scratchpad_get_bool("opt.did_something"))
+					break;
+				Pass::call_on_selection(d, sel, opt_expr_cmd);
+			}
 			Pass::call_on_selection(d, sel, purge ? "opt_clean -purge" : "opt_clean");
 		}
 
