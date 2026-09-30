@@ -515,9 +515,10 @@ struct OptHierPass : Pass {
 		log("        which just became constant, but also feeds its own D (a hold mux shared\n");
 		log("        with other logic, or an enable folded into the D cone), is only stuck\n");
 		log("        at that constant by induction, which plain opt_dff cannot prove.\n");
-		log("        opt_dff -sat and opt_expr repeat until opt_dff changes nothing, so the\n");
-		log("        logic and registers a folded register feeds fold before the next round\n");
-		log("        looks for constant outputs.\n");
+		log("        opt_dff -sat and opt_expr repeat until opt_dff changes nothing (at most\n");
+		log("        16 times per round), so the logic and registers a folded register feeds\n");
+		log("        fold before the next round looks for constant outputs. Solver effort is\n");
+		log("        capped by opt_dff's scratchpad options (see 'help opt_dff').\n");
 		log("\n");
 		log("The number of rounds that changed something is left in the scratchpad as\n");
 		log("opt_hier.rounds, and opt_hier.saturated is set when the last round found\n");
@@ -532,6 +533,7 @@ struct OptHierPass : Pass {
 
 		int max_iter = 1;
 		bool full = false, purge = false, sat = false;
+		constexpr int max_sat_folds = 16;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-max_iter" && argidx + 1 < args.size()) {
@@ -592,8 +594,9 @@ struct OptHierPass : Pass {
 			// A register opt_dff just folded feeds logic the opt_expr above already passed
 			// over, and that logic can hold another register's D. Both must fold before the
 			// next round, or it sees no constant output and stops. Unsetting the flag here is
-			// safe: rounds > 0, so it is set again once the rounds finish.
-			while (sat) {
+			// safe: rounds > 0, so it is set again once the rounds finish. The cap bounds a
+			// round's cost; a longer chain is left to any later round that rewrites the module.
+			for (int fold = 0; sat && fold < max_sat_folds; fold++) {
 				d->scratchpad_unset("opt.did_something");
 				Pass::call_on_selection(d, sel, "opt_dff -sat");
 				if (!d->scratchpad_get_bool("opt.did_something"))

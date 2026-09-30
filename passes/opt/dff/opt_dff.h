@@ -53,7 +53,7 @@ struct OptDffWorker
 	// modwalker is expensive to build, so share one lazily between constbits and eqbits
 	std::unique_ptr<ModWalker> modwalker_ptr;
 
-	OptDffWorker(const OptDffOptions &opt, Module *mod);
+	OptDffWorker(const OptDffOptions &opt, Module *mod, int64_t sat_effort);
 
 	ModWalker &get_modwalker()
 	{

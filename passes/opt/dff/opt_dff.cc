@@ -29,10 +29,9 @@ USING_YOSYS_NAMESPACE
 
 YOSYS_NAMESPACE_BEGIN
 
-OptDffWorker::OptDffWorker(const OptDffOptions &opt, Module *mod)
-	: opt(opt), module(mod), sigmap(mod), initvals(&sigmap, mod)
+OptDffWorker::OptDffWorker(const OptDffOptions &opt, Module *mod, int64_t sat_effort)
+	: opt(opt), module(mod), sigmap(mod), initvals(&sigmap, mod), sat_budget(sat_effort)
 {
-	sat_budget = SatEffortBudget(module->design->scratchpad_get_int("opt_dff.sat_effort", 1000000000));
 }
 
 void OptDffWorker::remove_ff_bits(Cell *cell, const pool<int> &drop)
@@ -85,6 +84,9 @@ struct OptDffPass : public Pass {
 		log("        the scratchpad option 'opt_dff.sat_effort' (solver propagation steps,\n");
 		log("        default 1000000000, 0 = unlimited) deterministically bounds the total\n");
 		log("        sat effort spent per module, remaining proofs are skipped once exceeded.\n");
+		log("        when 'opt_dff.sat_effort_pool' is set, every module in every later\n");
+		log("        -sat call also draws from that one design-wide pool, which is written\n");
+		log("        back after each call; once it reaches 0, -sat skips its proofs.\n");
 		log("\n");
 		log("    -keepdc\n");
 		log("        some optimizations change the behavior of the circuit with respect to\n");
@@ -123,17 +125,53 @@ struct OptDffPass : public Pass {
 		if (opt.sat && opt.keepdc)
 			log_cmd_error("The -sat and -keepdc options are mutually exclusive.\n");
 
+		// The pool, when set, is shared by every opt_dff -sat call until it is reset, so
+		// the total effort stays bounded however many modules or calls there are
+		const std::string pool_key = "opt_dff.sat_effort_pool";
+		int64_t per_module = design->scratchpad_get_int("opt_dff.sat_effort", 1000000000);
+		bool pooled = opt.sat && design->scratchpad.count(pool_key);
+		int64_t pool = 0;
+		if (pooled) {
+			const std::string &value = design->scratchpad.at(pool_key);
+			char *end = nullptr;
+			pool = strtoll(value.c_str(), &end, 10);
+			if (value.empty() || *end != '\0')
+				log_cmd_error("Scratchpad option '%s' expects an integer, got '%s'.\n", pool_key.c_str(), value.c_str());
+		}
+		int64_t pool_start = pool, spent_total = 0;
+
 		bool did_something = false;
 		for (auto mod : design->selected_modules()) {
-			OptDffWorker worker(opt, mod);
+			// each module draws at most what the pool has left, and an empty pool turns -sat off
+			OptDffOptions mod_opt = opt;
+			int64_t effort = per_module;
+			if (pooled) {
+				mod_opt.sat = pool > 0;
+				effort = per_module > 0 ? std::min(per_module, pool) : pool;
+			}
+			OptDffWorker worker(mod_opt, mod, effort);
 			if (worker.run())
 				did_something = true;
 			// constbits also runs without -sat: it folds bits with all-constant
 			// inputs, -sat additionally proves bits with wire inputs
 			if (worker.run_constbits())
 				did_something = true;
-			if (opt.sat && worker.run_eqbits())
+			if (mod_opt.sat && worker.run_eqbits())
 				did_something = true;
+			if (mod_opt.sat && worker.sat_budget.enabled()) {
+				int64_t spent = worker.sat_budget.total - worker.sat_budget.remaining;
+				spent_total += spent;
+				pool -= spent;
+			}
+		}
+
+		if (spent_total > 0)
+			log("opt_dff -sat: spent %lld solver steps.\n", (long long)spent_total);
+		if (pooled) {
+			if (pool_start > 0 && pool <= 0)
+				log_warning("opt_dff -sat: the design-wide solver effort pool is used up, so later "
+						"-sat calls skip their proofs. Raise the scratchpad option '%s'.\n", pool_key.c_str());
+			design->scratchpad_set_string(pool_key, std::to_string(std::max(pool, (int64_t)0)));
 		}
 
 		if (did_something)
