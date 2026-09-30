@@ -164,20 +164,16 @@ struct RstInitPass : public Pass {
 			for (auto &it : resets)
 				ce.set(it.first, Const(it.second, 1));
 
-			// Evaluate every FF before writing any init, so each sees the same reset cycle
-			std::vector<std::pair<FfData *, Const>> updates;
 			for (auto &ff : ffs) {
 				bool data;
 				Const val = post_reset(ff, data);
 				if (val.is_fully_undef())
 					continue;
-				updates.emplace_back(&ff, val);
 				(data ? from_data : from_reset)++;
+				for (int i = 0; i < ff.width; i++)
+					if (val[i] == State::S0 || val[i] == State::S1)
+						initvals.set_init(ff.sig_q[i], val[i]);
 			}
-			for (auto &it : updates)
-				for (int i = 0; i < it.first->width; i++)
-					if (it.second[i] == State::S0 || it.second[i] == State::S1)
-						initvals.set_init(it.first->sig_q[i], it.second[i]);
 
 			log("Module %s: %d reset(s); %d FF(s) set from reset values, %d from D.\n",
 					log_id(module), GetSize(resets), from_reset, from_data);
