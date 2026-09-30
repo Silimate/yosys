@@ -2678,30 +2678,31 @@ Cell *cone_landing(ConeScan &scan, Cell *cut)
 			movable.insert(cell);
 
 	// A landing is a movable cell with no other movable cell past it on the
-	// way to the cut.
-	std::vector<Cell *> furthest;
-	for (auto cell : queue) {
-		if (!movable.count(cell))
-			continue;
-		bool beyond = false;
-		pool<Cell *> seen;
-		std::vector<Cell *> walk = {cell};
-		seen.insert(cell);
-		for (int i = 0; i < GetSize(walk) && !beyond; i++) {
-			next_cells(walk[i]->getPort(ID::Y), step);
-			for (auto next : step) {
-				if (!down.count(next) || !seen.insert(next).second)
-					continue;
-				if (movable.count(next)) {
-					beyond = true;
-					break;
-				}
-				walk.push_back(next);
+	// way to the cut. Whether one lies past a cell is remembered per cell, so
+	// the question is answered once for each cell rather than once for each
+	// movable cell behind it. A cell met again while its own answer is still
+	// being worked out is on a loop, which has nothing movable past it.
+	dict<Cell *, int> past;
+	std::function<bool(Cell *)> movable_past = [&](Cell *cell) {
+		auto it = past.find(cell);
+		if (it != past.end())
+			return it->second == 2;
+		past[cell] = 0;
+		std::vector<Cell *> nexts;
+		next_cells(cell->getPort(ID::Y), nexts);
+		bool found = false;
+		for (auto next : nexts)
+			if (down.count(next) && (movable.count(next) || movable_past(next))) {
+				found = true;
+				break;
 			}
-		}
-		if (!beyond)
+		past[cell] = found ? 2 : 1;
+		return found;
+	};
+	std::vector<Cell *> furthest;
+	for (auto cell : queue)
+		if (movable.count(cell) && !movable_past(cell))
 			furthest.push_back(cell);
-	}
 	if (furthest.empty())
 		refuse("%s", scan.why.at(cut));
 	if (GetSize(furthest) > 1) {
