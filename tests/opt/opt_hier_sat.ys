@@ -3,16 +3,18 @@
 
 # `r` resets to 2 and loads `nxt`, a hold mux that also leaves the module, so opt_dff
 # cannot pull an enable out of it. Once d[2] arrives as 0, r[2] loads either 0 or
-# itself: stuck at its reset value, but only provably so by induction.
+# itself: stuck at its reset value, but only provably so by induction. `hi` reads r[2]
+# through a gate, so it is only a constant output once that gate folds as well.
 read_verilog <<EOT
-module leaf(input clk, input rst, input en, input [2:0] d, output [2:0] q, output [2:0] nxt);
+module leaf(input clk, input rst, input en, input x, input [2:0] d, output [2:0] q, output [2:0] nxt, output hi);
 	reg [2:0] r;
 	assign nxt = en ? d : r;
 	always @(posedge clk) r <= rst ? 3'd2 : nxt;
 	assign q = r;
+	assign hi = r[2] & x;
 endmodule
-module top(input clk, input rst, input en, input [1:0] d, output [2:0] q, output [2:0] nxt);
-	leaf u(.clk(clk), .rst(rst), .en(en), .d({1'b0, d}), .q(q), .nxt(nxt));
+module top(input clk, input rst, input en, input x, input [1:0] d, output [2:0] q, output [2:0] nxt, output hi);
+	leaf u(.clk(clk), .rst(rst), .en(en), .x(x), .d({1'b0, d}), .q(q), .nxt(nxt), .hi(hi));
 endmodule
 EOT
 hierarchy -top top
@@ -25,10 +27,11 @@ design -save start
 opt_hier -max_iter 0
 select -assert-count 1 leaf/t:$sdff r:WIDTH=3 %i
 
-# With -sat it folds, and the next round carries the constant back out through q[2].
+# With -sat it folds, and the next round carries the constant back out through both
+# q[2] and hi.
 design -load start
 logger -expect log "Setting constant 0-bit at position 2 on .* from module leaf" 1
-logger -expect log "Substituting constant for 1 output bits of instance 'u'" 1
+logger -expect log "Substituting constant for 1 output bits of instance 'u'" 2
 opt_hier -max_iter 0 -sat
 logger -check-expected
 select -assert-count 1 leaf/t:$sdff r:WIDTH=2 %i
