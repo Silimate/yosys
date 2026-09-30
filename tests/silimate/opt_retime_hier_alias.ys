@@ -1,0 +1,155 @@
+# Crossings where the net at the boundary has a second name on the far side.
+#
+# A crossing is written as "free the port net for the register and point
+# everything that used to use it at a fresh one". That sentence reads the
+# child's sigmap groups as sets of users, and a sigmap group is not that: it
+# is a set of names for one value, and some of those names are ports.
+#
+# Inside the child, `assign z = x` puts two wires in one group, so "everything
+# that used to use x" includes z - and z is a port. A port is not a user that
+# can be pointed elsewhere and forgotten: it is an interface this module still
+# has to drive. Rewriting both ends of that connection onto the fresh net
+# leaves `z = z`, which is not a connection, and dropping it takes z's driver
+# away. The register lands, the move reports success, and an output of the
+# child is dark - a changed circuit rather than a refused move, which is the
+# one outcome this pass has no way to report.
+#
+# So every other port in the group keeps its own name, and the connection that
+# already joins it to the freed net is what hands it the new value. Both
+# directions need it, and they fail differently: crossing in on an input port
+# strands an output of the child, crossing in on an output port strands the
+# register's own D.
+#
+# Proved with a miter and not only with counts. An undriven output reads as x,
+# and x is what a structural assertion cannot tell from the value that belongs
+# there.
+#
+# hierarchy -top is mandatory here as everywhere in these files: without it an
+# instance type is not a module of the design and the boundary is invisible.
+# Every register carries an init, so that the two sides of a miter start from
+# the same state and a sequential proof says something about cycle 0.
+# ---------------------------------------------------------------------------
+# z is the whole of the child's second output and x is its input, and the
+# register crosses in on x. So z has to carry the registered value afterwards,
+# which is what it carried before: from outside, z was the flop's Q.
+log -header "Forward into a child whose output is tied straight to its input"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module alias_in (clk, x, y, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] y, z;
+  assign z = x;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) k_not (.A(x), .Y(y));
+endmodule
+module top (clk, a, o1, o2);
+  input clk;
+  input [7:0] a;
+  output [7:0] o1, o2;
+  (* init = 8'h00 *) wire [7:0] q;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(q));
+  alias_in u (.clk(clk), .x(q), .y(o1), .z(o2));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+select -assert-count 1 t:$dff
+design -save orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+opt_retime -flop f1 -cut u -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+scratchpad -assert opt_retime.moved_from top
+scratchpad -assert opt_retime.moved_to alias_in
+check -assert
+
+# The register landed on the port net, and the inverter reads the fresh one.
+select -assert-count 1 t:$dff
+select -assert-count 1 alias_in/c:f1 %x:+[D] alias_in/w:x %i
+select -assert-count 1 alias_in/c:f1 %x:+[Q] alias_in/w:x_q %i
+select -assert-count 1 alias_in/c:k_not %x:+[A] alias_in/w:x_q %i
+# So does z, which kept its own name rather than collapsing into x_q: the
+# connection that joined it to the port net now joins it to the register's Q.
+select -assert-count 1 alias_in/w:z %ci alias_in/w:x_q %i
+
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The same group the other way round: the port the register crosses is the one
+# the connection drives, and the input port feeding it is the wire that must
+# not be redirected. Redirecting both ends here strands the register's own D
+# rather than an output, and the child computes from nothing.
+log -header "Backward into a child whose output is tied straight to its input"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module alias_out (clk, x, w, y, z);
+  input clk;
+  input [7:0] x, w;
+  output [7:0] y, z;
+  assign y = x;
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    k_xor (.A(w), .B(8'h0f), .Y(z));
+endmodule
+module top (clk, a, b, o1, o2);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] o1, o2;
+  wire [7:0] m;
+  (* init = 8'h00 *) wire [7:0] q;
+  alias_out u (.clk(clk), .x(a), .w(b), .y(m), .z(o2));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(m), .Q(q));
+  $buf #(.WIDTH(8)) t1 (.A(q), .Y(o1));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+select -assert-count 1 t:$dff
+design -save orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+opt_retime -flop f1 -cut u -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+scratchpad -assert opt_retime.moved_to alias_out
+check -assert
+
+select -assert-count 1 t:$dff
+select -assert-count 1 alias_out/c:f1 %x:+[D] alias_out/w:y_pre %i
+select -assert-count 1 alias_out/c:f1 %x:+[Q] alias_out/w:y %i
+# y_pre is what the input port drives now, which is the whole of the fix: the
+# connection that used to drive the output port drives the register instead.
+select -assert-count 1 alias_out/w:y_pre %ci alias_out/w:x %i
+# The other output has nothing to do with this boundary and is untouched.
+select -assert-count 1 alias_out/c:k_xor %x:+[Y] alias_out/w:z %i
+
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+

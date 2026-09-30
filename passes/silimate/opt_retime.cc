@@ -3225,15 +3225,31 @@ void resolve_controls(const dict<SigBit, SigBit> &map, SigMap &sigmap,
 // wire and an output port tied straight to an input port is a connection
 // rather than a cell. Substituting only cells would leave that alias behind,
 // reading the net the register is about to take over.
+//
+// Every other port of `mod` in the same sigmap group keeps its own name. Two
+// wires are in one group because a connection joins them, and one of those
+// wires being a port means the group is an interface of this module as well
+// as a net inside it. Rewriting both ends of `assign z = x` to the new net
+// leaves `z = z`, which is not a connection, and dropping it takes the driver
+// off an output port - the register lands and the port goes dark. So the
+// substitution stops at a port that is not the net being freed, and the
+// connection that already joins them is what hands it the new value.
 void steal_net(Module *mod, SigMap &sigmap, const SigSpec &from, const SigSpec &to)
 {
 	dict<SigBit, SigBit> subst;
-	for (int i = 0; i < GetSize(from); i++)
+	pool<SigBit> freed;
+	for (int i = 0; i < GetSize(from); i++) {
 		subst[sigmap(from[i])] = to[i];
+		freed.insert(from[i]);
+	}
 
 	auto fix = [&](const SigSpec &sig, bool &changed) {
 		SigSpec out;
 		for (auto bit : sig) {
+			if (bit.is_wire() && bit.wire->port_id != 0 && !freed.count(bit)) {
+				out.append(bit);
+				continue;
+			}
 			auto it = subst.find(sigmap(bit));
 			if (it == subst.end()) {
 				out.append(bit);
@@ -3262,8 +3278,10 @@ void steal_net(Module *mod, SigMap &sigmap, const SigSpec &from, const SigSpec &
 		bool changed = false;
 		SigSpec lhs = fix(conn.first, changed);
 		SigSpec rhs = fix(conn.second, changed);
-		// An alias of the net being freed collapses to a self-connection,
-		// which is not a connection.
+		// An internal alias of the net being freed collapses to a
+		// self-connection, which is not a connection: the wire simply goes
+		// dead, every reader of it having been pointed at the new net above.
+		// A port never lands here, having kept its own name.
 		if (lhs == rhs)
 			continue;
 		conns.emplace_back(lhs, rhs);
