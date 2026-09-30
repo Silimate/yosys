@@ -662,6 +662,10 @@ struct OptAddCmpWorker : UnitDelayTiming
 			plan_sums = saved_sums;
 			plan_muxes = saved_muxes;
 		}
+		// lin_add checks the cap before opening an add, not after its operands
+		// land, so a deep chain can still overshoot it by the chain's depth
+		if (GetSize(L.terms) > max_decode_terms)
+			return -1;
 		if (!L.terms.empty() && ++plan_banks > max_decode_leaves)
 			return -1;
 		if (GetSize(L.terms) >= 2)

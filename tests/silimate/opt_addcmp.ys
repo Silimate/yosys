@@ -625,6 +625,22 @@ design -reset
 log -pop
 
 # ---------------------------------------------------------------------------
+log -header "Decode negative: more summands than one bank takes"
+log -push
+design -reset
+read_verilog -sv <<EOF
+module ac(input [2:0] a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, output [127:0] y);
+  wire [6:0] s = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9;
+  assign y = 128'h1 << s;
+endmodule
+EOF
+proc; opt_clean
+opt_addcmp -decode
+select -assert-count 1 t:$shl
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
 log -header "Decode negative: one live output is a single sum == k"
 log -push
 design -reset
