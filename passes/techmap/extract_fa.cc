@@ -86,8 +86,9 @@ struct ExtractFaWorker
 		for (auto cell : module->selected_cells())
 		{
 			// SILIMATE: a one-bit word cell, as abc -word returns, is a gate like any other
-			bool bit_cell = cell->type.in(ID($not), ID($and), ID($or), ID($xor), ID($mux)) &&
-					GetSize(cell->getPort(ID::Y)) == 1 && GetSize(cell->getPort(ID::A)) == 1;
+			bool bit_cell = cell->type.in(ID($not), ID($and), ID($or), ID($xor)) &&
+					GetSize(cell->getPort(ID::Y)) == 1 && GetSize(cell->getPort(ID::A)) == 1 &&
+					(!cell->hasPort(ID::B) || GetSize(cell->getPort(ID::B)) == 1);
 			if (bit_cell || cell->type.in( ID($_BUF_), ID($_NOT_), ID($_AND_), ID($_NAND_), ID($_OR_), ID($_NOR_),
 					ID($_XOR_), ID($_XNOR_), ID($_ANDNOT_), ID($_ORNOT_), ID($_MUX_), ID($_NMUX_),
 					ID($_AOI3_), ID($_OAI3_), ID($_AOI4_), ID($_OAI4_)))
