@@ -47,6 +47,10 @@ struct RstInitPass : public Pass {
 		log("unknown inputs and FF outputs set to x, so a reset folded into the D logic\n");
 		log("(e.g. q <= ~(rst ? 1'b0 : d)) is found as well.\n");
 		log("\n");
+		log("A reset driven through inverters or buffers is asserted at its source, so\n");
+		log("rst and ~rst are never both held active. A source that some FFs reset on\n");
+		log("high and others on low is not asserted, with a warning.\n");
+		log("\n");
 		log("Bits that stay undefined keep their current init value; a defined\n");
 		log("post-reset value replaces any declared one. Modules without reset controls\n");
 		log("are left unchanged.\n");
@@ -133,12 +137,36 @@ struct RstInitPass : public Pass {
 				if (cell->is_builtin_ff())
 					ffs.emplace_back(&initvals, cell);
 
+			// Inverters and buffers, so resets derived from one another (rst, ~rst) are
+			// asserted through their common source rather than forced independently
+			dict<SigBit, std::pair<SigBit, bool>> drivers; // output -> (input, inverted)
+			for (auto cell : module->cells()) {
+				bool inv = cell->type.in(ID($_NOT_), ID($not), ID($logic_not), ID($reduce_xnor));
+				bool bitwise = cell->type.in(ID($_NOT_), ID($not), ID($_BUF_), ID($buf), ID($pos));
+				if (!inv && !bitwise &&
+						!cell->type.in(ID($reduce_and), ID($reduce_or), ID($reduce_xor), ID($reduce_bool)))
+					continue;
+				SigSpec a = sigmap(cell->getPort(ID::A)), y = sigmap(cell->getPort(ID::Y));
+				if (!bitwise) { // a 1-bit reduction or logic_not is a buffer or inverter
+					if (GetSize(a) == 1)
+						drivers[y[0]] = {a[0], inv};
+					continue;
+				}
+				for (int i = 0; i < GetSize(y) && i < GetSize(a); i++)
+					drivers[y[i]] = {a[i], inv};
+			}
+
 			// SET/CLR are left out: proc builds them from reset and data (rst & d), so
 			// forcing them active would assert set and clear together
 			dict<SigBit, State> resets;
 			pool<SigBit> conflicting;
 			auto add = [&](const SigSpec &sig, bool pol) {
 				SigBit bit = sigmap(sig[0]);
+				pool<SigBit> seen;
+				while (drivers.count(bit) && seen.insert(bit).second) {
+					pol ^= drivers.at(bit).second;
+					bit = drivers.at(bit).first;
+				}
 				if (!bit.wire)
 					return;
 				State level = pol ? State::S1 : State::S0;
