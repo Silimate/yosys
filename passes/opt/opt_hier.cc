@@ -510,6 +510,12 @@ struct OptHierPass : Pass {
 		log("    -purge\n");
 		log("        call opt_clean with -purge between rounds.\n");
 		log("\n");
+		log("    -sat\n");
+		log("        call opt_dff with -sat between rounds. A register that loads an input\n");
+		log("        which just became constant, but also feeds its own D (a hold mux shared\n");
+		log("        with other logic, or an enable folded into the D cone), is only stuck\n");
+		log("        at that constant by induction, which plain opt_dff cannot prove.\n");
+		log("\n");
 		log("The number of rounds that changed something is left in the scratchpad as\n");
 		log("opt_hier.rounds, and opt_hier.saturated is set when the last round found\n");
 		log("nothing left to change.\n");
@@ -522,7 +528,7 @@ struct OptHierPass : Pass {
 		log_header(d, "Executing OPT_HIER pass.\n");
 
 		int max_iter = 1;
-		bool full = false, purge = false;
+		bool full = false, purge = false, sat = false;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-max_iter" && argidx + 1 < args.size()) {
@@ -543,6 +549,10 @@ struct OptHierPass : Pass {
 			}
 			if (args[argidx] == "-purge") {
 				purge = true;
+				continue;
+			}
+			if (args[argidx] == "-sat") {
+				sat = true;
 				continue;
 			}
 			break;
@@ -573,7 +583,7 @@ struct OptHierPass : Pass {
 			for (auto module : changed)
 				sel.select(module);
 			Pass::call_on_selection(d, sel, full ? "opt_expr -full" : "opt_expr");
-			Pass::call_on_selection(d, sel, "opt_dff");
+			Pass::call_on_selection(d, sel, sat ? "opt_dff -sat" : "opt_dff");
 			Pass::call_on_selection(d, sel, purge ? "opt_clean -purge" : "opt_clean");
 		}
 
