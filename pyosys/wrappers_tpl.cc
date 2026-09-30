@@ -188,13 +188,13 @@ namespace pyosys {
 
 		// Logging Methods
 		m.def("log_header", [](Design *d, std::string s) { logger().formatted_header(d, "%s", s); });
-		m.def("log", [](std::string s) { logger().formatted_string(LogSeverity::Info, {}, "%s", s); });
-		m.def("log_file_info", [](std::string_view file, int line, std::string s) { logger().formatted_file_info(file, line, "%s", s); });
-		m.def("log_warning", [](std::string s) { logger().formatted_warning("Warning: ", "%s", s); });
-		m.def("log_warning_noprefix", [](std::string s) { logger().formatted_warning("", "%s", s); });
-		m.def("log_file_warning", [](std::string_view file, int line, std::string s) { logger().formatted_file_warning(file, line, "%s", s); });
-		m.def("log_error", [](std::string s) { logger().formatted_error("%s", s); });
-		m.def("log_file_error", [](std::string_view file, int line, std::string s) { logger().formatted_file_error(file, line, "%s", s); });
+		m.def("log", [](std::string s) { logger().formatted_string(LogSeverity::Info, LogSourceLocation{}, {}, "%s", s); });
+		m.def("log_file_info", [](std::string file, int line, std::string s) { logger().formatted_string(LogSeverity::Info, LogSourceLocation(file,line), "Info: ", "%s", s); });
+		m.def("log_warning", [](std::string s) { logger().formatted_warning(LogSourceLocation{}, "Warning: ", "%s", s); });
+		m.def("log_warning_noprefix", [](std::string s) { logger().formatted_warning(LogSourceLocation{}, "", "%s", s); });
+		m.def("log_file_warning", [](std::string file, int line, std::string s) { logger().formatted_warning(LogSourceLocation(file,line), "Warning: ", "%s", s); });
+		m.def("log_error", [](std::string s) { logger().formatted_error(LogSourceLocation{}, "ERROR: ", "%s", s); });
+		m.def("log_file_error", [](std::string file, int line, std::string s) { logger().formatted_error(LogSourceLocation(file,line), "ERROR: ", "%s", s); });
 		m.def("log_to_stream", &log_to_stream);
 
 		// Namespace to host global objects
