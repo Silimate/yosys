@@ -1,0 +1,395 @@
+# Cross-module moves opt_retime will not make, and what is left behind when it
+# will not make them.
+#
+# A refusal at a boundary has more to be careful about than a flat one. The
+# move rewrites two modules and an instance site, and a move across two
+# boundaries can succeed at the first and refuse at the second, so "the design
+# is as it was" is a claim about three places rather than one. It holds the
+# same way it holds for a flat move - every question is asked before the first
+# cell is touched - with one addition: a crossing is rehearsed on a copy of the
+# whole design, because the copy is the only thing that can put back a register
+# that has already been rebuilt one module over.
+#
+# Every section asserts the netlist in every module the move would have
+# reached, not only the one the flop is in.
+#
+# The markers matter as much as the sentences. A driver sweeping candidate
+# moves sorts by marker, so a boundary that reports "invalid request" sends it
+# looking for a bad request when the request was fine, and one that carries no
+# marker stops the search altogether.
+#
+# Only the blackbox carries no marker here. Everything else is a move that
+# exists in a form this pass does not write, and each reason says which form:
+# "unsupported" where the logic crosses the boundary and the register stays
+# put, "unsupported, needs extra logic" where the destination holds no state
+# and the registers sit in front of the instance instead, one per net. The
+# three that used to be unmarked are the finding of
+# opt_retime_hier_differential.ys, which proves the alternative in each case.
+# None of that changes what the pass does: every refusal below is still a
+# refusal, and the netlist assertions under it are unchanged.
+
+# ---------------------------------------------------------------------------
+# A move edits a module body, and every instance of that module shares it. So
+# making this move makes it at u2 as well, where nobody asked for it and where
+# the register in front of the instance has not moved to match.
+log -header "Refused: the destination module has more than one instance site"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module leaf (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) l_not (.A(x), .Y(z));
+endmodule
+module top (clk, a, b, out1, out2);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] out1, out2;
+  wire [7:0] q1, q2;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(q1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f2 (.CLK(clk), .D(b), .Q(q2));
+  leaf u1 (.clk(clk), .x(q1), .z(out1));
+  leaf u2 (.clk(clk), .x(q2), .z(out2));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+opt_retime -flop f1 -cut u1 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Module leaf has 2 instance sites and opt_retime would be moving a register at every one of them, having only the one body to edit. Uniquify first (unsupported)."
+scratchpad -assert-unset opt.did_something
+
+# The same answer when the cut is a cell inside the shared body, which is the
+# form a driver reading a timing report would ask in.
+opt_retime -flop f1 -cut l_not -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Module leaf has 2 instance sites and opt_retime would be moving a register at every one of them, having only the one body to edit. Uniquify first (unsupported)."
+
+select -assert-count 2 t:$dff
+select -assert-count 1 top/c:f1 %x:+[Q] top/w:q1 %i
+select -assert-count 1 top/c:f2 %x:+[Q] top/w:q2 %i
+select -assert-count 1 top/c:u1 %x:+[x] top/w:q1 %i
+select -assert-count 1 top/c:u2 %x:+[x] top/w:q2 %i
+select -assert-count 1 leaf/c:l_not %x:+[A] leaf/w:x %i
+select -assert-count 1 leaf/c:l_not %x:+[Y] leaf/w:z %i
+select -assert-count 0 leaf/t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A cell reading the net the register vacates gets a port punched for it, and
+# keeps the value it had. A module output does not: it is the interface, and
+# handing it the old value would mean the latency through top is unchanged
+# only if something outside top compensates. Nothing here knows whether
+# anything does, so the answer is no rather than a guess.
+log -header "Refused: the vacated net drives an output of the module too"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module kid (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) k_not (.A(x), .Y(z));
+endmodule
+module top (clk, a, out1, out2);
+  input clk;
+  input [7:0] a;
+  output [7:0] out1, out2;
+  kid u (.clk(clk), .x(a), .z(out2));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(out2), .Q(out1));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+opt_retime -flop f1 -cut u -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Net \out2 drives an output of top as well as flop f1, so moving the register across the u boundary would change what that output is worth on every cycle (unsupported)."
+scratchpad -assert-unset opt.did_something
+scratchpad -assert-unset opt_retime.moved_from
+scratchpad -assert-unset opt_retime.moved_to
+select -assert-count 1 t:$dff
+select -assert-count 1 top/c:f1 %x:+[D] top/w:out2 %i
+select -assert-count 1 top/c:u %x:+[z] top/w:out2 %i
+select -assert-count 1 kid/c:k_not %x:+[Y] kid/w:z %i
+select -assert-count 0 kid/t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# FfData::emit writes the register's init onto its Q net, and the next time
+# FfInitVals is built over a module whose sigmap group holds two different
+# init values it calls log_error. So a landing net that already carries one is
+# a hard crash a command later rather than a wrong answer here, and it has to
+# be caught before anything is touched.
+#
+# Load-bearing and not final, which is the distinction the marker carries: the
+# check is about a net that has an attribute, not about whether the retiming
+# exists. hier_src holds no state, so the registers can sit in front of the
+# instance and nothing lands on \y at all.
+log -header "Refused: the landing net already has an init of its own"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+setattr -set init 8'h55 hier_src/w:y
+select -clear
+check -assert
+opt_retime -flop f1 -cut u_src -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Net \y in hier_src starts at 8'01010101 and flop f1 would land on it starting at 8'00000000, and a net cannot hold two initial values. The same retiming is one register on each input of instance u_src in top, which leaves hier_src as it is since it holds no state, and lands no register on \y (unsupported, needs extra logic)."
+scratchpad -assert-unset opt.did_something
+select -assert-count 1 t:$dff
+select -assert-count 1 top/c:f1 %x:+[D] top/w:mid %i
+select -assert-count 1 top/w:midq a:init=8'h00 %i
+select -assert-count 1 hier_src/w:y a:init=8'h55 %i
+select -assert-count 1 hier_src/c:add_s %x:+[Y] hier_src/w:y %i
+select -assert-count 0 hier_src/t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A register is its clock as much as it is its D and Q. sig_clk is a signal of
+# the module the register is in, and moving the register somewhere that net
+# does not exist is not a move with a gap in it - it is not the same register.
+#
+# Punching a clock port would be building a clock tree, which is not retiming,
+# and generating the gated clock a second time in the parent would be
+# duplicating the gate. So the register does not go there, on either of these.
+#
+# The move does, and the two go differently, which is why the markers differ.
+# noclk holds no state, so registering both inputs of the instance is the same
+# circuit as registering its output and the child is not touched at all - a
+# register more than there was, hence "needs extra logic". The gated one has no
+# such form, because gater does hold state; what it has is the logic moving
+# into gater and sitting behind the register that never moves, which builds
+# nothing. Both are proved in opt_retime_hier_differential.ys.
+log -header "Refused: the destination has no clock"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module noclk (a, b, y);
+  input [7:0] a, b;
+  output [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    n_add (.A(a), .B(b), .Y(y));
+endmodule
+module top (clk, a, b, out);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] out;
+  wire [7:0] mid;
+  noclk u (.a(a), .b(b), .y(mid));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(mid), .Q(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+opt_retime -flop f1 -cut u -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop f1 takes its clock from \clk, which is not a net of noclk, so the register cannot be clocked there. The same retiming is one register on each input of instance u in top, which leaves noclk as it is since it holds no state (unsupported, needs extra logic)."
+scratchpad -assert-unset opt.did_something
+select -assert-count 1 t:$dff
+select -assert-count 1 top/c:f1 %x:+[D] top/w:mid %i
+select -assert-count 1 noclk/c:n_add %x:+[Y] noclk/w:y %i
+select -assert-count 0 noclk/t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The harder one, and the reason the check is existence rather than
+# reachability: the clock is generated inside the child. gated is an $icg
+# output, so there is no net in top that carries it, and there is nothing for
+# the resolver to find however far it looks.
+log -header "Refused: the clock is gated inside the child, so the parent has none"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module gater (clk, en, x, y);
+  input clk, en;
+  input [7:0] x;
+  output [7:0] y;
+  wire gated;
+  $icg g0 (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(gated));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(gated), .D(x), .Q(y));
+endmodule
+module top (clk, en, a, out);
+  input clk, en;
+  input [7:0] a;
+  output [7:0] out;
+  gater u (.clk(clk), .en(en), .x(a), .y(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+opt_retime -flop fg -cut u -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fg takes its clock from \gated, which is not a net of top, so the register cannot be clocked there. The same retiming is the logic moved across the u boundary with the register left in gater (unsupported)."
+scratchpad -assert-unset opt.did_something
+select -assert-count 1 t:$dff
+select -assert-count 1 t:$icg
+select -assert-count 1 gater/c:fg %x:+[CLK] gater/w:gated %i
+select -assert-count 1 gater/c:fg %x:+[D] gater/w:x %i
+select -assert-count 0 top/t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A blackbox is a port list with nothing behind it. Before crossings existed
+# this came back as a missing cell Y, which reads as a malformed request;
+# saying so directly is the difference between a driver retrying with a
+# different cut and a driver retrying with the same one.
+log -header "Refused: the boundary module is a blackbox"
+log -push
+design -reset
+read_verilog -icells <<EOF
+(* blackbox *)
+module bb (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+endmodule
+module top (clk, a, out);
+  input clk;
+  input [7:0] a;
+  output [7:0] out;
+  wire [7:0] q;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(q));
+  bb u (.clk(clk), .x(q), .z(out));
+endmodule
+EOF
+hierarchy -top top
+opt_retime -flop f1 -cut u -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Module bb is a blackbox, so it has no body for flop f1 to move into."
+scratchpad -assert-unset opt.did_something
+select -assert-count 1 t:$dff
+select -assert-count 1 top/c:f1 %x:+[Q] top/w:q %i
+select -assert-count 1 top/c:u %x:+[x] top/w:q %i
+select -assert-count 0 bb/c:*
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# -all-fanouts finds the sibling registers by their shared D net and then
+# re-derives the move at each one by replaying the route to the cut as a list
+# of port names. That replay is a walk inside one module; across a boundary
+# the route would have to name the instance ports it passes through too, and
+# it does not.
+log -header "Refused: -all-fanouts on a move that crosses a boundary"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+opt_retime -flop f1 -cut u_src -backward -all-fanouts
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "-all-fanouts replays the route to the cut as port names within one module, so it cannot widen a move that crosses the boundary at u_src (unsupported)."
+scratchpad -assert-unset opt.did_something
+select -assert-count 1 t:$dff
+select -assert-count 1 top/c:f1 %x:+[D] top/w:mid %i
+select -assert-count 1 hier_src/c:add_s %x:+[Y] hier_src/w:y %i
+select -assert-count 0 hier_src/t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The path leaves top through u_src and comes back, so the cut and the flop
+# are in the same module with a boundary between them. A crossing is not what
+# is missing: the register would have to cross into hier_src, move across the
+# adder, and cross back out, and the chain walk that finds a path is still one
+# module wide. Refused where the walk gives out, and the message says where.
+#
+# This is the marker that had to change. Before crossings existed the walk
+# reported no unique cell Y and called the request invalid, which tells a
+# driver the two cells do not name a move - they do. It is a gap in the pass,
+# so it is "unsupported", and a driver sorting by marker now sorts it with
+# the other gaps instead of with the malformed requests.
+log -header "Refused: the path leaves the module and comes back"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+opt_retime -flop f1 -cut xor_t -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "The before-path of flop f1 leaves top at port y of instance u_src, and opt_retime follows a chain within one module (unsupported)."
+scratchpad -assert-unset opt.did_something
+select -assert-count 1 t:$dff
+select -assert-count 1 top/c:f1 %x:+[D] top/w:mid %i
+select -assert-count 1 top/c:xor_t %x:+[Y] top/w:pre %i
+select -assert-count 1 top/c:u_src %x:+[a] top/w:pre %i
+select -assert-count 0 hier_src/t:$dff
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The case the whole-design rehearsal is for. The move is out of sib_a, across
+# top, into sib_b, and sib_b has no clock, so the second crossing refuses with
+# the first already made - on the copy. What the caller is left with is the
+# design it started with, in all three modules.
+#
+# Without the rehearsal this section finds fa sitting in top: correct as a
+# netlist, and a move nobody asked for.
+log -header "Refused at the second boundary: nothing left behind at the first"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module sib_a (clk, x, y);
+  input clk;
+  input [7:0] x;
+  output [7:0] y;
+  wire [7:0] t;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a_add (.A(x), .B(8'h03), .Y(t));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(t), .Q(y));
+endmodule
+module sib_b (p, q);
+  input [7:0] p;
+  output [7:0] q;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) b_not (.A(p), .Y(q));
+endmodule
+module top (clk, a, out);
+  input clk;
+  input [7:0] a;
+  output [7:0] out;
+  wire [7:0] m;
+  sib_a u_a (.clk(clk), .x(a), .y(m));
+  sib_b u_b (.p(m), .q(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+design -save orig
+opt_retime -flop fa -cut b_not -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fa takes its clock from \clk, which is not a net of sib_b, so the register cannot be clocked there. The same retiming is one register on each output of instance u_b in top, which leaves sib_b as it is since it holds no state (unsupported, needs extra logic)."
+scratchpad -assert-unset opt.did_something
+check -assert
+
+# sib_a still owns the register, and it still drives the output port ...
+select -assert-count 1 t:$dff
+select -assert-count 1 sib_a/c:fa %x:+[D] sib_a/w:t %i
+select -assert-count 1 sib_a/c:fa %x:+[Q] sib_a/w:y %i
+select -assert-count 1 sib_a/c:a_add %x:+[Y] sib_a/w:t %i
+# ... top has no register and no fresh net on the instance connection ...
+select -assert-count 0 top/t:$dff
+select -assert-count 1 top/c:u_a %x:+[y] top/w:m %i
+select -assert-count 1 top/c:u_b %x:+[p] top/w:m %i
+select -assert-count 4 top/w:* %a
+# ... and sib_b never heard about it
+select -assert-count 1 sib_b/c:b_not %x:+[A] sib_b/w:p %i
+select -assert-count 2 sib_b/w:* %a
+
+# and it is still the design that was read in
+rename top gate
+flatten gate
+design -import orig -as gold
+flatten gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 6 -set-init-zero -prove-asserts -verify
+design -reset
+log -pop

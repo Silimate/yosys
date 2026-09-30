@@ -1,0 +1,1120 @@
+# Native cross-module moves against the flatten oracle: same request, both ways.
+#
+# opt_retime_hier.ys asserts what the native crossing builds, cell by cell, and
+# proves it. opt_retime_hier_oracle.ys does the same for flatten-then-retime.
+# Each is right about itself and neither says anything about the other. This
+# file runs one request through both and compares the answers, which is the only
+# way to tell a crossing that is correct from a crossing that is correct and
+# also the move that was asked for.
+#
+# The comparison is between the two *results*, not between each result and the
+# original. Both paths already prove against the original in their own files, so
+# proving that again here would pass on two implementations that had drifted
+# into making different legal moves. gold is the native netlist, flattened after
+# the fact; gate is the flat netlist the oracle produced. Same ports, so the
+# miter is the ordinary one.
+#
+# The miter on its own would not be enough, and it is worth being precise about
+# why. Any two correct retimings of one design are equivalent to each other -
+# that is what makes retiming retiming - so a proof that the two results agree
+# says both paths made *a* correct move, never that they made the *same* one.
+# Deleting the oracle's opt_retime call entirely still passes the miter in the
+# first section, which was checked rather than argued.
+#
+# So each section carries three claims and needs all three. The flop count and
+# the cell census say the two results are the same size. Two selections say the
+# register is in the same place: which cell drives its D and which reads its Q,
+# named by cell rather than by net, because flattening gives the combinational
+# cells the same names on both paths and only the flop's own name differs. And
+# the miter says the place they agree on is the right one. Dropping the oracle's
+# move, or pointing it at a different cut, fails the position assertions; a
+# wrong netlist fails the miter.
+#
+# Hop counts in those selections are not uniform, and the reason is worth
+# knowing: flatten leaves an instance-port net as an alias of the parent net
+# rather than merging the two, so a register whose D or Q crossed a boundary
+# sits one hop further back than one that did not. The depths are commented
+# where they differ.
+#
+# "The same request" needs one qualification. A request is a flop and a cut
+# cell, and flattening renames cells: inv_d inside hier_dst becomes u_dst.inv_d
+# in top. So the two paths spell the same cut differently and there is no way
+# around that. Every section below names the same physical cell twice.
+#
+# What the harness found, stated up front because the refusal sections are the
+# reason this file is worth having:
+#
+#   - Where the oracle can express the request and the native pass accepts it,
+#     the two agree, and not merely up to equivalence: same flop count, same
+#     retiming, proved. Seven shapes below.
+#   - The oracle cannot express a pure crossing at all - a move whose cut is the
+#     instance, which relocates the register and touches no logic. Flattening
+#     deletes the boundary, and with it the only thing that move does. Asking
+#     anyway is a hard error rather than a refusal; the last section pins it.
+#   - The oracle never refuses a cross-module move. All seven cross-module
+#     refusals the pass can make and the oracle can be asked about - which is
+#     every one in opt_retime_hier_refusal.ys except the blackbox, where there
+#     is nothing to flatten - are cases the oracle accepts, and the result it
+#     produces is correct; each one is proved below. So the oracle is an oracle
+#     for acceptance and for what the answer should be, and is worthless as an
+#     oracle for refusal. It answers "is there a retiming here", and the pass is
+#     answering "is there a retiming here that survives being written back as
+#     hierarchical RTL", which is a strictly smaller question.
+#
+# That last point is the one to carry forward. A driver must not treat a
+# flatten-then-retime result as evidence that the native pass is being too
+# conservative, because for four of the seven refusals it is not conservatism at
+# all - it is hierarchy holding a constraint that flattening threw away.
+#
+# Three of those four used to carry no marker at all, which by the convention
+# means the answer is no rather than not yet, and all three turn out to have a
+# move: a register can cross into a module with no clock as long as it stops in
+# front of the instance instead of inside it; a gated clock the parent cannot
+# see stops mattering once the logic moves instead of the register; and the init
+# a landing net already carries can be inert. That was this file's finding and
+# the pass has since been corrected to it. None of it changed what the pass does
+# - the refusals are right about the form it produces, and every one of them is
+# still a refusal - but a driver sorting candidates by marker reads an unmarked
+# refusal as the end of the search, and for these three it is not. Each now
+# carries a marker and a sentence naming the form that does exist, and the
+# assertions below pin both.
+
+# ---------------------------------------------------------------------------
+# Part 1: requests both paths can express.
+#
+# Seven shapes: the four ways a crossing can go, plus the three things that can
+# happen on top of one - two boundaries in a row, a resize on landing, and a
+# reader left behind on the vacated net.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# The shape the handoff note calls known-good, now asserted as agreement rather
+# than as two files that happen to match.
+log -header "Agree: forward into a child, cut inside it"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut inv_d -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from top
+scratchpad -assert opt_retime.moved_to hier_dst
+check -assert
+select -assert-count 1 t:$dff
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+select -assert-count 4 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u_dst.inv_d %i
+select -assert-count 0 t:$dff %ci2 c:u_src.add_s %i
+design -save native
+
+design -load orig
+flatten -noscopeinfo top/c:u_dst
+select -clear
+opt_retime -flop f1 -cut u_dst.inv_d -forward
+scratchpad -assert opt_retime.moved true
+# Both ends are top once the boundary is gone, which is the oracle saying it
+# cannot see that a boundary was crossed rather than saying none was.
+scratchpad -assert opt_retime.moved_from top
+scratchpad -assert opt_retime.moved_to top
+check -assert
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+select -assert-count 4 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u_dst.inv_d %i
+select -assert-count 0 t:$dff %ci2 c:u_src.add_s %i
+rename top gate
+design -import native -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Backward is where a flop-count assertion would have been wrong if it had been
+# written as an invariant: the adder has a second live operand and the move
+# clones onto it. Two registers on both sides is the claim - the two paths agree
+# about the clone as well as about the mover.
+log -header "Agree: backward into a child, cut inside it"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut add_s -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from top
+scratchpad -assert opt_retime.moved_to hier_src
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 2 hier_src/t:$dff
+flatten
+hierarchy -top top
+select -assert-count 2 t:$dff
+select -assert-count 5 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:u_src.add_s %i
+# one hop further than the others: the register's D is an instance-port net,
+# and flatten leaves those as an alias of the parent net rather than merging
+select -assert-count 1 t:$dff %ci3 c:xor_t %i
+design -save native
+
+design -load orig
+flatten -noscopeinfo top/c:u_src
+select -clear
+opt_retime -flop f1 -cut u_src.add_s -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+flatten
+hierarchy -top top
+select -assert-count 2 t:$dff
+select -assert-count 5 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:u_src.add_s %i
+# one hop further than the others: the register's D is an instance-port net,
+# and flatten leaves those as an alias of the parent net rather than merging
+select -assert-count 1 t:$dff %ci3 c:xor_t %i
+rename top gate
+design -import native -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The two shapes that leave a child rather than enter one. kid holds a register
+# at each of its ports and top holds a cell on each side of it: p1 drives the
+# input, t2 reads the output. So fb has somewhere to go backward that is outside
+# kid, and ff has somewhere to go forward that is outside kid, and both cuts are
+# cells the oracle can name after flattening.
+#
+# One fixture, two sections, because the design is the same and only the request
+# differs - which is the point a differential file is making anyway.
+log -header "Agree: backward out of a child, cut in the parent"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module kid (clk, x, y, zin, zout);
+  input clk;
+  input [7:0] x, zin;
+  output [7:0] y, zout;
+  (* init = 8'h11 *) wire [7:0] xq;
+  wire [7:0] zq;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(x), .Q(xq));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) k_not (.A(xq), .Y(y));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    k_xor (.A(zin), .B(8'h0f), .Y(zq));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) ff (.CLK(clk), .D(zq), .Q(zout));
+endmodule
+module top (clk, a, b, o1, o2);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] o1, o2;
+  wire [7:0] pre, y, zout;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) p1 (.A(a), .Y(pre));
+  kid u (.clk(clk), .x(pre), .y(y), .zin(b), .zout(zout));
+  $buf #(.WIDTH(8)) t1 (.A(y), .Y(o1));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) t2 (.A(zout), .Y(o2));
+endmodule
+EOF
+hierarchy -top top
+# ff's Q is the output port itself, and a port wire is not somewhere Verilog
+# lets an attribute be written.
+setattr -set init 8'h22 kid/w:zout
+select -clear
+check -assert
+design -save orig
+
+opt_retime -flop fb -cut p1 -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from kid
+scratchpad -assert opt_retime.moved_to top
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 1 top/t:$dff
+flatten
+hierarchy -top top
+select -assert-count 2 t:$dff
+select -assert-count 7 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:p1 %i
+select -assert-count 0 t:$dff %ci2 c:p1 %i
+design -save native
+
+design -load orig
+flatten -noscopeinfo top/c:u
+select -clear
+opt_retime -flop u.fb -cut p1 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+flatten
+hierarchy -top top
+select -assert-count 2 t:$dff
+select -assert-count 7 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:p1 %i
+select -assert-count 0 t:$dff %ci2 c:p1 %i
+rename top gate
+design -import native -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Agree: forward out of a child, cut in the parent"
+log -push
+design -load orig
+opt_retime -flop ff -cut t2 -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from kid
+scratchpad -assert opt_retime.moved_to top
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 1 top/t:$dff
+flatten
+hierarchy -top top
+select -assert-count 2 t:$dff
+select -assert-count 7 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:t2 %i
+select -assert-count 0 t:$dff %co2 c:t2 %i
+design -save native
+
+design -load orig
+flatten -noscopeinfo top/c:u
+select -clear
+opt_retime -flop u.ff -cut t2 -forward
+scratchpad -assert opt_retime.moved true
+check -assert
+flatten
+hierarchy -top top
+select -assert-count 2 t:$dff
+select -assert-count 7 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:t2 %i
+select -assert-count 0 t:$dff %co2 c:t2 %i
+rename top gate
+design -import native -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Two boundaries, which the oracle reaches by inlining two instances rather than
+# one. Worth its own section because the native path crosses twice and the
+# oracle crosses zero times, so agreement here is agreement about a composition
+# and not just about a step.
+log -header "Agree: sibling to sibling, two boundaries"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module sib_a (clk, x, y);
+  input clk;
+  input [7:0] x;
+  output [7:0] y;
+  wire [7:0] t;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a_add (.A(x), .B(8'h03), .Y(t));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(t), .Q(y));
+endmodule
+module sib_b (clk, p, q);
+  input clk;
+  input [7:0] p;
+  output [7:0] q;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) b_not (.A(p), .Y(q));
+endmodule
+module top (clk, a, out);
+  input clk;
+  input [7:0] a;
+  output [7:0] out;
+  wire [7:0] m;
+  sib_a u_a (.clk(clk), .x(a), .y(m));
+  sib_b u_b (.clk(clk), .p(m), .q(out));
+endmodule
+EOF
+hierarchy -top top
+setattr -set init 8'h00 sib_a/w:y
+select -clear
+check -assert
+design -save orig
+
+opt_retime -flop fa -cut b_not -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from sib_a
+scratchpad -assert opt_retime.moved_to sib_b
+check -assert
+select -assert-count 1 t:$dff
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+select -assert-count 3 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u_b.b_not %i
+select -assert-count 0 t:$dff %co2 c:u_b.b_not %i
+design -save native
+
+design -load orig
+flatten -noscopeinfo top/c:u_a top/c:u_b
+select -clear
+opt_retime -flop u_a.fa -cut u_b.b_not -forward
+scratchpad -assert opt_retime.moved true
+check -assert
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+select -assert-count 3 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u_b.b_not %i
+select -assert-count 0 t:$dff %co2 c:u_b.b_not %i
+rename top gate
+design -import native -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The crossing moves eight bits through an eight-bit port and the move after it
+# narrows them to the one bit that picks between the mux's constant operands.
+# The oracle does the narrowing with no port involved at all, so agreement here
+# says the width the crossing chose did not survive into the answer, which is
+# what it should not do.
+log -header "Agree: a crossing followed by a resize onto a mux select"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module sel_kid (clk, s, y);
+  input clk, s;
+  output [7:0] y;
+  $mux #(.WIDTH(8)) m0 (.A(8'h00), .B(8'hff), .S(s), .Y(y));
+endmodule
+module top (clk, sin, out);
+  input clk, sin;
+  output [7:0] out;
+  wire [7:0] mid;
+  (* init = 8'hff *) wire [7:0] midq;
+  sel_kid u (.clk(clk), .s(sin), .y(mid));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(mid), .Q(midq));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) o1 (.A(midq), .Y(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut m0 -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_to sel_kid
+check -assert
+select -assert-count 1 t:$dff
+# one bit, in the child
+select -assert-count 1 sel_kid/c:f1 %x:+[D] sel_kid/w:s %i
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+select -assert-count 3 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:u.m0 %i
+select -assert-count 0 t:$dff %ci2 c:u.m0 %i
+design -save native
+
+design -load orig
+flatten -noscopeinfo top/c:u
+select -clear
+opt_retime -flop f1 -cut u.m0 -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+select -assert-count 3 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %co2 c:u.m0 %i
+select -assert-count 0 t:$dff %ci2 c:u.m0 %i
+rename top gate
+design -import native -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# A second reader of the vacated net. The two paths solve it differently and
+# have to agree anyway: natively kid gains an output port carrying the old
+# value, and in the flat netlist there is no port to gain, so the register that
+# feeds the reader is simply a second register. Same circuit, one of them with a
+# boundary through the middle of it.
+log -header "Agree: a reader left on the vacated net"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module kid (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) k_not (.A(x), .Y(z));
+endmodule
+module top (clk, a, out1, out2);
+  input clk;
+  input [7:0] a;
+  output [7:0] out1, out2;
+  (* init = 8'h00 *) wire [7:0] midq;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(midq));
+  kid u (.clk(clk), .x(midq), .z(out1));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) tap (.A(midq), .Y(out2));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut k_not -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_to kid
+check -assert
+# the mover plus one for the reader the crossing would have stranded
+select -assert-count 2 t:$dff
+select -assert-count 2 kid/t:$dff
+select -assert-count 1 kid/w:x_reg
+flatten
+hierarchy -top top
+select -assert-count 2 t:$dff
+select -assert-count 4 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u.k_not %i
+select -assert-count 0 t:$dff %co2 c:u.k_not %i
+design -save native
+
+design -load orig
+flatten -noscopeinfo top/c:u
+select -clear
+opt_retime -flop f1 -cut u.k_not -forward
+scratchpad -assert opt_retime.moved true
+check -assert
+flatten
+hierarchy -top top
+select -assert-count 2 t:$dff
+select -assert-count 4 c:* t:$scopeinfo %d
+select -assert-count 1 t:$dff %ci2 c:u.k_not %i
+select -assert-count 0 t:$dff %co2 c:u.k_not %i
+rename top gate
+design -import native -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Part 2: where the two answers differ.
+#
+# Every section here is the oracle accepting a request the pass refuses, and
+# every one of them proves the oracle's netlist correct before saying so - the
+# finding is "there is a correct move here and the pass does not make it", which
+# is a different and much stronger statement than "the two disagree".
+#
+# They are not all the same kind of disagreement, and the difference is what a
+# driver has to act on:
+#
+#   (a) the pass could make this move and does not - a gap, marked (unsupported)
+#   (b) the move exists, and the refusal is about the form the pass would
+#       produce rather than about the move: relocating the register is
+#       impossible or unsafe, keeping it where it is and moving the logic across
+#       instead is neither, and this pass only moves registers. Marked too,
+#       since the reading a driver needs is the same one - there is something
+#       here - and the reason names the form: (unsupported) where the logic
+#       crosses and the register stays, (unsupported, needs extra logic) where
+#       the destination holds no state and the registers sit in front of the
+#       instance, one per net, rather than inside it
+#   (c) the oracle is the one that is wrong - its netlist is correct and cannot
+#       be written back as hierarchical RTL at all
+#
+# Three of each of (a) and (b), and one (c). Together with the blackbox in
+# Part 3 that is every refusal in opt_retime_hier_refusal.ys.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# (a) The known gap. The path leaves top through u_src and comes back, so the
+# flop and the cut are in the same module with a boundary in between. Crossing
+# is not what is missing - the walk that finds the path is one module wide, and
+# the register would have to cross in, move, and cross back out.
+#
+# The oracle inlines u_src, the path stops leaving anything, and today's pass
+# makes the move. So the refusal costs a real move, and the marker says so.
+log -header "Differ: the path leaves the module and comes back"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut xor_t -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "The before-path of flop f1 leaves top at port y of instance u_src, and opt_retime follows a chain within one module (unsupported)."
+scratchpad -assert-unset opt.did_something
+
+design -load orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+flatten -noscopeinfo top/c:u_src
+select -clear
+opt_retime -flop f1 -cut xor_t -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+# the mover and a clone at each of the two cells it passed
+select -assert-count 3 t:$dff
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# (a) again, and the more surprising one. A cell reading the vacated net gets a
+# port punched for it; a module output does not, because handing it the old
+# value leaves top's latency unchanged only if something outside top
+# compensates, and nothing here knows whether anything does.
+#
+# The oracle does not have that problem and does not need the reasoning: it
+# duplicates the cut cell, so the output keeps its own combinational copy and
+# the register moves past the other one. That technique would work across a
+# boundary too - duplicate k_not inside kid and punch a port for the copy - so
+# this is a gap and not a necessity, which is what (unsupported) claims.
+log -header "Differ: the vacated net drives a module output"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module kid (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) k_not (.A(x), .Y(z));
+endmodule
+module top (clk, a, out1, out2);
+  input clk;
+  input [7:0] a;
+  output [7:0] out1, out2;
+  kid u (.clk(clk), .x(a), .z(out2));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(out2), .Q(out1));
+endmodule
+EOF
+hierarchy -top top
+setattr -set init 8'h00 top/w:out1
+select -clear
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut k_not -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Net \out2 drives an output of top as well as flop f1, so moving the register across the u boundary would change what that output is worth on every cycle (unsupported)."
+scratchpad -assert-unset opt.did_something
+
+design -load orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+flatten -noscopeinfo top/c:u
+select -clear
+opt_retime -flop f1 -cut u.k_not -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 1 t:$dff
+# out2 keeps a combinational copy of its own, which is how the flat move gets
+# away with it
+select -assert-count 1 top/c:u.k_not_dup %x:+[Y] top/w:u.z %i
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# (b) A register is its clock as much as it is its D and Q, and noclk has no
+# clock net for the resolver to find. Flattening makes the question disappear
+# rather than answering it: there is one module afterwards and it is top, which
+# has the clock.
+#
+# So the oracle is right that the retiming exists and wrong about how to have
+# it. Refusing is correct; the number the oracle puts on it is the size of what
+# a logic-moving pass, or an LLM told to prefer that form, would be worth here.
+#
+# The refusal now says so: it names this form and carries a marker for it,
+# which is the one thing about this section that did change the pass.
+#
+# The RTL that expresses it is smaller than "bring the adder out of noclk",
+# which is what the flat netlist looks like it is asking for. The register pair
+# can sit in front of the instance instead of behind it and noclk does not
+# change at all: reg(a) + reg(b) is reg(a + b) for any function of a and b that
+# the module happens to compute. That form is written out and proved at the end
+# of this section, because a refusal whose stated reason is "the register
+# cannot be clocked there" is worth pairing with the move where the register
+# never goes there.
+log -header "Differ: the destination has no clock"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module noclk (a, b, y);
+  input [7:0] a, b;
+  output [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    n_add (.A(a), .B(b), .Y(y));
+endmodule
+module top (clk, a, b, out);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] out;
+  wire [7:0] mid;
+  noclk u (.a(a), .b(b), .y(mid));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(mid), .Q(out));
+endmodule
+EOF
+hierarchy -top top
+setattr -set init 8'h00 top/w:out
+select -clear
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut n_add -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop f1 takes its clock from \clk, which is not a net of noclk, so the register cannot be clocked there. The same retiming is one register on each input of instance u in top, which leaves noclk as it is since it holds no state (unsupported, needs extra logic)."
+scratchpad -assert-unset opt.did_something
+# The marker this section is the argument for: not yet rather than no, and the
+# reason names the form written out at the end of the section. The extra
+# register is the one the form costs - two in front of the instance where there
+# was one behind it.
+select -assert-count 0 noclk/t:$dff
+
+design -load orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+flatten -noscopeinfo top/c:u
+select -clear
+opt_retime -flop f1 -cut u.n_add -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 2 t:$dff
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+
+# The hierarchical form of the same retiming. noclk is the module it was, byte
+# for byte, and the two registers the oracle's move produced are in top in front
+# of the instance rather than inside it. Nothing is clocked anywhere new and no
+# logic changed modules, so the destination never needed the clock the refusal
+# is about.
+read_verilog -icells <<EOF
+module noclk (a, b, y);
+  input [7:0] a, b;
+  output [7:0] y;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    n_add (.A(a), .B(b), .Y(y));
+endmodule
+module top (clk, a, b, out);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] out;
+  (* init = 8'h00 *) wire [7:0] qa;
+  (* init = 8'h00 *) wire [7:0] qb;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(qa));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fb (.CLK(clk), .D(b), .Q(qb));
+  noclk u (.a(qa), .b(qb), .y(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+select -assert-count 0 noclk/t:$dff
+select -assert-count 2 top/t:$dff
+select -assert-count 1 noclk/c:n_add %x:+[Y] noclk/w:y %i
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# (b) The case the clock check was written for, and the one where relocating
+# really is impossible: \gated is made by an $icg inside gater, so there is no
+# net in top carrying it and nothing for the resolver to find however far it
+# looks. Punching a clock port would be building a clock tree and generating the
+# gate again in top would be duplicating it; neither is retiming.
+#
+# The oracle gets the clock for free by deleting the boundary that was keeping
+# it out, and the register it produces sits in the one remaining module reading
+# \u.gated. That is the disagreement stated exactly: the move needs the gated
+# clock wherever the register is, and only one of the two paths has to care.
+#
+# The form that does exist brings the xor into gater and behind fg, which never
+# moves and keeps the clock it always had - the same "move logic, not state"
+# answer as the section above, on the refusal where it is the only answer.
+#
+# Checked structurally rather than by SAT, following opt_retime_clockgate.ys:29
+# - $icg has no SAT model, so a miter holding one cannot be solved. The section
+# above is the same claim about the same refusal with the gating taken out, and
+# it is proved there.
+log -header "Differ: the clock is gated inside the child"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module gater (clk, en, x, y);
+  input clk, en;
+  input [7:0] x;
+  output [7:0] y;
+  wire gated;
+  $icg g0 (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(gated));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(gated), .D(x), .Q(y));
+endmodule
+module top (clk, en, a, out);
+  input clk, en;
+  input [7:0] a;
+  output [7:0] out;
+  wire [7:0] pre;
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    t_xor (.A(a), .B(8'h0f), .Y(pre));
+  gater u (.clk(clk), .en(en), .x(pre), .y(out));
+endmodule
+EOF
+hierarchy -top top
+setattr -set init 8'h00 gater/w:y
+select -clear
+check -assert
+design -save orig
+
+scratchpad -unset opt.did_something
+opt_retime -flop fg -cut t_xor -backward
+scratchpad -assert opt_retime.moved false
+# gater holds state, so the registers-in-front form the section above uses is
+# not available here and the marker says only that the move exists: the logic
+# crosses the boundary and the register stays where it is, building nothing.
+scratchpad -assert opt_retime.refusal "Flop fg takes its clock from \gated, which is not a net of top, so the register cannot be clocked there. The same retiming is the logic moved across the u boundary with the register left in gater (unsupported)."
+scratchpad -assert-unset opt.did_something
+
+design -load orig
+flatten -noscopeinfo top/c:u
+select -clear
+opt_retime -flop u.fg -cut t_xor -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 1 top/t:$dff
+select -assert-count 1 top/t:$icg
+# the register reads top's input and the xor is behind it, and it is clocked by
+# the net the $icg makes, which after the flatten is a net of the only module
+select -assert-count 1 top/c:u.fg %x:+[D] top/w:a %i
+select -assert-count 1 top/c:u.fg %x:+[CLK] top/w:u.gated %i
+select -assert-count 1 top/c:u.g0 %x:+[GCLK] top/w:u.gated %i
+design -reset
+
+# The form that keeps the hierarchy: fg still reads gater's input port under
+# \gated, the xor that used to be top's is behind it, and top holds the instance
+# and nothing else.
+read_verilog -icells <<EOF
+module gater (clk, en, x, y);
+  input clk, en;
+  input [7:0] x;
+  output [7:0] y;
+  wire gated;
+  (* init = 8'h0f *) wire [7:0] xq;
+  $icg g0 (.CLK(clk), .EN(en), .SE(1'b0), .GCLK(gated));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fg (.CLK(gated), .D(x), .Q(xq));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    g_xor (.A(xq), .B(8'h0f), .Y(y));
+endmodule
+module top (clk, en, a, out);
+  input clk, en;
+  input [7:0] a;
+  output [7:0] out;
+  gater u (.clk(clk), .en(en), .x(a), .y(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+select -assert-count 1 gater/c:fg %x:+[CLK] gater/w:gated %i
+select -assert-count 1 gater/c:fg %x:+[D] gater/w:x %i
+select -assert-count 1 gater/c:g_xor %x:+[A] gater/w:xq %i
+select -assert-count 0 top/t:$xor
+select -assert-count 0 top/t:$dff
+select -assert-count 1 top/c:u %x:+[x] top/w:a %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# (b) The last refusal, and the one where the oracle's success is a technicality
+# worth reading carefully.
+#
+# FfData::emit writes the register's init onto its Q net, and FfInitVals
+# log_errors on a sigmap group holding two different init values, so a landing
+# net that already carries one is a crash a command later rather than a wrong
+# answer now. The pass therefore checks before it touches anything, and refuses.
+#
+# The oracle moves. It can, because the init the refusal is protecting sits on a
+# net the adder drives combinationally, where an initial value is inert - proc
+# says so out loud on the gold side, and the warning is asserted below. So the
+# flat pass overwrites a value that never meant anything and the result is
+# equivalent to the original.
+#
+# The refusal is still load-bearing: without it the crash is real. But it is a
+# check about a net that has an attribute, not about whether the move exists,
+# and on this design the move does - so it carries the marker that says so
+# rather than no marker at all, and the reason names a form that lands nothing
+# on \y to land on.
+log -header "Differ: an inert init on the landing net"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+setattr -set init 8'h55 hier_src/w:y
+select -clear
+check -assert
+design -save orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+scratchpad -unset opt.did_something
+opt_retime -flop f1 -cut add_s -backward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Net \y in hier_src starts at 8'01010101 and flop f1 would land on it starting at 8'00000000, and a net cannot hold two initial values. The same retiming is one register on each input of instance u_src in top, which leaves hier_src as it is since it holds no state, and lands no register on \y (unsupported, needs extra logic)."
+scratchpad -assert-unset opt.did_something
+select -assert-count 1 hier_src/w:y a:init=8'h55 %i
+select -assert-count 0 hier_src/t:$dff
+
+design -load orig
+flatten -noscopeinfo top/c:u_src
+select -clear
+opt_retime -flop f1 -cut u_src.add_s -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+# the 8'h55 is gone, replaced by the folded init of the register that landed
+select -assert-count 1 top/w:u_src.y a:init=8'h00 %i
+select -assert-count 2 top/t:$dff
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc
+# The gold side says out loud that the 8'h55 never meant anything: proc_init
+# drops an init on a wire no register drives. That is the argument of this
+# section, so it is asserted rather than tolerated - if the attribute ever does
+# become load-bearing here, this line is what notices.
+logger -expect warning "ignoring initial value on non-register: .gold\.u_src\.y" 1
+opt
+sat -seq 8 -prove-asserts -verify
+logger -check-expected
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# (a) -all-fanouts finds the sibling registers by their shared D net and then
+# re-derives the move at each one by replaying the route to the cut as a list of
+# port names, which is a walk inside one module. Flattened, every route is
+# inside one module by construction, so the oracle widens the move without
+# noticing there was anything to notice.
+log -header "Differ: -all-fanouts across a boundary"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut add_s -backward -all-fanouts
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "-all-fanouts replays the route to the cut as port names within one module, so it cannot widen a move that crosses the boundary at add_s (unsupported)."
+scratchpad -assert-unset opt.did_something
+
+design -load orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+flatten -noscopeinfo top/c:u_src
+select -clear
+opt_retime -flop f1 -cut u_src.add_s -backward -all-fanouts
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 2 t:$dff
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# (c) The disagreement that runs the other way. leaf has two instance sites; the
+# pass refuses because a move edits a module body and there is one body for both
+# of them, and the oracle inlines u1, retimes inside it, and produces a correct
+# flat netlist that no edit to leaf.v expresses.
+#
+# opt_retime_hier_oracle.ys's last section proves that netlist and walks through
+# why it cannot be mirrored. Repeated here only as the pair of verdicts, because
+# a differential file that recorded the other four disagreements and not this
+# one would read as though the oracle were the authority.
+log -header "Differ: two instance sites, and here the oracle is the wrong one"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module leaf (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) l_not (.A(x), .Y(z));
+endmodule
+module top (clk, a, b, out1, out2);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] out1, out2;
+  wire [7:0] q1, q2;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(q1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f2 (.CLK(clk), .D(b), .Q(q2));
+  leaf u1 (.clk(clk), .x(q1), .z(out1));
+  leaf u2 (.clk(clk), .x(q2), .z(out2));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut l_not -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Module leaf has 2 instance sites and opt_retime would be moving a register at every one of them, having only the one body to edit. Uniquify first (unsupported)."
+scratchpad -assert-unset opt.did_something
+
+design -load orig
+flatten -noscopeinfo top/c:u1
+select -clear
+opt_retime -flop f1 -cut u1.l_not -forward
+scratchpad -assert opt_retime.moved true
+check -assert
+# u1's copy is retimed and u2's is not, and leaf itself is untouched: one body,
+# two behaviours, which is the shape that has no RTL
+select -assert-count 1 top/c:u1.l_not %x:+[A] top/w:a %i
+select -assert-count 1 leaf/c:l_not %x:+[A] leaf/w:x %i
+select -assert-count 1 top/c:u2 %x:+[x] top/w:q2 %i
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Part 3: where the oracle has nothing to say.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# A blackbox has no body, so flatten leaves the instance standing and there is
+# no cell inside it to name as a cut. Both paths decline, for once, and for the
+# same reason - the difference being that the pass says so and the oracle simply
+# has no way to be asked.
+log -header "Agree by inability: the boundary module is a blackbox"
+log -push
+design -reset
+read_verilog -icells <<EOF
+(* blackbox *)
+module bb (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+endmodule
+module top (clk, a, out);
+  input clk;
+  input [7:0] a;
+  output [7:0] out;
+  wire [7:0] q;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(q));
+  bb u (.clk(clk), .x(q), .z(out));
+endmodule
+EOF
+hierarchy -top top
+design -save orig
+
+opt_retime -flop f1 -cut u -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Module bb is a blackbox, so it has no body for flop f1 to move into."
+
+design -load orig
+flatten -noscopeinfo top/c:u
+select -clear
+# the instance is still there afterwards, so the oracle's scope never grew and
+# there is still nothing to cut at
+select -assert-count 1 top/c:u
+select -assert-count 2 top/c:*
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The pure crossing: cut is the instance, so the move relocates the register
+# across the boundary and touches no logic at all. It is the primitive every
+# section in Part 1 is built out of, and it is the one request the oracle cannot
+# be asked, because flattening deletes the boundary and the move with it. There
+# is no cell named u_src afterwards and nothing that stands for it.
+#
+# Not a refusal on either side. Natively it is an ordinary success - the first
+# section of opt_retime_hier.ys - and against the oracle it is a malformed
+# request, which is the honest answer: the cut names a cell that does not exist.
+#
+# logger -expect error exits yosys successfully, so this has to come last.
+log -header "No oracle: a crossing with no logic in it"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+design -save orig
+
+opt_retime -flop f1 -cut u_src -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.moved_from top
+scratchpad -assert opt_retime.moved_to hier_src
+check -assert
+
+design -load orig
+flatten -noscopeinfo top/c:u_src
+select -clear
+select -assert-count 0 top/c:u_src
+logger -expect error "Cut cell 'u_src' not found in module top or in any other selected module." 1
+opt_retime -flop f1 -cut u_src -backward
