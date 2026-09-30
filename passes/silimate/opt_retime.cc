@@ -2555,12 +2555,24 @@ struct ConeScan {
 		: sigmap(sigmap), drivers(drivers), initvals(initvals), ref(ref), flop(flop),
 		  allow_lower(allow_lower) { }
 
+	// Past this many cells deep the walk would risk running out of stack.
+	static constexpr int max_depth = 10000;
+	int depth = 0;
+
 	bool legal(Cell *cell)
 	{
 		if (state.count(cell))
 			return state.at(cell) == 2 && !why.count(cell);
 		state[cell] = 1;
-		std::string reason = inputs_reason(cell);
+		std::string reason;
+		if (depth >= max_depth)
+			reason = stringf("The cone behind cell %s is more than %d cells deep%s.\n",
+					log_id(cell), max_depth, mark::unsupported);
+		else {
+			depth++;
+			reason = inputs_reason(cell);
+			depth--;
+		}
 		state[cell] = 2;
 		if (!reason.empty())
 			why[cell] = reason;
@@ -2678,30 +2690,27 @@ Cell *cone_landing(ConeScan &scan, Cell *cut)
 			movable.insert(cell);
 
 	// A landing is a movable cell with no other movable cell past it on the
-	// way to the cut. Whether one lies past a cell is remembered per cell, so
-	// the question is answered once for each cell rather than once for each
-	// movable cell behind it. A cell met again while its own answer is still
-	// being worked out is on a loop, which has nothing movable past it.
-	dict<Cell *, int> past;
-	std::function<bool(Cell *)> movable_past = [&](Cell *cell) {
-		auto it = past.find(cell);
-		if (it != past.end())
-			return it->second == 2;
-		past[cell] = 0;
-		std::vector<Cell *> nexts;
-		next_cells(cell->getPort(ID::Y), nexts);
-		bool found = false;
-		for (auto next : nexts)
-			if (down.count(next) && (movable.count(next) || movable_past(next))) {
-				found = true;
-				break;
-			}
-		past[cell] = found ? 2 : 1;
-		return found;
-	};
+	// way to the cut. Walking back from every movable cell at once marks each
+	// cell that has one past it, visiting every cell once.
+	dict<Cell *, std::vector<Cell *>> feeders;
+	for (auto cell : queue) {
+		next_cells(cell->getPort(ID::Y), step);
+		for (auto next : step)
+			if (down.count(next))
+				feeders[next].push_back(cell);
+	}
+	pool<Cell *> behind;
+	std::vector<Cell *> back(movable.begin(), movable.end());
+	for (int i = 0; i < GetSize(back); i++) {
+		auto it = feeders.find(back[i]);
+		if (it != feeders.end())
+			for (auto cell : it->second)
+				if (behind.insert(cell).second)
+					back.push_back(cell);
+	}
 	std::vector<Cell *> furthest;
 	for (auto cell : queue)
-		if (movable.count(cell) && !movable_past(cell))
+		if (movable.count(cell) && !behind.count(cell))
 			furthest.push_back(cell);
 	if (furthest.empty())
 		refuse("%s", scan.why.at(cut));
@@ -2732,22 +2741,25 @@ void gather_cone(ConeScan &scan, Cell *target, std::vector<Cell *> &cells,
 {
 	pool<Cell *> done;
 	pool<SigBit> seen;
-	std::function<void(Cell *)> visit = [&](Cell *cell) {
+	std::function<void(Cell *, int)> visit = [&](Cell *cell, int depth) {
 		if (!done.insert(cell).second)
 			return;
+		if (depth >= ConeScan::max_depth)
+			refuse("The cone behind cell %s is more than %d cells deep%s.\n",
+					log_id(cell), ConeScan::max_depth, mark::unsupported);
 		for (auto port : data_inputs(cell))
 			for (auto bit : scan.sigmap(cell->getPort(port))) {
 				if (!bit.is_wire())
 					continue;
 				const BitSrc &src = scan.drivers.at(bit);
 				if (!src.cell->is_builtin_ff())
-					visit(src.cell);
+					visit(src.cell, depth + 1);
 				else if (seen.insert(bit).second)
 					leaves.push_back({bit, src.cell, src.offset});
 			}
 		cells.push_back(cell);
 	};
-	visit(target);
+	visit(target, 0);
 }
 
 // One stored value carried across a cone: every register at the edge
