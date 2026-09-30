@@ -3126,6 +3126,26 @@ bool holds_no_state(Design *design, Module *mod, pool<Module *> &seen)
 	return true;
 }
 
+// Whether target is mod itself or anything mod instantiates, at any depth.
+//
+// Asked when a net feeds more than one instance and only one of them has the
+// cut behind it. A boundary is a step on the way somewhere, and which step to
+// take is a question about the hierarchy under each candidate rather than
+// about the net, which reads the same at every reader.
+bool reaches_module(Design *design, Module *mod, Module *target, pool<Module *> &seen)
+{
+	if (mod == target)
+		return true;
+	if (!seen.insert(mod).second)
+		return false;
+	for (auto cell : mod->cells()) {
+		Module *child = design->module(cell->type);
+		if (child != nullptr && reaches_module(design, child, target, seen))
+			return true;
+	}
+	return false;
+}
+
 // Where the register is going, for the two checks that can refuse to put it
 // there. One argument rather than five, because both want the same five.
 struct Crossing {
@@ -3349,9 +3369,10 @@ void check_landing_init(FfInitVals &initvals, const SigSpec &sig_q,
 // the far side.
 //
 // module and flop come back pointing at where the register landed, so a move
-// that crosses two boundaries is this twice.
+// that crosses two boundaries is this twice. `toward` is the module the cut is
+// in, which is what picks the boundary when the net names more than one.
 void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
-		Cell *named_inst)
+		Cell *named_inst, Module *toward)
 {
 	ModuleCtx &ctx = h.ctx(module);
 	SigMap &sigmap = ctx.sigmap;
@@ -3382,20 +3403,36 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 			into_child = true;
 		}
 	} else {
-		// Any instance reading the whole net names the boundary, even when
+		// Any instance reading the whole net names a boundary, even when
 		// something else reads it too. Insisting on a unique reader here would
 		// report a missing boundary for what is really a second reader, and
 		// the second reader has a refusal of its own below that says so.
+		//
+		// Which of them is the boundary, though, is not the net's to say: a
+		// register fanning out to two instances reads the same at both, and
+		// only one of them has the cut behind it. Taking the first would put
+		// the register a module away from where it was asked to go, with the
+		// crossing that got it there not undoable and no path on from it - a
+		// refusal for a move that exists. So the cut is what chooses, and an
+		// instance with nothing of the move behind it is not a boundary here
+		// at all: with none of them matching, the register leaves through this
+		// module's own port instead, which is where the cut then is.
 		std::vector<CellPort> full;
 		bool partial = false, drives_out = false;
 		scan_readers(module, sigmap, near, full, partial, drives_out);
-		for (auto &rd : full)
-			if (h.design->module(rd.cell->type) != nullptr) {
-				inst = rd.cell;
-				port = rd.port;
-				into_child = true;
-				break;
-			}
+		for (auto &rd : full) {
+			Module *child = h.design->module(rd.cell->type);
+			if (child == nullptr)
+				continue;
+			pool<Module *> seen;
+			if (named_inst != nullptr ? rd.cell != named_inst
+					: toward != nullptr && !reaches_module(h.design, child, toward, seen))
+				continue;
+			inst = rd.cell;
+			port = rd.port;
+			into_child = true;
+			break;
+		}
 	}
 
 	// Not an instance on the near side, so the boundary is this module's own:
@@ -3644,7 +3681,7 @@ void apply_hier_move(Design *design, Module *module, Cell *flop, Module *cut_mod
 	Module *cut_child = design->module(cut->type);
 
 	if (cut_child != nullptr) {
-		cross_boundary(h, module, flop, backward, cut);
+		cross_boundary(h, module, flop, backward, cut, cut_child);
 		landed = module->name;
 		return;
 	}
@@ -3656,7 +3693,7 @@ void apply_hier_move(Design *design, Module *module, Cell *flop, Module *cut_mod
 		if (budget-- <= 0)
 			refuse("Flop %s and cut %s are further apart than the design is "
 					"deep%s.\n", log_id(flop), log_id(cut), mark::invalid);
-		cross_boundary(h, module, flop, backward, nullptr);
+		cross_boundary(h, module, flop, backward, nullptr, cut_module);
 	}
 
 	if (backward)
@@ -3746,9 +3783,11 @@ struct OptRetimePass : public Pass {
 		log("\n");
 		log("The two cells may be in different modules. The register then\n");
 		log("crosses the boundaries between them first, one instance port at a\n");
-		log("time, and the move is made where it lands. Naming an instance as\n");
-		log("-cut asks for the crossing on its own: the register changes\n");
-		log("modules and nothing else changes at all.\n");
+		log("time, and the move is made where it lands. Where the vacated net\n");
+		log("feeds more than one instance, the boundary is the instance the\n");
+		log("cut is behind. Naming an instance as -cut asks for the crossing\n");
+		log("on its own: the register changes modules and nothing else\n");
+		log("changes at all.\n");
 		log("\n");
 		log("A crossing needs the register's clock, enable and resets to exist\n");
 		log("as nets on the far side, and needs the destination module to have\n");
