@@ -1,0 +1,218 @@
+# =============================================================================
+# Test 1: Sync reset to 1 on an inverted register
+# A retimed register that stores ~d resets to 1; its init must follow.
+# =============================================================================
+log -header "Sync reset, value 1"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst, en, d, output y);
+    reg qn;
+    always @(posedge clk)
+        if (rst) qn <= 1'b1;
+        else if (en) qn <= ~d;
+    assign y = ~qn;
+endmodule
+EOF
+proc; opt_dff
+rstinit
+select -assert-count 1 w:qn a:init=1'b1 %i
+design -reset
+log -pop
+
+# =============================================================================
+# Test 2: Async reset
+# =============================================================================
+log -header "Async reset"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst, input [7:0] d, output reg [7:0] q);
+    always @(posedge clk or posedge rst)
+        if (rst) q <= 8'h5a;
+        else q <= d;
+endmodule
+EOF
+proc; opt_dff
+rstinit
+select -assert-count 1 w:q a:init=8'b01011010 %i
+design -reset
+log -pop
+
+# =============================================================================
+# Test 3: Active-low sync reset
+# =============================================================================
+log -header "Active-low reset"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst_n, d, output reg q);
+    always @(posedge clk)
+        if (!rst_n) q <= 1'b1;
+        else q <= d;
+endmodule
+EOF
+proc; opt_dff
+rstinit
+select -assert-count 1 w:q a:init=1'b1 %i
+design -reset
+log -pop
+
+# =============================================================================
+# Test 4: Reset folded into the D logic
+# vn has no reset cell, but with rst (a known reset) held, ~v evaluates to 1.
+# =============================================================================
+log -header "Reset folded into D"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst, d, output y, z);
+    wire v = rst ? 1'b0 : d;
+    reg vn, r;
+    always @(posedge clk)
+        vn <= ~v;
+    always @(posedge clk)
+        if (rst) r <= 1'b0;
+        else r <= d;
+    assign y = ~vn;
+    assign z = r;
+endmodule
+EOF
+proc; opt_dff
+rstinit
+select -assert-count 1 w:vn a:init=1'b1 %i
+select -assert-count 1 w:r a:init=1'b0 %i
+design -reset
+log -pop
+
+# Without any reset cell, rst is not a known reset and nothing changes.
+log -header "Folded reset without a reset cell"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst, d, output y);
+    wire v = rst ? 1'b0 : d;
+    reg vn;
+    always @(posedge clk)
+        vn <= ~v;
+    assign y = ~vn;
+endmodule
+EOF
+proc; opt_dff
+rstinit
+select -assert-count 0 w:vn a:init %i
+design -reset
+log -pop
+
+# =============================================================================
+# Test 5: Enable over reset, enable free
+# The reset only applies when en is high, so the post-reset value is unknown.
+# =============================================================================
+log -header "Enable over reset"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst, en, d, output reg q);
+    always @(posedge clk)
+        if (en) begin
+            if (rst) q <= 1'b1;
+            else q <= d;
+        end
+endmodule
+EOF
+proc; opt_dff
+select -assert-count 1 t:$sdffce
+rstinit
+select -assert-count 0 w:q a:init %i
+design -reset
+log -pop
+
+# =============================================================================
+# Test 6: Flop without a reset next to one with a reset
+# =============================================================================
+log -header "Flop without a reset"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst, d, output reg q1, q2);
+    always @(posedge clk)
+        if (rst) q1 <= 1'b1;
+        else q1 <= d;
+    always @(posedge clk)
+        q2 <= d;
+endmodule
+EOF
+proc; opt_dff
+rstinit
+select -assert-count 1 w:q1 a:init=1'b1 %i
+select -assert-count 0 w:q2 a:init %i
+design -reset
+log -pop
+
+# =============================================================================
+# Test 7: A declared init is replaced by the reset value
+# =============================================================================
+log -header "Declared init overridden"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst, d, output q);
+    reg r = 1'b0;
+    always @(posedge clk)
+        if (rst) r <= 1'b1;
+        else r <= d;
+    assign q = r;
+endmodule
+EOF
+proc; opt_dff
+rstinit
+select -assert-count 1 w:r a:init=1'b1 %i
+design -reset
+log -pop
+
+# =============================================================================
+# Test 8: Two resets asserted together
+# =============================================================================
+log -header "Two resets"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst_a, rst_b, d, output reg qa, qb);
+    always @(posedge clk)
+        if (rst_a) qa <= 1'b1;
+        else qa <= d;
+    always @(posedge clk or posedge rst_b)
+        if (rst_b) qb <= 1'b0;
+        else qb <= d;
+endmodule
+EOF
+proc; opt_dff
+rstinit
+select -assert-count 1 w:qa a:init=1'b1 %i
+select -assert-count 1 w:qb a:init=1'b0 %i
+design -reset
+log -pop
+
+# =============================================================================
+# Test 9: The same signal used as a reset at both polarities
+# =============================================================================
+log -header "Conflicting reset polarity"
+log -push
+design -reset
+read_verilog <<EOF
+module top(input clk, rst, d, output reg q1, q2);
+    always @(posedge clk or posedge rst)
+        if (rst) q1 <= 1'b1;
+        else q1 <= d;
+    always @(posedge clk or negedge rst)
+        if (!rst) q2 <= 1'b1;
+        else q2 <= d;
+endmodule
+EOF
+proc; opt_dff
+logger -expect warning "used at both polarities" 1
+rstinit
+select -assert-count 0 w:q1 a:init %i
+select -assert-count 0 w:q2 a:init %i
+design -reset
+log -pop

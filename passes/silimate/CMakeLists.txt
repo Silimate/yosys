@@ -29,6 +29,9 @@ yosys_pass(reg_rename
 yosys_pass(ffnormpol
 	ffnormpol.cc
 )
+yosys_pass(rstinit
+	rstinit.cc
+)
 yosys_pass(report_fanout
 	report_fanout.cc
 )
