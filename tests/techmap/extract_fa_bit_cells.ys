@@ -1,0 +1,13 @@
+# A full adder written with one-bit $xor, $and and $or cells, as abc -word returns them
+read_verilog <<EOT
+module fa1(input a, b, c, output s, cy);
+	assign s = a ^ b ^ c;
+	assign cy = (a & b) | (b & c) | (a & c);
+endmodule
+EOT
+proc
+opt_clean
+select -assert-none t:$_XOR_ t:$_AND_ t:$_OR_ %u %u
+equiv_opt -assert extract_fa -fa
+design -load postopt
+select -assert-count 1 t:$fa
