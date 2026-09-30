@@ -1,0 +1,142 @@
+# A forward cut the move cannot reach is moved towards instead.
+#
+# STA names its cut on a netlist abc has been through, and abc hands every cell
+# it builds the source location of the whole expression it folded that cell
+# into. A caller looking the cut up by location on the word-level netlist lands
+# on the last cell of that expression, several gates past any register an
+# unregistered input stops. The move goes as far along the way as a chain can,
+# and opt_retime.cut names the cell it stopped at.
+
+# ---------------------------------------------------------------------------
+log -header "Short of the cut: an unregistered operand stops the chain"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module stasrc(input clk, input [7:0] a, b, output [7:0] y);
+  wire [7:0] ra, t, u;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(t));
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(t), .B(b), .Y(u));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(u), .B(8'h0f), .Y(y));
+endmodule
+EOF
+hierarchy -top stasrc
+check -assert
+setattr -set init 8'h5a w:ra
+design -save orig
+# b is a module input, so nothing past a0 can move; n0 is as far as it goes
+opt_retime -flop fa -cut x0 -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.cut n0
+check -assert
+select -assert-count 1 t:$dff
+select -assert-count 1 c:fa %x:+[Q] w:t %i
+select -assert-count 1 c:n0 %x:+[A] w:a %i
+select -assert-count 1 w:t a:init=8'ha5 %i
+rename stasrc gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+log -header "Short of the cut: -cone stops at the same cell"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module stasrc(input clk, input [7:0] a, b, output [7:0] y);
+  wire [7:0] ra, t, u;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n0 (.A(ra), .Y(t));
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(t), .B(b), .Y(u));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(u), .B(8'h0f), .Y(y));
+endmodule
+EOF
+hierarchy -top stasrc
+check -assert
+setattr -set init 8'h5a w:ra
+design -save orig
+opt_retime -flop fa -cut x0 -forward -cone
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.cut n0
+check -assert
+select -assert-count 1 t:$dff
+select -assert-count 1 c:fa %x:+[Q] w:t %i
+rename stasrc gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The first cell past the flop already reads an unregistered input, so there
+# is no shorter move to make and the refusal stands.
+log -header "Refused: not even the first cell can be crossed"
+design -reset
+read_verilog -icells <<EOF
+module blocked(input clk, input [7:0] a, b, output [7:0] y);
+  wire [7:0] ra, u;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $and #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(b), .Y(u));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    x0 (.A(u), .B(8'h0f), .Y(y));
+endmodule
+EOF
+hierarchy -top blocked
+check -assert
+opt_retime -flop fa -cut x0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert-unset opt_retime.cut
+select -assert-count 1 c:fa %x:+[Q] w:ra %i
+select -assert-count 1 c:a0 %x:+[A] w:ra %i
+opt_retime -flop fa -cut x0 -forward -cone
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Input B of cell a0 is not driven by a flop or a constant, so flop fa cannot move forward across it."
+select -assert-count 1 c:fa %x:+[Q] w:ra %i
+design -reset
+
+# ---------------------------------------------------------------------------
+# Operand registers that disagree on an enable are lowered, as they always
+# were, rather than stopped short of: the move reaches the cut.
+log -header "Lowering still wins over stopping short"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module lowered(input clk, ea, eb, input [7:0] a, b, output [7:0] y);
+  wire [7:0] ra, rb;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(ea), .D(a), .Q(ra));
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(eb), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(y));
+endmodule
+EOF
+hierarchy -top lowered
+check -assert
+setattr -set init 8'h01 w:ra
+setattr -set init 8'h02 w:rb
+design -save orig
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.cut a0
+check -assert
+rename lowered gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop

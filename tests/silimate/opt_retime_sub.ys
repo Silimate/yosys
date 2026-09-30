@@ -128,7 +128,7 @@ log -push
 design -reset
 read_verilog -icells opt_retime_add.v
 hierarchy -top retime_add
-opt_retime -flop fc -cut a1 -forward
+opt_retime -flop fc -cut a1 -forward -no-cone
 scratchpad -assert opt_retime.moved false
 scratchpad -assert opt_retime.refusal "Input A of cell a1 is not driven by a flop or a constant, so flop fc cannot move forward across it."
 design -reset

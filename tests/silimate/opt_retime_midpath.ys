@@ -178,8 +178,10 @@ log -pop
 
 # ---------------------------------------------------------------------------
 # Both operands of a0 are the same net, so the path enters it twice and there
-# is no single port the register lands on.
-log -header "Refused: the cut is entered on two ports of one cell"
+# is no single port the register lands on. The move goes as far as a chain
+# does, across n1, and opt_retime.cut says it stopped there.
+log -header "Short of the cut: the cut is entered on two ports of one cell"
+log -push
 design -reset
 read_verilog -icells <<EOF
 module twoport(input clk, input [7:0] a, output [7:0] q);
@@ -193,17 +195,71 @@ endmodule
 EOF
 hierarchy -top twoport
 check -assert
+setattr -set init 8'h5a w:ra
+setattr -set init 8'h00 w:q
+design -save orig
 opt_retime -flop fa -cut a0 -forward
-scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Cut a0 is reachable from flop fa on more than one path (unsupported)."
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.cut n1
+check -assert
 select -assert-count 2 t:$dff
-select -assert-count 1 c:n1 %x:+[A] w:ra %i
+select -assert-count 1 c:n1 %x:+[A] w:a %i
+select -assert-count 1 c:fa %x:+[Q] w:t %i
+select -assert-count 1 w:t a:init=8'ha5 %i
+rename twoport gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The same shape with -cone: a0 reads n1 twice, and its whole fan-in is fa, so
+# the register crosses both cells and lands on a0.
+log -header "Cone: the cut entered on two ports is reached"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module twoport(input clk, input [7:0] a, output [7:0] q);
+  wire [7:0] ra, t, y;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fa (.CLK(clk), .D(a), .Q(ra));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) n1 (.A(ra), .Y(t));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(t), .B(t), .Y(y));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) fq (.CLK(clk), .D(y), .Q(q));
+endmodule
+EOF
+hierarchy -top twoport
+check -assert
+setattr -set init 8'h5a w:ra
+setattr -set init 8'h00 w:q
+design -save orig
+opt_retime -flop fa -cut a0 -forward -cone
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.cut a0
+check -assert
+select -assert-count 2 t:$dff
+select -assert-count 1 c:fa %x:+[Q] w:y %i
+select -assert-count 1 c:n1 %x:+[A] w:a %i
+# ~8'h5a doubled is 8'h4a
+select -assert-count 1 w:y a:init=8'h4a %i
+rename twoport gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
 
 # ---------------------------------------------------------------------------
 # Two readers, neither of them a hop: each takes half of n1.Y, so nothing
-# consumes it whole and the after-path stops at n1. The refusal says so rather
-# than blaming the cut for not being downstream, which it is.
-log -header "Refused: no single cell consumes the whole of n1.Y"
+# consumes it whole and the after-path stops at n1. The move stops there too,
+# and the two halves keep reading the net they read.
+log -header "Short of the cut: no single cell consumes the whole of n1.Y"
+log -push
 design -reset
 read_verilog -icells <<EOF
 module nohop(input clk, input [7:0] a, output [3:0] lo, hi);
@@ -216,8 +272,20 @@ endmodule
 EOF
 hierarchy -top nohop
 check -assert
+setattr -set init 8'h5a w:ra
+design -save orig
 opt_retime -flop fa -cut n2 -forward
-scratchpad -assert opt_retime.moved false
-scratchpad -assert opt_retime.refusal "Y of cell n1 is read by 2 cells, so the after-path of flop fa ends there and never reaches cut n2 (unsupported)."
+scratchpad -assert opt_retime.moved true
+scratchpad -assert opt_retime.cut n1
+check -assert
 select -assert-count 1 t:$dff
-select -assert-count 1 c:n1 %x:+[A] w:ra %i
+select -assert-count 1 c:n1 %x:+[A] w:a %i
+select -assert-count 1 c:fa %x:+[Q] w:t %i
+rename nohop gate
+design -import orig -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop

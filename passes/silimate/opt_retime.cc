@@ -38,6 +38,10 @@ PRIVATE_NAMESPACE_BEGIN
 // log_error instead. See the note above the emit calls.
 struct MoveRefused {
 	std::string reason;
+	// Set when the move gave out on registers that disagree on an enable or a
+	// sync reset. Lowering those controls is how that is answered, so a
+	// forward move does not retreat from it to a shorter one.
+	bool mismatch = false;
 };
 
 // Takes its arguments the way log_cmd_error does, so a call reads the same
@@ -46,6 +50,12 @@ template <typename... Args>
 [[noreturn]] void refuse(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
 	throw MoveRefused{fmt.format(args...)};
+}
+
+template <typename... Args>
+[[noreturn]] void refuse_mismatch(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	throw MoveRefused{fmt.format(args...), true};
 }
 
 // What a refusal says about itself, written at the end of the reason so that a
@@ -220,6 +230,7 @@ struct Mismatch {
 
 const char *unmovable_reason(FfData &ff);
 Mismatch mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff);
+bool lowerable_mismatch(SigMap &sigmap, FfData &ref, FfData &ff);
 bool describe_port(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 		FfInitVals &initvals, FfData &ref, Cell *named,
 		Cell *cell, IdString port, const SigSpec &path_sig,
@@ -488,6 +499,10 @@ bool classify_off_path_bit(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
 
 	FfData ff(&initvals, drv);
 	if (Mismatch bad = mismatch_reason(sigmap, ref, ff)) {
+		if (error && lowerable_mismatch(sigmap, ref, ff))
+			refuse_mismatch("Flop %s on input %s of cell %s has %s flop %s%s.\n",
+					log_id(drv), log_id(port), log_id(cell), bad.why,
+					log_id(named), bad.marker);
 		if (error)
 			refuse("Flop %s on input %s of cell %s has %s flop %s%s.\n",
 					log_id(drv), log_id(port), log_id(cell), bad.why,
@@ -1091,6 +1106,20 @@ Mismatch mismatch_reason(SigMap &sigmap, FfData &ref, FfData &ff)
 	// Widths are deliberately not compared: a $mux merges a 1-bit select
 	// register with its wide data registers.
 	return {};
+}
+
+// Whether lower_path_controls could reconcile the two: they differ only in an
+// enable or a sync reset, and neither has an async control, which reaches Q
+// between edges where a lowered next value cannot follow it.
+bool lowerable_mismatch(SigMap &sigmap, FfData &ref, FfData &ff)
+{
+	if (ref.has_arst || ref.has_aload || ref.has_sr ||
+			ff.has_arst || ff.has_aload || ff.has_sr)
+		return false;
+	FfData a = ref, b = ff;
+	a.has_ce = b.has_ce = false;
+	a.has_srst = b.has_srst = false;
+	return !mismatch_reason(sigmap, a, b);
 }
 
 // A forward move across a multi-input cell folds every other data input into
@@ -1738,11 +1767,8 @@ std::vector<int> slice_for_cut(Module *module, SigMap &sigmap,
 // bits has a second reader, so the split is a list of candidates rather than a
 // verdict: the whole of Q is tried first and comes back whole, which is the
 // ordinary case, and the runs answer only when it cannot go.
-std::vector<int> slice_forward_for_cut(Module *module, SigMap &sigmap,
-		const dict<SigBit, BitSrc> &drivers, FfInitVals &initvals, FfData &ref,
-		Cell *flop, Cell *cut)
+std::vector<std::vector<int>> forward_runs(Module *module, SigMap &sigmap, const SigSpec &q)
 {
-	SigSpec q = sigmap(ref.sig_q);
 	dict<SigBit, int> index;
 	for (int i = 0; i < GetSize(q); i++)
 		if (q[i].is_wire())
@@ -1786,6 +1812,15 @@ std::vector<int> slice_forward_for_cut(Module *module, SigMap &sigmap,
 			runs.push_back({});
 		runs.back().push_back(i);
 	}
+	return runs;
+}
+
+std::vector<int> slice_forward_for_cut(Module *module, SigMap &sigmap,
+		const dict<SigBit, BitSrc> &drivers, FfInitVals &initvals, FfData &ref,
+		Cell *flop, Cell *cut)
+{
+	SigSpec q = sigmap(ref.sig_q);
+	std::vector<std::vector<int>> runs = forward_runs(module, sigmap, q);
 
 	std::vector<int> all;
 	for (int i = 0; i < GetSize(q); i++)
@@ -1798,6 +1833,7 @@ std::vector<int> slice_forward_for_cut(Module *module, SigMap &sigmap,
 	// with it. It refuses by throwing, and bits that refuse are simply not this
 	// move.
 	std::string whole;
+	bool whole_mismatch = false;
 	auto reaches = [&](const std::vector<int> &take, std::string *why) {
 		SigSpec start;
 		for (int i : take)
@@ -1805,8 +1841,10 @@ std::vector<int> slice_forward_for_cut(Module *module, SigMap &sigmap,
 		try {
 			collect_chain(module, sigmap, drivers, initvals, ref, flop, start, cut);
 		} catch (const MoveRefused &refused) {
-			if (why)
+			if (why) {
 				*why = refused.reason;
+				whole_mismatch = refused.mismatch;
+			}
 			return false;
 		}
 		return true;
@@ -1833,6 +1871,10 @@ std::vector<int> slice_forward_for_cut(Module *module, SigMap &sigmap,
 	// operand or a path that gives out, which being split apart cannot explain.
 	// No marker of its own: the quoted reason is the register's own answer and
 	// brings its marker with it.
+	if (reaching == 0 && whole_mismatch)
+		refuse_mismatch("Flop %s is %d registers sharing one cell, none of which "
+				"reaches cut %s on its own, and read whole: %s",
+				log_id(flop), GetSize(runs), log_id(cut), whole.c_str());
 	if (reaching == 0)
 		refuse("Flop %s is %d registers sharing one cell, none of which reaches "
 				"cut %s on its own, and read whole: %s",
@@ -1873,7 +1915,8 @@ void refuse_if_shared(Cell *flop, const char *what)
 // make has been made by the time the first cell is touched, so returning there
 // leaves a legality check with no side effects. -all-fanouts is what wants it,
 // having several moves to make and no way to take the earlier ones back.
-void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = false)
+void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = false,
+		IdString *landed = nullptr)
 {
 	if (!flop->is_builtin_ff())
 		refuse("Cell %s is not a built-in flip-flop%s.\n", log_id(flop), mark::invalid);
@@ -2244,6 +2287,8 @@ void apply_backward_move(Module *module, Cell *flop, Cell *cut, bool dry_run = f
 				log_id(flop_name));
 
 	stored.log_folds(flop_name);
+	if (landed)
+		*landed = cut->name;
 
 	if (nclone)
 		log("Retimed %s backward across %d cell(s) ending at %s, cloning %d flop(s).\n",
@@ -2403,6 +2448,426 @@ void apply_backward_all_fanouts(Module *module, Cell *flop, Cell *cut)
 			"at %s.\n", GetSize(targets), net.c_str(), depth, log_id(cut_name));
 }
 
+// Every combinational cell whose output reaches the inputs of cut without
+// passing through a register, cut included. A forward move that cannot reach
+// the cut stays inside this set, so the shorter move it makes instead is a step
+// towards the cut rather than off to one side of it.
+pool<Cell *> comb_fanin(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers, Cell *cut)
+{
+	pool<Cell *> seen;
+	std::vector<Cell *> queue;
+	seen.insert(cut);
+	queue.push_back(cut);
+	for (int i = 0; i < GetSize(queue); i++)
+		for (auto &conn : queue[i]->connections()) {
+			if (!queue[i]->input(conn.first))
+				continue;
+			for (auto bit : sigmap(conn.second)) {
+				auto it = drivers.find(bit);
+				if (it == drivers.end() || it->second.cell->is_builtin_ff())
+					continue;
+				if (seen.insert(it->second.cell).second)
+					queue.push_back(it->second.cell);
+			}
+		}
+	return seen;
+}
+
+// Where a forward move that cannot reach cut stops instead: the last cell of
+// a chain from the flop that stays on the way to the cut. The chain takes the
+// hops collect_chain would, so the landing is one the ordinary move can make.
+// The walk ends at the first branch, because which side the cut lies on no
+// longer picks out one chain there. Null when not even one hop gets closer.
+//
+// STA names its cut on a netlist that has been through abc, and the source
+// location abc hands a cell is the whole expression it was folded into, so the
+// cell a caller finds for that cut can sit several gates past where any move
+// can go. Stopping short gives the caller the part of the move that exists.
+//
+// The whole of Q is walked first and then each run of it, the order
+// slice_forward_for_cut asks in, so it slices the landing the same way.
+Cell *forward_retreat(Module *module, SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &whole, Cell *flop, Cell *cut)
+{
+	pool<Cell *> toward = comb_fanin(sigmap, drivers, cut);
+	SigSpec q = sigmap(whole.sig_q);
+
+	// A hop is only taken with every other operand one the move can merge,
+	// which is what collect_merges will ask of it.
+	auto operands_merge = [&](FfData &ref, const ChainStep &hop) {
+		for (auto port : data_inputs(hop.cell)) {
+			std::vector<PortBit> desc;
+			if (port != hop.port && !describe_operand(sigmap, drivers, initvals, ref,
+					flop, hop.cell, port, desc, false))
+				return false;
+		}
+		return true;
+	};
+
+	auto walk = [&](const std::vector<int> &take) -> Cell * {
+		FfData ref = GetSize(take) == whole.width ? whole : whole.slice(take);
+		SigSpec cur;
+		for (int i : take)
+			cur.append(q[i]);
+		Cell *last = nullptr;
+		pool<Cell *> seen;
+		while (true) {
+			std::vector<ChainStep> hops, on_way;
+			hops_on_path(module, sigmap, drivers, initvals, ref, flop, cur, hops);
+			for (auto &hop : hops)
+				if (toward.count(hop.cell) && operands_merge(ref, hop))
+					on_way.push_back(hop);
+			if (GetSize(on_way) != 1 || seen.count(on_way[0].cell))
+				break;
+			last = on_way[0].cell;
+			seen.insert(last);
+			if (last == cut || !last->hasPort(ID::Y))
+				break;
+			cur = sigmap(last->getPort(ID::Y));
+		}
+		return last;
+	};
+
+	std::vector<int> all;
+	for (int i = 0; i < whole.width; i++)
+		all.push_back(i);
+	if (Cell *landing = walk(all))
+		return landing;
+
+	Cell *found = nullptr;
+	for (auto &run : forward_runs(module, sigmap, q)) {
+		if (GetSize(run) == whole.width)
+			continue;
+		Cell *landing = walk(run);
+		if (landing == nullptr)
+			continue;
+		if (found != nullptr && found != landing)
+			return nullptr;
+		found = landing;
+	}
+	return found;
+}
+
+// A cell a cone move can carry: a type the pass crosses, with a Y for the
+// register to land on.
+bool cone_cell(Cell *cell)
+{
+	return !cell->is_builtin_ff() && cell->hasPort(ID::Y) && !data_inputs(cell).empty();
+}
+
+// Which cells a forward move across a whole cone can end on, answered once for
+// every cell behind the cut. A cell can when every input to its combinational
+// fan-in is a constant or a register the named flop merges with: that is
+// f(reg(x1), .., reg(xn)) = reg(f(x1, .., xn)) with nothing assumed about the
+// shape of f. The chain walk asks the same of one path at a time, so it cannot
+// see a cone whose paths split and meet again, which is what a decoded select
+// looks like once bmuxmap and pmuxtree have taken a $bmux apart.
+//
+// allow_lower lets registers that differ only in an enable or a sync reset
+// through, because lowering those controls is what reconciles them and the
+// caller tries it next.
+struct ConeScan {
+	SigMap &sigmap;
+	const dict<SigBit, BitSrc> &drivers;
+	FfInitVals &initvals;
+	FfData &ref;
+	Cell *flop;
+	bool allow_lower;
+	// 1 while a cell's fan-in is being asked about, 2 once the answer is in why.
+	dict<Cell *, int> state;
+	dict<Cell *, std::string> why;
+	dict<Cell *, std::string> leaf_why;
+
+	ConeScan(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers, FfInitVals &initvals,
+			FfData &ref, Cell *flop, bool allow_lower)
+		: sigmap(sigmap), drivers(drivers), initvals(initvals), ref(ref), flop(flop),
+		  allow_lower(allow_lower) { }
+
+	// Past this many cells deep the walk would risk running out of stack.
+	static constexpr int max_depth = 10000;
+	int depth = 0;
+
+	bool legal(Cell *cell)
+	{
+		if (state.count(cell))
+			return state.at(cell) == 2 && !why.count(cell);
+		state[cell] = 1;
+		std::string reason;
+		if (depth >= max_depth)
+			reason = stringf("The cone behind cell %s is more than %d cells deep%s.\n",
+					log_id(cell), max_depth, mark::unsupported);
+		else {
+			depth++;
+			reason = inputs_reason(cell);
+			depth--;
+		}
+		state[cell] = 2;
+		if (!reason.empty())
+			why[cell] = reason;
+		return reason.empty();
+	}
+
+	// Named after the first place the register was found, which is enough for
+	// a reason: the register is what cannot merge, wherever it is read.
+	std::string leaf_reason(Cell *reg, Cell *cell, IdString port)
+	{
+		if (reg == flop)
+			return "";
+		auto it = leaf_why.find(reg);
+		if (it != leaf_why.end())
+			return it->second;
+		std::string reason;
+		FfData ff(&initvals, reg);
+		Mismatch bad = mismatch_reason(sigmap, ref, ff);
+		if (const char *unmovable = unmovable_reason(ff))
+			reason = stringf("Flop %s on input %s of cell %s cannot be merged because %s%s.\n",
+					log_id(reg), log_id(port), log_id(cell), unmovable, mark::extra_logic);
+		else if (bad && !(allow_lower && lowerable_mismatch(sigmap, ref, ff)))
+			reason = stringf("Flop %s on input %s of cell %s has %s flop %s%s.\n",
+					log_id(reg), log_id(port), log_id(cell), bad.why, log_id(flop), bad.marker);
+		leaf_why[reg] = reason;
+		return reason;
+	}
+
+	std::string inputs_reason(Cell *cell)
+	{
+		for (auto port : data_inputs(cell))
+			for (auto bit : sigmap(cell->getPort(port))) {
+				if (!bit.is_wire())
+					continue;
+				auto it = drivers.find(bit);
+				bool from_q = it != drivers.end() && it->second.cell->is_builtin_ff() &&
+						it->second.port == ID::Q;
+				bool from_cell = it != drivers.end() && !it->second.cell->is_builtin_ff();
+				if (!from_q && !from_cell)
+					return stringf("Input %s of cell %s is not driven by a flop or a "
+							"constant, so flop %s cannot move forward across it.\n",
+							log_id(port), log_id(cell), log_id(flop));
+				Cell *drv = it->second.cell;
+				if (from_q) {
+					std::string reason = leaf_reason(drv, cell, port);
+					if (!reason.empty())
+						return reason;
+					continue;
+				}
+				if (!cone_cell(drv) || it->second.port != ID::Y)
+					return stringf("Cell %s has type %s, which opt_retime cannot move "
+							"across%s.\n", log_id(drv), log_id(drv->type), mark::unsupported);
+				if (state.count(drv) && state.at(drv) == 1)
+					return stringf("Cell %s is on a combinational cycle%s.\n",
+							log_id(drv), mark::invalid);
+				if (!legal(drv))
+					return why.at(drv);
+			}
+		return "";
+	}
+};
+
+// The cell a cone move ends on: the cut when its whole fan-in can travel, and
+// otherwise the movable cell nearest it on the way from the flop, so a cut out
+// of reach still gets the part of the move that exists. Refuses when the flop
+// does not lead to the cut, when nothing on the way can move, and when the
+// cells it can reach sit on branches that only meet past where a move can go.
+Cell *cone_landing(ConeScan &scan, Cell *cut)
+{
+	SigMap &sigmap = scan.sigmap;
+	pool<Cell *> toward = comb_fanin(sigmap, scan.drivers, cut);
+
+	dict<SigBit, std::vector<Cell *>> readers;
+	for (auto cell : toward) {
+		if (!cone_cell(cell))
+			continue;
+		for (auto port : data_inputs(cell))
+			for (auto bit : sigmap(cell->getPort(port)))
+				if (bit.is_wire())
+					readers[bit].push_back(cell);
+	}
+	auto next_cells = [&](const SigSpec &sig, std::vector<Cell *> &out) {
+		out.clear();
+		for (auto bit : sigmap(sig)) {
+			auto it = readers.find(bit);
+			if (it != readers.end())
+				for (auto cell : it->second)
+					out.push_back(cell);
+		}
+	};
+
+	// Downstream of the flop and upstream of the cut: the only places the
+	// register can land and still be on the way.
+	pool<Cell *> down;
+	std::vector<Cell *> queue, step;
+	next_cells(scan.flop->getPort(ID::Q), step);
+	for (auto cell : step)
+		if (down.insert(cell).second)
+			queue.push_back(cell);
+	for (int i = 0; i < GetSize(queue); i++) {
+		next_cells(queue[i]->getPort(ID::Y), step);
+		for (auto cell : step)
+			if (down.insert(cell).second)
+				queue.push_back(cell);
+	}
+	if (!down.count(cut))
+		refuse("Cut %s is not on the after-path of flop %s%s.\n",
+				log_id(cut), log_id(scan.flop), mark::invalid);
+	if (scan.legal(cut))
+		return cut;
+
+	pool<Cell *> movable;
+	for (auto cell : queue)
+		if (scan.legal(cell))
+			movable.insert(cell);
+
+	// A landing is a movable cell with no other movable cell past it on the
+	// way to the cut. Walking back from every movable cell at once marks each
+	// cell that has one past it, visiting every cell once.
+	dict<Cell *, std::vector<Cell *>> feeders;
+	for (auto cell : queue) {
+		next_cells(cell->getPort(ID::Y), step);
+		for (auto next : step)
+			if (down.count(next))
+				feeders[next].push_back(cell);
+	}
+	pool<Cell *> behind;
+	std::vector<Cell *> back(movable.begin(), movable.end());
+	for (int i = 0; i < GetSize(back); i++) {
+		auto it = feeders.find(back[i]);
+		if (it != feeders.end())
+			for (auto cell : it->second)
+				if (behind.insert(cell).second)
+					back.push_back(cell);
+	}
+	std::vector<Cell *> furthest;
+	for (auto cell : queue)
+		if (movable.count(cell) && !behind.count(cell))
+			furthest.push_back(cell);
+	if (furthest.empty())
+		refuse("%s", scan.why.at(cut));
+	if (GetSize(furthest) > 1) {
+		std::string names;
+		for (auto cell : furthest)
+			names += stringf("%s%s", names.empty() ? "" : ", ", log_id(cell));
+		refuse("Flop %s cannot reach cut %s, and the cells it can reach on the way "
+				"(%s) do not meet before it, so there is no one cell to stop at%s.\n",
+				log_id(scan.flop), log_id(cut), names, mark::unsupported);
+	}
+	return furthest[0];
+}
+
+// A register bit at the edge of a cone, and where that register's D has it.
+struct ConeLeaf {
+	SigBit q;
+	Cell *reg;
+	int offset;
+};
+
+// The fan-in of target in an order where every cell comes after the ones it
+// reads, and the register bits at its edge. Only asked of a cell the scan
+// found legal, so the cone is acyclic and every edge is a register or a
+// constant.
+void gather_cone(ConeScan &scan, Cell *target, std::vector<Cell *> &cells,
+		std::vector<ConeLeaf> &leaves)
+{
+	pool<Cell *> done;
+	pool<SigBit> seen;
+	std::function<void(Cell *, int)> visit = [&](Cell *cell, int depth) {
+		if (!done.insert(cell).second)
+			return;
+		if (depth >= ConeScan::max_depth)
+			refuse("The cone behind cell %s is more than %d cells deep%s.\n",
+					log_id(cell), ConeScan::max_depth, mark::unsupported);
+		for (auto port : data_inputs(cell))
+			for (auto bit : scan.sigmap(cell->getPort(port))) {
+				if (!bit.is_wire())
+					continue;
+				const BitSrc &src = scan.drivers.at(bit);
+				if (!src.cell->is_builtin_ff())
+					visit(src.cell, depth + 1);
+				else if (seen.insert(bit).second)
+					leaves.push_back({bit, src.cell, src.offset});
+			}
+		cells.push_back(cell);
+	};
+	visit(target, 0);
+}
+
+// One stored value carried across a cone: every register at the edge
+// contributes its own copy, and the cone is evaluated on them the way
+// fold_value evaluates a chain. The rules on undefined values are the ones
+// fold_through applies, for the same reasons.
+bool fold_cone(SigMap &sigmap, FfInitVals &initvals, Cell *flop,
+		const std::vector<Cell *> &cells, const std::vector<ConeLeaf> &leaves,
+		FoldKind kind, Const &result)
+{
+	dict<SigBit, State> val;
+	bool any = false, all = true;
+	for (auto &leaf : leaves) {
+		State bit = stored_bit(initvals, leaf.reg, leaf.offset, kind)[0];
+		bool def = bit == State::S0 || bit == State::S1;
+		any = any || def;
+		all = all && def;
+		val[leaf.q] = bit;
+	}
+	if (any && !all)
+		refuse("Flop %s cannot move because the move would fold %s values together "
+				"and only some of them are defined%s.\n",
+				log_id(flop), fold_kind_name(kind), mark::unsupported);
+
+	for (auto cell : cells) {
+		std::vector<Const> args;
+		for (auto port : data_inputs(cell)) {
+			std::vector<State> bits;
+			for (auto bit : sigmap(cell->getPort(port)))
+				bits.push_back(bit.is_wire() ? val.at(bit) : bit.data);
+			args.push_back(Const(bits));
+		}
+		bool err = false;
+		Const out;
+		if (GetSize(args) == 3)
+			out = CellTypes::eval(cell, args[0], args[1], args[2], &err);
+		else if (GetSize(args) == 2)
+			out = CellTypes::eval(cell, args[0], args[1], &err);
+		else
+			out = CellTypes::eval(cell, args[0], Const(), &err);
+		if (err)
+			refuse("Flop %s has a %s value that opt_retime cannot fold through "
+					"cell %s, because it cannot evaluate %s on constants%s.\n",
+					log_id(flop), fold_kind_name(kind), log_id(cell),
+					log_id(cell->type), mark::unsupported);
+		SigSpec y = sigmap(cell->getPort(ID::Y));
+		for (int i = 0; i < GetSize(y) && i < GetSize(out); i++)
+			if (y[i].is_wire())
+				val[y[i]] = out[i];
+	}
+
+	std::vector<State> bits;
+	for (auto bit : sigmap(cells.back()->getPort(ID::Y)))
+		bits.push_back(bit.is_wire() && val.count(bit) ? val.at(bit) : State::Sx);
+	Const out(bits);
+	if (!out.is_fully_def()) {
+		if (any && kind != FoldKind::Init)
+			refuse("Flop %s cannot move because folding its %s value through the "
+					"cone gives an undefined result.\n",
+					log_id(flop), fold_kind_name(kind));
+		return false;
+	}
+	result = out;
+	return true;
+}
+
+// The registers a cone move would merge, for lowering their controls first.
+pool<Cell *> cone_sources(SigMap &sigmap, const dict<SigBit, BitSrc> &drivers,
+		FfInitVals &initvals, FfData &ref, Cell *flop, Cell *cut)
+{
+	ConeScan scan(sigmap, drivers, initvals, ref, flop, true);
+	std::vector<Cell *> cells;
+	std::vector<ConeLeaf> leaves;
+	gather_cone(scan, cone_landing(scan, cut), cells, leaves);
+	pool<Cell *> sources;
+	for (auto &leaf : leaves)
+		sources.insert(leaf.reg);
+	return sources;
+}
+
 // Every register a forward move would have to merge: whatever flop drives a
 // data input of a cell on the path. Read off the driver index rather than
 // asked of describe_operand, which declines to describe exactly the
@@ -2483,7 +2948,7 @@ void name_lowered_controls(Module *module, SigMap &sigmap, const pool<Cell *> &b
 //
 // False when no lowering would change the answer, so the caller can report the
 // refusal the plain move already gave.
-bool lower_path_controls(Module *module, Cell *flop, Cell *cut)
+bool lower_path_controls(Module *module, Cell *flop, Cell *cut, bool cone)
 {
 	SigMap sigmap(module);
 	FfInitVals initvals(&sigmap, module);
@@ -2495,15 +2960,21 @@ bool lower_path_controls(Module *module, Cell *flop, Cell *cut)
 	if (!whole.has_clk)
 		return false;
 
-	// The same slice and chain the move itself works on, so the registers
-	// found below are the ones it would have tried to merge.
-	std::vector<int> bits = slice_forward_for_cut(module, sigmap, drivers, initvals,
-			whole, flop, cut);
-	FfData ref = GetSize(bits) != whole.width ? whole.slice(bits) : whole;
-	std::vector<ChainStep> chain = collect_chain(module, sigmap, drivers, initvals, ref,
-			flop, ref.sig_q, cut);
-
-	pool<Cell *> sources = path_sources(sigmap, drivers, chain);
+	// The same slice and chain, or the same cone, the move itself works on, so
+	// the registers found below are the ones it would have tried to merge.
+	FfData ref = whole;
+	pool<Cell *> sources;
+	if (cone) {
+		sources = cone_sources(sigmap, drivers, initvals, ref, flop, cut);
+	} else {
+		std::vector<int> bits = slice_forward_for_cut(module, sigmap, drivers, initvals,
+				whole, flop, cut);
+		if (GetSize(bits) != whole.width)
+			ref = whole.slice(bits);
+		std::vector<ChainStep> chain = collect_chain(module, sigmap, drivers, initvals,
+				ref, flop, ref.sig_q, cut);
+		sources = path_sources(sigmap, drivers, chain);
+	}
 	sources.insert(flop);
 
 	// Only a disagreement in the synchronous controls is worth lowering. An
@@ -2548,7 +3019,7 @@ bool lower_path_controls(Module *module, Cell *flop, Cell *cut)
 	return true;
 }
 
-void apply_forward_move(Module *module, Cell *flop, Cell *cut)
+void apply_forward_move(Module *module, Cell *flop, Cell *cut, IdString *landed = nullptr)
 {
 	if (!flop->is_builtin_ff())
 		refuse("Cell %s is not a built-in flip-flop%s.\n", log_id(flop), mark::invalid);
@@ -2578,15 +3049,59 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 	// several registers. Everything from here on is about that run: the rest of
 	// the cell comes back as its own register at the commit, the way a backward
 	// slice does.
-	std::vector<int> bits = slice_forward_for_cut(module, sigmap, drivers, initvals,
-			whole, flop, cut);
-	bool sliced = GetSize(bits) != whole.width;
-	FfData ff = sliced ? whole.slice(bits) : whole;
-	if (sliced)
-		ff.name = whole.name;
+	std::vector<int> bits;
+	bool sliced = false;
+	FfData ff;
+	std::vector<ChainStep> chain;
+	auto reach = [&]() {
+		bits = slice_forward_for_cut(module, sigmap, drivers, initvals, whole, flop, cut);
+		sliced = GetSize(bits) != whole.width;
+		ff = sliced ? whole.slice(bits) : whole;
+		if (sliced)
+			ff.name = whole.name;
+		chain = collect_chain(module, sigmap, drivers, initvals, ff, flop, ff.sig_q, cut);
+		// The walk takes a hop on the port the path enters alone; whether the
+		// other operands are registers at all is asked here, so that an
+		// unregistered one is a reason to stop short like the rest. Registers
+		// that merely disagree are left to collect_merges, in its turn.
+		SigSpec path = sigmap(ff.sig_q);
+		for (auto &step : chain) {
+			for (auto port : data_inputs(step.cell)) {
+				std::vector<PortBit> desc;
+				try {
+					if (port == step.port)
+						describe_port(sigmap, drivers, initvals, ff, flop, step.cell,
+								port, path, desc, true);
+					else
+						describe_operand(sigmap, drivers, initvals, ff, flop, step.cell,
+								port, desc, true);
+				} catch (const MoveRefused &refused) {
+					if (!refused.mismatch)
+						throw;
+				}
+			}
+			path = sigmap(step.cell->getPort(ID::Y));
+		}
+	};
 
-	std::vector<ChainStep> chain = collect_chain(module, sigmap, drivers, initvals, ff,
-			flop, ff.sig_q, cut);
+	// A cut the move cannot get to is moved towards instead, as far as a move
+	// goes. Registers disagreeing on an enable or a sync reset are the one
+	// exception: lowering those is how they are answered, and a shorter move
+	// would take that chance away.
+	try {
+		reach();
+	} catch (const MoveRefused &refused) {
+		if (refused.mismatch)
+			throw;
+		Cell *landing = forward_retreat(module, sigmap, drivers, initvals, whole, flop, cut);
+		if (landing == nullptr || landing == cut)
+			throw;
+		log("Cut %s is out of reach: %s", log_id(cut), refused.reason.c_str());
+		log("Moving flop %s forward to %s instead, the furthest cell on the way to "
+				"cut %s that it can reach.\n", log_id(flop), log_id(landing), log_id(cut));
+		cut = landing;
+		reach();
+	}
 
 	check_chain(ff, flop, chain);
 
@@ -2876,6 +3391,8 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 				log_id(flop_name));
 
 	stored.log_folds(flop_name);
+	if (landed)
+		*landed = cut->name;
 
 	log("Retimed %s forward across %d cell(s) ending at %s, merging %d flop(s).\n",
 			log_id(flop_name), GetSize(chain), log_id(cut), GetSize(merges));
@@ -2883,6 +3400,205 @@ void apply_forward_move(Module *module, Cell *flop, Cell *cut)
 		log("Kept %d merged flop(s) that still have other readers.\n", kept);
 	if (nheld)
 		log("Left %d register(s) on the chain for readers off the after-path.\n", nheld);
+}
+
+// -cone, or a chain move that was refused: one register on the cut's output in
+// place of every register feeding its combinational fan-in, however that
+// fan-in branches and meets again.
+//
+// The cone is copied rather than rewired. The copy reads each register's D
+// where the original read its Q, so it computes a cycle early, and the new
+// register brings that back into step on the cut's old output net. The
+// original cone and registers then stay only as far as something else still
+// reads them, which is the job the peel and the kept merges do for a chain,
+// done by what is left standing instead of by extra registers.
+void apply_forward_cone_move(Module *module, Cell *flop, Cell *cut, bool allow_lower,
+		IdString *landed = nullptr)
+{
+	if (!flop->is_builtin_ff())
+		refuse("Cell %s is not a built-in flip-flop%s.\n", log_id(flop), mark::invalid);
+	if (data_inputs(cut).empty())
+		refuse("Cut cell %s has type %s, which opt_retime cannot move across%s.\n",
+				log_id(cut), log_id(cut->type), mark::unsupported);
+	if (flop == cut)
+		refuse("Flop and cut must be different cells%s.\n", mark::invalid);
+
+	SigMap sigmap(module);
+	FfInitVals initvals(&sigmap, module);
+	FfData ref(&initvals, flop);
+	if (!ref.has_clk || !flop->hasPort(ID::D) || !flop->hasPort(ID::Q))
+		refuse("Cell %s is not a clocked flop with D and Q%s.\n",
+				log_id(flop), mark::invalid);
+	if (const char *why = unmovable_reason(ref))
+		refuse("Flop %s cannot move across a cone because %s, which the move would "
+				"have to push through it%s.\n", log_id(flop), why, mark::extra_logic);
+
+	dict<SigBit, BitSrc> drivers = index_output_bits(module, sigmap);
+	ConeScan scan(sigmap, drivers, initvals, ref, flop, allow_lower);
+	Cell *target = cone_landing(scan, cut);
+	if (target != cut) {
+		log("Cut %s is out of reach: %s", log_id(cut), scan.why.at(cut).c_str());
+		log("Moving flop %s forward across the cone ending at %s instead, the furthest "
+				"cell on the way to cut %s that it can reach.\n",
+				log_id(flop), log_id(target), log_id(cut));
+	}
+
+	std::vector<Cell *> cells;
+	std::vector<ConeLeaf> leaves;
+	gather_cone(scan, target, cells, leaves);
+	pool<Cell *> regs;
+	for (auto &leaf : leaves)
+		regs.insert(leaf.reg);
+
+	// Let through by the scan so the caller could lower them; the plain move
+	// merges only registers that agree.
+	for (auto reg : regs) {
+		if (reg == flop)
+			continue;
+		FfData ff(&initvals, reg);
+		if (Mismatch bad = mismatch_reason(sigmap, ref, ff))
+			refuse_mismatch("Flop %s in the cone behind %s has %s flop %s%s.\n",
+					log_id(reg), log_id(target), bad.why, log_id(flop), bad.marker);
+	}
+
+	SigSpec old_y = target->getPort(ID::Y);
+	int width = GetSize(old_y);
+	if (ref.is_fine && width != 1)
+		refuse("Flop %s is a single-bit cell and cannot widen to %d bits%s.\n",
+				log_id(flop), width, mark::unsupported);
+
+	pool<SigBit> cone_nets;
+	for (auto cell : cells)
+		insert_wire_bits(cone_nets, sigmap(cell->getPort(ID::Y)));
+	check_controls(ref, sigmap, cone_nets);
+
+	StoredValues stored;
+	stored.collect(ref, [&](FoldKind kind, Const, Const &result) {
+		return fold_cone(sigmap, initvals, flop, cells, leaves, kind, result);
+	});
+
+	// Every refusal is behind us; from here on the module is being rewritten.
+	IdString flop_name = flop->name;
+	std::vector<IdString> names;
+	std::vector<Cell *> copies;
+	dict<SigBit, SigBit> early;
+	for (auto cell : cells) {
+		names.push_back(cell->name);
+		Cell *copy = module->addCell(module->uniquify(cell->name.str() + "_retimed"), cell);
+		SigSpec y = cell->getPort(ID::Y);
+		Wire *next = module->addWire(module->uniquify(cell->name.str() + "_retimed_y"),
+				GetSize(y));
+		copy->setPort(ID::Y, next);
+		SigSpec mapped = sigmap(y);
+		for (int i = 0; i < GetSize(mapped); i++)
+			if (mapped[i].is_wire())
+				early[mapped[i]] = SigBit(next, i);
+		copies.push_back(copy);
+	}
+	for (int i = 0; i < GetSize(cells); i++)
+		for (auto port : data_inputs(cells[i])) {
+			SigSpec neu;
+			for (auto bit : sigmap(cells[i]->getPort(port))) {
+				auto it = early.find(bit);
+				if (!bit.is_wire())
+					neu.append(bit);
+				else if (it != early.end())
+					neu.append(it->second);
+				else
+					neu.append(drivers.at(bit).cell->getPort(ID::D)[drivers.at(bit).offset]);
+			}
+			copies[i]->setPort(port, neu);
+		}
+
+	// The cut's old output net is the new register's Q, so everything that read
+	// the cut now reads the register.
+	target->setPort(ID::Y, module->addWire(module->uniquify(target->name.str() + "_stale_y"),
+			width));
+
+	dict<SigBit, int> reads;
+	for (auto cell : module->cells())
+		for (auto &conn : cell->connections())
+			if (cell->input(conn.first))
+				for (auto bit : sigmap(conn.second))
+					if (bit.is_wire())
+						reads[bit]++;
+	for (auto wire : module->wires())
+		if (wire->port_output)
+			for (auto bit : sigmap(SigSpec(wire)))
+				reads[bit]++;
+	auto unread = [&](const SigSpec &sig) {
+		for (auto bit : sigmap(sig))
+			if (bit.is_wire() && reads.count(bit) && reads.at(bit) > 0)
+				return false;
+		return true;
+	};
+	auto drop = [&](Cell *cell) {
+		for (auto &conn : cell->connections())
+			if (cell->input(conn.first))
+				for (auto bit : sigmap(conn.second))
+					if (bit.is_wire() && reads.count(bit))
+						reads[bit]--;
+		module->remove(cell);
+	};
+
+	// Readers of a cell come after it, so walking back from the cut frees each
+	// cell before the ones it reads are asked about.
+	std::vector<SigSpec> old_out(GetSize(cells));
+	std::vector<bool> gone(GetSize(cells), false);
+	int copied = 0;
+	for (int i = GetSize(cells) - 1; i >= 0; i--) {
+		if (!unread(cells[i]->getPort(ID::Y))) {
+			copied++;
+			continue;
+		}
+		old_out[i] = cells[i]->getPort(ID::Y);
+		drop(cells[i]);
+		gone[i] = true;
+	}
+
+	bool flop_gone = false;
+	int merged = 0, kept = 0;
+	for (auto reg : regs) {
+		if (!unread(reg->getPort(ID::Q))) {
+			kept++;
+			continue;
+		}
+		initvals.remove_init(sigmap(reg->getPort(ID::Q)));
+		flop_gone = flop_gone || reg == flop;
+		drop(reg);
+		merged++;
+	}
+
+	// A copy whose original went takes its name back, and the original's
+	// output net, so the netlist reads as the cone moved rather than copied.
+	for (int i = 0; i < GetSize(cells); i++) {
+		if (!gone[i])
+			continue;
+		module->rename(copies[i], names[i]);
+		if (i + 1 < GetSize(cells))
+			module->connect(old_out[i], copies[i]->getPort(ID::Y));
+	}
+
+	FfData moved = ref;
+	moved.cell = nullptr;
+	moved.name = flop_gone ? flop_name : module->uniquify(flop_name.str() + "_retimed");
+	moved.sig_d = copies.back()->getPort(ID::Y);
+	moved.sig_q = old_y;
+	moved.width = width;
+	stored.apply(moved, width);
+	if (!moved.emit())
+		log_error("The register left on the output of cone %s did not survive being "
+				"built.\n", log_id(names.back()));
+	stored.log_folds(moved.name);
+	if (landed)
+		*landed = names.back();
+
+	log("Retimed %s forward across a cone of %d cell(s) ending at %s, merging %d "
+			"flop(s).\n", log_id(flop_name), GetSize(cells), log_id(names.back()), merged);
+	if (kept)
+		log("Kept %d flop(s) feeding the cone that still have other readers.\n", kept);
+	if (copied)
+		log("Copied %d cell(s) of the cone that other logic still reads.\n", copied);
 }
 
 // Make a move if it is legal, and say why not if it is not. An empty string
@@ -3709,7 +4425,7 @@ void apply_hier_move(Design *design, Module *module, Cell *flop, Module *cut_mod
 		// Lowering replaces every register it touches, so nothing collected
 		// before it survives and both ends are looked up again by name.
 		IdString flop_name = flop->name, cut_name = cut->name;
-		if (!lower_path_controls(module, flop, cut))
+		if (!lower_path_controls(module, flop, cut, false))
 			refuse("Lowering the controls would not change this move.\n");
 		apply_forward_move(module, module->cell(flop_name), module->cell(cut_name));
 	}
@@ -3755,6 +4471,30 @@ struct OptRetimePass : public Pass {
 		log("        Extra readers of the cut Y become the new flop Q; extra\n");
 		log("        readers of Q or of an intermediate Y keep a register on the\n");
 		log("        net they read, holding the value they had.\n");
+		log("        A cut the move cannot reach is moved towards instead: the\n");
+		log("        flop goes as far along the way to it as a move can, and\n");
+		log("        opt_retime.cut names the cell it stopped at. Operand\n");
+		log("        registers that disagree on an enable or a sync reset are\n");
+		log("        lowered rather than stopped short of.\n");
+		log("\n");
+		log("    -cone\n");
+		log("        with -forward, move across the whole combinational fan-in\n");
+		log("        of -cut rather than along one chain, so paths from the flop\n");
+		log("        may branch and meet again, as a decoded mux select does.\n");
+		log("        Without -cone this move is still tried when the chain move\n");
+		log("        is refused; -cone skips the chain move.\n");
+		log("        Every register at the edge of that fan-in is merged into\n");
+		log("        one register on the cut's output, and all of them have to\n");
+		log("        share the flop's clock and controls (see\n");
+		log("        -no-lower-controls). The cone is copied onto the registers'\n");
+		log("        next values, and the originals stay only where other logic\n");
+		log("        still reads them. A cut whose fan-in cannot all move is\n");
+		log("        moved towards, stopping at the furthest cell on the way\n");
+		log("        whose fan-in can.\n");
+		log("\n");
+		log("    -no-cone\n");
+		log("        with -forward, make the chain move only, and do not try the\n");
+		log("        whole fan-in when it is refused.\n");
 		log("\n");
 		log("    -backward\n");
 		log("        move the register upstream onto the path input of -cut.\n");
@@ -3844,7 +4584,8 @@ struct OptRetimePass : public Pass {
 		log("        which the pass would otherwise have made.\n");
 		log("\n");
 		log("Scratchpad: opt_retime.moved, opt_retime.refusal (unset on\n");
-		log("success), opt_retime.moved_from and opt_retime.moved_to naming\n");
+		log("success), opt_retime.cut (the cell the move ended at, unset on\n");
+		log("refusal), opt_retime.moved_from and opt_retime.moved_to naming\n");
 		log("the modules the register left and landed in (unset on refusal,\n");
 		log("and equal for a move that stays in one module), and\n");
 		log("opt.did_something when a move is made.\n");
@@ -3857,7 +4598,7 @@ struct OptRetimePass : public Pass {
 
 		std::string flop, cut_cell;
 		bool forward = false, backward = false;
-		bool all_fanouts = false, lower_controls = true;
+		bool all_fanouts = false, lower_controls = true, cone = false, no_cone = false;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -3885,6 +4626,14 @@ struct OptRetimePass : public Pass {
 				lower_controls = false;
 				continue;
 			}
+			if (args[argidx] == "-cone") {
+				cone = true;
+				continue;
+			}
+			if (args[argidx] == "-no-cone") {
+				no_cone = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -3901,6 +4650,12 @@ struct OptRetimePass : public Pass {
 			log_cmd_error("-all-fanouts only applies to -backward moves.\n");
 		if (!lower_controls && !forward)
 			log_cmd_error("-no-lower-controls only applies to -forward moves.\n");
+		if (cone && !forward)
+			log_cmd_error("-cone only applies to -forward moves.\n");
+		if (no_cone && !forward)
+			log_cmd_error("-no-cone only applies to -forward moves.\n");
+		if (cone && no_cone)
+			log_cmd_error("-cone and -no-cone cannot be used together.\n");
 
 		Module *module = nullptr;
 		Cell *flop_cell = nullptr;
@@ -3951,21 +4706,68 @@ struct OptRetimePass : public Pass {
 		// made, and the ordinary move's walk cannot see past one.
 		bool cross = cut_module != module || design->module(cut->type) != nullptr;
 
+		const char *cone_flag = cone ? " cone" : no_cone ? " no-cone" : "";
 		if (cut_module == module)
-			log("Move: module=%s flop=%s direction=%s cut=%s%s\n",
+			log("Move: module=%s flop=%s direction=%s cut=%s%s%s\n",
 					log_id(module), log_id(flop_cell),
 					backward ? "backward" : "forward", log_id(cut),
-					all_fanouts ? " all-fanouts" : "");
+					all_fanouts ? " all-fanouts" : "", cone_flag);
 		else
-			log("Move: module=%s flop=%s direction=%s cut=%s in %s%s\n",
+			log("Move: module=%s flop=%s direction=%s cut=%s in %s%s%s\n",
 					log_id(module), log_id(flop_cell),
 					backward ? "backward" : "forward", log_id(cut),
-					log_id(cut_module), all_fanouts ? " all-fanouts" : "");
+					log_id(cut_module), all_fanouts ? " all-fanouts" : "", cone_flag);
 
 		// Where the register ended up, which for a cross-module move is not
 		// the module it started in and is the thing a driver most needs to
 		// know. Set below whether or not the move crossed anything.
 		IdString landed = module->name;
+		// And the cell it ended at, which is not always the cut that was asked
+		// for: a cut out of reach is moved towards, and a backward cut on a
+		// select lands on the mux.
+		IdString landed_cut = cut->name;
+
+		IdString flop_name = flop_cell->name, cut_name = cut->name;
+		auto run_forward = [&](bool cone) {
+			auto forward_move = [&](Module *mod, Cell *f, Cell *c) {
+				if (cone)
+					apply_forward_cone_move(mod, f, c, lower_controls, &landed_cut);
+				else
+					apply_forward_move(mod, f, c, &landed_cut);
+			};
+			std::string refused = try_move([&] {
+				forward_move(module, module->cell(flop_name), module->cell(cut_name));
+			});
+
+			// Lowering rewrites the registers before the move is known to be
+			// legal, which a refusal has no way to take back, so the whole
+			// thing is rehearsed on a copy of the module and only repeated
+			// here once it has worked. The reason kept on failure is the one
+			// the plain move gave, since that is the move the caller asked for.
+			if (refused.empty() || !lower_controls)
+				return refused;
+			auto lowered_move = [&](Module *mod) {
+				return try_move([&] {
+					if (!lower_path_controls(mod, mod->cell(flop_name), mod->cell(cut_name), cone))
+						refuse("Lowering the controls would not change this move.\n");
+					forward_move(mod, mod->cell(flop_name), mod->cell(cut_name));
+				});
+			};
+			Design *rehearsal = new Design;
+			rehearsal->add(module->clone());
+			bool works;
+			{
+				// Muted the way tee -q is, so the rehearsal does not narrate a
+				// move the caller is about to see made for real.
+				auto quiet = logger().sink_scope();
+				logger().clear();
+				works = lowered_move(rehearsal->module(module->name)).empty();
+			}
+			delete rehearsal;
+			if (works)
+				refused = lowered_move(module);
+			return refused;
+		};
 
 		std::string refused;
 		if (all_fanouts && cross)
@@ -3992,8 +4794,7 @@ struct OptRetimePass : public Pass {
 			// rehearsal below, one module wider - and the lowering retry runs
 			// through the same rehearsal here, since across a boundary it has
 			// a crossing to undo as well as a register it rewrote.
-			IdString fmod_name = module->name, flop_name = flop_cell->name;
-			IdString cmod_name = cut_module->name, cut_name = cut->name;
+			IdString fmod_name = module->name, cmod_name = cut_module->name;
 			auto hier_move = [&](Design *target, bool lower) {
 				Module *fmod = target->module(fmod_name);
 				Module *cmod = target->module(cmod_name);
@@ -4036,40 +4837,19 @@ struct OptRetimePass : public Pass {
 			}
 		}
 		else if (backward)
-			refused = try_move([&] { apply_backward_move(module, flop_cell, cut); });
-		else
-			refused = try_move([&] { apply_forward_move(module, flop_cell, cut); });
-
-		// Lowering rewrites the registers before the move is known to be
-		// legal, which a refusal has no way to take back, so the whole thing
-		// is rehearsed on a copy of the module and only repeated here once it
-		// has worked. The reason kept on failure is the one the plain move
-		// gave, since that is the move the caller asked for.
-		if (!refused.empty() && forward && lower_controls && !cross) {
-			// The cross-module form of this retry is in the branch above,
-			// where the module the lowering happens in is the one the
-			// register landed in rather than the one it started in.
-			IdString flop_name = flop_cell->name, cut_name = cut->name;
-			auto lowered_move = [&](Module *mod) {
-				return try_move([&] {
-					if (!lower_path_controls(mod, mod->cell(flop_name), mod->cell(cut_name)))
-						refuse("Lowering the controls would not change this move.\n");
-					apply_forward_move(mod, mod->cell(flop_name), mod->cell(cut_name));
-				});
-			};
-			Design *rehearsal = new Design;
-			rehearsal->add(module->clone());
-			bool works;
-			{
-				// Muted the way tee -q is, so the rehearsal does not narrate a
-				// move the caller is about to see made for real.
-				auto quiet = logger().sink_scope();
-				logger().clear();
-				works = lowered_move(rehearsal->module(module->name)).empty();
+			refused = try_move([&] { apply_backward_move(module, flop_cell, cut, false, &landed_cut); });
+		else if (cone)
+			refused = run_forward(true);
+		else {
+			// The chain move first, since where it works it keeps the flop and
+			// its name; the cone move is for the fan-in a chain cannot follow.
+			// A refusal from both reports the chain's reason.
+			refused = run_forward(false);
+			if (!refused.empty() && !no_cone) {
+				log("Trying the whole fan-in of cut %s instead.\n", log_id(cut_name));
+				if (run_forward(true).empty())
+					refused.clear();
 			}
-			delete rehearsal;
-			if (works)
-				refused = lowered_move(module);
 		}
 
 		// What happened, for a caller that cannot read the log: opt_retime.moved
@@ -4088,6 +4868,7 @@ struct OptRetimePass : public Pass {
 		design->scratchpad_set_bool("opt_retime.moved", refused.empty());
 		if (refused.empty()) {
 			design->scratchpad_unset("opt_retime.refusal");
+			design->scratchpad_set_string("opt_retime.cut", log_id(landed_cut));
 			design->scratchpad_set_string("opt_retime.moved_from",
 					RTLIL::unescape_id(module->name));
 			design->scratchpad_set_string("opt_retime.moved_to",
@@ -4100,8 +4881,9 @@ struct OptRetimePass : public Pass {
 		while (!reason.empty() && reason.back() == '\n')
 			reason.pop_back();
 		design->scratchpad_set_string("opt_retime.refusal", reason);
-		// Unset rather than emptied, so a pair left by an earlier call cannot
+		// Unset rather than emptied, so values left by an earlier call cannot
 		// be read as belonging to this one.
+		design->scratchpad_unset("opt_retime.cut");
 		design->scratchpad_unset("opt_retime.moved_from");
 		design->scratchpad_unset("opt_retime.moved_to");
 
