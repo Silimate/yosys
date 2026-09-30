@@ -1,0 +1,230 @@
+# Crossings where the net at the boundary is read by more than one instance.
+#
+# A register fanning out to two instances reads the same at both, so the net
+# cannot say which boundary the move means. Only the cut can: a boundary is a
+# step on the way somewhere, and which step to take is a question about the
+# hierarchy under each candidate rather than about the net.
+#
+# Crossing at the first instance found puts the register one module away from
+# where it was asked to go, with nothing of the move behind it and no way back
+# - a crossing is not undoable, so the whole request comes back refused. Which
+# is a completeness gap rather than a wrong answer, but it refuses a move that
+# exists and hands the caller a reason that names the wrong module.
+#
+# An instance with none of the move behind it is therefore not a boundary for
+# this move at all, and the last section is the reading that must not be
+# swallowed with it: with no instance matching, the register leaves through its
+# own module's port, and the instance reading the net is only a reader and gets
+# a port punched for it.
+#
+# hierarchy -top is mandatory here as everywhere in these files: without it an
+# instance type is not a module of the design and the boundary is invisible.
+# Every register carries an init, so that the two sides of a miter start from
+# the same state and a sequential proof says something about cycle 0.
+# ---------------------------------------------------------------------------
+# Two instances read the flop's Q and the cut is in the second one. Nothing
+# about the net says so - it reads the same at both - so the cut is what picks
+# the boundary, and ka, with none of the move behind it, is not a boundary for
+# this move at all.
+log -header "Forward past one of two instances, chosen by where the cut is"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module ka (clk, x, y);
+  input clk;
+  input [7:0] x;
+  output [7:0] y;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) a_not (.A(x), .Y(y));
+endmodule
+module kb (clk, x, y);
+  input clk;
+  input [7:0] x;
+  output [7:0] y;
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    b_xor (.A(x), .B(8'h0f), .Y(y));
+endmodule
+module top (clk, a, o1, o2);
+  input clk;
+  input [7:0] a;
+  output [7:0] o1, o2;
+  (* init = 8'h00 *) wire [7:0] q;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(q));
+  ka ua (.clk(clk), .x(q), .y(o1));
+  kb ub (.clk(clk), .x(q), .y(o2));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+select -assert-count 1 t:$dff
+design -save orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+opt_retime -flop f1 -cut b_xor -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+scratchpad -assert opt_retime.moved_from top
+scratchpad -assert opt_retime.moved_to kb
+check -assert
+
+# The register crossed at ub and then made the ordinary move past b_xor, so it
+# is a cell of kb and ka never saw it.
+select -assert-count 1 kb/c:f1 %x:+[Q] kb/w:y %i
+select -assert-count 1 kb/c:f1 %x:+[D] kb/w:f1_retimed %i
+select -assert-count 1 kb/c:b_xor %x:+[Y] kb/w:f1_retimed %i
+select -assert-count 0 ka/t:$dff
+select -assert-count 0 top/t:$dff
+# ua reads the Q that has shifted by a cycle, so it gets a port punched for it
+# carrying the value it had - two registers where there was one, which is what
+# an extra reader of a moved Q costs inside one module too.
+select -assert-count 2 t:$dff
+select -assert-count 1 kb/c:f1_fanout %x:+[Q] kb/w:x_q %i
+select -assert-count 1 top/c:ua %x:+[x] top/w:ub_x_reg %i
+
+flatten
+hierarchy -top top
+select -assert-count 2 t:$dff
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The same fanout with the instance itself named as the cut, which is the
+# crossing asked for on its own. Here the request says outright which boundary
+# it means, and taking the first reader refused it in so many words.
+log -header "The crossing alone, at the named one of two instances"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module ka (clk, x, y);
+  input clk;
+  input [7:0] x;
+  output [7:0] y;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) a_not (.A(x), .Y(y));
+endmodule
+module kb (clk, x, y);
+  input clk;
+  input [7:0] x;
+  output [7:0] y;
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    b_xor (.A(x), .B(8'h0f), .Y(y));
+endmodule
+module top (clk, a, o1, o2);
+  input clk;
+  input [7:0] a;
+  output [7:0] o1, o2;
+  (* init = 8'h00 *) wire [7:0] q;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(q));
+  ka ua (.clk(clk), .x(q), .y(o1));
+  kb ub (.clk(clk), .x(q), .y(o2));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+design -save orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+opt_retime -flop f1 -cut ub -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+scratchpad -assert opt_retime.moved_to kb
+check -assert
+
+# Nothing was folded, so the count is unchanged: the same register one module
+# over, with ua reading it through the punched port.
+select -assert-count 1 t:$dff
+select -assert-count 1 kb/c:f1 %x:+[D] kb/w:x %i
+select -assert-count 1 kb/c:f1 %x:+[Q] kb/w:x_q %i
+select -assert-count 1 kb/c:b_xor %x:+[A] kb/w:x_q %i
+select -assert-count 1 top/c:ua %x:+[x] top/w:ub_x_reg %i
+select -assert-count 0 ka/t:$dff
+
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# And the reading the choice must not swallow: the cut is above rather than
+# behind either instance, so no instance reader is the boundary and the
+# register leaves through its own module's output port. An instance reading
+# the net is still only a reader, and gets a port punched for it.
+log -header "Forward out of a module whose vacated net also feeds an instance"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module leaf (clk, x, y);
+  input clk;
+  input [7:0] x;
+  output [7:0] y;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) l_not (.A(x), .Y(y));
+endmodule
+module mid (clk, a, o, s);
+  input clk;
+  input [7:0] a;
+  output [7:0] o, s;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f2 (.CLK(clk), .D(a), .Q(o));
+  leaf ul (.clk(clk), .x(o), .y(s));
+endmodule
+module top (clk, a, o1, o2);
+  input clk;
+  input [7:0] a;
+  output [7:0] o1, o2;
+  wire [7:0] m, s;
+  mid um (.clk(clk), .a(a), .o(m), .s(s));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) t_not (.A(m), .Y(o1));
+  $buf #(.WIDTH(8)) t_buf (.A(s), .Y(o2));
+endmodule
+EOF
+hierarchy -top top
+# f2's Q is the output port itself, which is the shape the forward crossing
+# out of a module needs, and a port wire is not somewhere a Verilog attribute
+# can be written.
+setattr -set init 8'h00 mid/w:o
+select -clear
+check -assert
+select -assert-count 1 t:$dff
+design -save orig
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -load orig
+opt_retime -flop f2 -cut t_not -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+scratchpad -assert opt_retime.moved_from mid
+scratchpad -assert opt_retime.moved_to top
+check -assert
+
+select -assert-count 0 mid/t:$dff
+select -assert-count 0 leaf/t:$dff
+select -assert-count 1 top/c:f2 %x:+[Q] top/w:o1 %i
+
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop

@@ -1,0 +1,328 @@
+# Flatten-then-retime, as an oracle and not as a way to ship the move.
+#
+# Inlining the touched instance into the scope turns a cross-module move into
+# an ordinary one, and today's pass then makes it. That is worth having twice
+# over: it says what the cross-module result should be, cell for cell, before
+# any of it is implemented natively, and it puts a number on what the move is
+# worth. What it is not is a way to do the move for real, for three reasons
+# this file demonstrates rather than asserts:
+#
+#   - the deliverable of a retiming run is an RTL diff somebody mirrors back
+#     into the source. A flattened scope names cells u_dst.inv_d and nets
+#     u_dst.z, which belong to no module, so the diff has nowhere to go. The
+#     names in every assertion below are the evidence.
+#   - a module with more than one instance site comes apart. Flattening one
+#     instance and retiming inside it leaves the two copies different, and no
+#     edit to the shared module body expresses that. The last section pins it.
+#   - the scope has to grow to the dominator of both ends, so the cost of
+#     every dump and every proof grows with it, which is the opposite of what
+#     the per-attempt cost work is for.
+#
+# So it lives here, where the cost is one test and the payoff is a reference.
+# Stage 3c differential-tests the native moves against these results: same
+# (flop, cut), same verdict, same retiming.
+#
+# One thing the oracle cannot see: a move that only crosses a boundary and no
+# logic is invisible once the boundary is gone. Flattening makes it a no-op,
+# and there is no cut cell to name for it. Every section here therefore names
+# a cut that is real logic on the far side of a boundary, which is also the
+# only kind of cross-module move that changes anything.
+#
+# Equivalence is proved at the scope, against the original hierarchical design
+# flattened the same way. Both sides go through flatten before the miter, so
+# what is compared is top, never a child.
+
+# ---------------------------------------------------------------------------
+log -header "Oracle: forward across a boundary, cut inside the child"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+flatten
+hierarchy -top top
+select -assert-count 1 t:$dff
+design -save goldflat
+
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+# Only the instance the move touches. u_src stays an instance, which is the
+# point of the selection form: the whole-design sweep would inline it too and
+# make the scope bigger than the move.
+flatten -noscopeinfo top/c:u_dst
+select -clear
+check -assert
+select -assert-count 1 t:$dff
+select -assert-count 1 top/c:u_src
+
+opt_retime -flop f1 -cut u_dst.inv_d -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+scratchpad -assert opt.did_something true
+check -assert
+
+# A retimed register is still one register.
+select -assert-count 1 t:$dff
+# The register is past the inverter now, so it holds what used to be hier_dst's
+# output and the inverter reads what used to be the register's Q. Both of those
+# nets came from inside the child, which is what makes this result unmirrorable
+# as it stands: f1 is a cell of top holding a net of hier_dst.
+select -assert-count 1 top/c:u_dst.inv_d %x:+[A] top/w:mid %i
+select -assert-count 1 top/c:u_dst.inv_d %x:+[Y] top/w:midq %i
+select -assert-count 1 top/c:f1 %x:+[D] top/w:midq %i
+select -assert-count 1 top/c:f1 %x:+[Q] top/w:u_dst.z %i
+# midq started at 8'h00 and crossed a $not, so the register now starts at ~0.
+select -clear
+select -assert-count 1 w:u_dst.z a:init=8'hff %i
+select -assert-count 0 w:midq a:init %i
+
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+# no -set-init-zero: the fold is half of what the oracle is asserting
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# Backward is the direction that costs a register here, because the cut has a
+# second live operand and the move clones onto it. That is not a boundary
+# effect - a flat $add does the same - but it is the reason a cross-module
+# test cannot simply assert that the flop count never changes.
+log -header "Oracle: backward across a boundary, cut inside the child"
+log -push
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+check -assert
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -reset
+read_verilog -icells opt_retime_hier.v
+hierarchy -top top
+flatten -noscopeinfo top/c:u_src
+select -clear
+check -assert
+select -assert-count 1 top/c:u_dst
+
+opt_retime -flop f1 -cut u_src.add_s -backward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+check -assert
+
+# The mover plus one clone for the operand that was not the path. Both of them
+# now read nets that were hier_src's ports a moment ago, so the register the
+# move produced sits in top holding a child's internal value - the same
+# unmirrorable shape as the forward section, from the other side.
+select -assert-count 2 t:$dff
+select -assert-count 1 top/c:f1 %x:+[Q] top/w:mid %i
+select -assert-count 1 top/c:f1_B %x:+[D] top/w:u_src.b %i
+select -assert-count 1 top/c:u_src.add_s %x:+[Y] top/w:midq %i
+select -assert-count 1 top/c:u_dst %x:+[x] top/w:midq %i
+
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# What the move is worth, as a number rather than an argument.
+#
+# ltp is the cheapest depth measure available in a .ys, and it is enough here
+# because the question is comparative. qsrc holds three levels of logic and
+# the register sits behind all of them, so the pre-register path is 3 and the
+# post-register path is 0. One backward step across the child's outermost cell
+# makes it 2 and 1: the longest stage is a level shorter, and the move that
+# does it is a cross-module move that today's pass refuses.
+#
+# The register count is unchanged, so this is depth redistributed rather than
+# pipelining. A move that added a register would trade latency for depth and
+# is a different thing entirely.
+log -header "Oracle: the depth a cross-module move is worth"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module qsrc (clk, a, b, c, y);
+  input clk;
+  input [7:0] a, b, c;
+  output [7:0] y;
+  wire [7:0] t1, t2;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    q_add (.A(a), .B(b), .Y(t1));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    q_xor (.A(t1), .B(c), .Y(t2));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) q_not (.A(t2), .Y(y));
+endmodule
+module top (clk, a, b, c, out);
+  input clk;
+  input [7:0] a, b, c;
+  output [7:0] out;
+  wire [7:0] mid;
+  (* init = 8'h00 *) wire [7:0] midq;
+  qsrc u_q (.clk(clk), .a(a), .b(b), .c(c), .y(mid));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(mid), .Q(midq));
+  $buf #(.WIDTH(8)) o1 (.A(midq), .Y(out));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+flatten
+hierarchy -top top
+select -clear
+logger -expect log "Longest topological path in top \(length=3\)" 1
+ltp -noff top
+logger -check-expected
+design -save goldflat
+
+design -reset
+read_verilog -icells <<EOF
+module qsrc (clk, a, b, c, y);
+  input clk;
+  input [7:0] a, b, c;
+  output [7:0] y;
+  wire [7:0] t1, t2;
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    q_add (.A(a), .B(b), .Y(t1));
+  $xor #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    q_xor (.A(t1), .B(c), .Y(t2));
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) q_not (.A(t2), .Y(y));
+endmodule
+module top (clk, a, b, c, out);
+  input clk;
+  input [7:0] a, b, c;
+  output [7:0] out;
+  wire [7:0] mid;
+  (* init = 8'h00 *) wire [7:0] midq;
+  qsrc u_q (.clk(clk), .a(a), .b(b), .c(c), .y(mid));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(mid), .Q(midq));
+  $buf #(.WIDTH(8)) o1 (.A(midq), .Y(out));
+endmodule
+EOF
+hierarchy -top top
+flatten -noscopeinfo top/c:u_q
+select -clear
+check -assert
+opt_retime -flop f1 -cut u_q.q_not -backward
+scratchpad -assert opt_retime.moved true
+check -assert
+# a single-input cut clones nothing, so the count is the proof that this is
+# depth moved and not a pipeline stage added
+select -assert-count 1 t:$dff
+select -clear
+logger -expect log "Longest topological path in top \(length=2\)" 1
+ltp -noff top
+logger -check-expected
+
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The guard the oracle needs and a driver would need too: a module with more
+# than one instance site has to be uniquified or the move refused.
+#
+# leaf is instantiated twice. Flattening u1 and retiming inside it gives a
+# correct flat netlist - it is proved below - but the two copies of leaf's body
+# are no longer the same circuit, and leaf is still one module. There is no
+# edit to leaf that produces this, because any such edit lands on u2 as well,
+# and u2's register must not move. The flat result is right and unmirrorable
+# at the same time, which is the whole argument for keeping this out of the
+# product path.
+log -header "Oracle: a module with two instance sites has no per-module mirror"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module leaf (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) l_not (.A(x), .Y(z));
+endmodule
+module top (clk, a, b, out1, out2);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] out1, out2;
+  (* init = 8'h00 *) wire [7:0] q1;
+  (* init = 8'h00 *) wire [7:0] q2;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(q1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f2 (.CLK(clk), .D(b), .Q(q2));
+  leaf u1 (.clk(clk), .x(q1), .z(out1));
+  leaf u2 (.clk(clk), .x(q2), .z(out2));
+endmodule
+EOF
+hierarchy -top top
+check -assert
+flatten
+hierarchy -top top
+design -save goldflat
+
+design -reset
+read_verilog -icells <<EOF
+module leaf (clk, x, z);
+  input clk;
+  input [7:0] x;
+  output [7:0] z;
+  $not #(.A_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0)) l_not (.A(x), .Y(z));
+endmodule
+module top (clk, a, b, out1, out2);
+  input clk;
+  input [7:0] a, b;
+  output [7:0] out1, out2;
+  (* init = 8'h00 *) wire [7:0] q1;
+  (* init = 8'h00 *) wire [7:0] q2;
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f1 (.CLK(clk), .D(a), .Q(q1));
+  $dff #(.WIDTH(8), .CLK_POLARITY(1'b1)) f2 (.CLK(clk), .D(b), .Q(q2));
+  leaf u1 (.clk(clk), .x(q1), .z(out1));
+  leaf u2 (.clk(clk), .x(q2), .z(out2));
+endmodule
+EOF
+hierarchy -top top
+flatten -noscopeinfo top/c:u1
+select -clear
+check -assert
+opt_retime -flop f1 -cut u1.l_not -forward
+scratchpad -assert opt_retime.moved true
+check -assert
+select -assert-count 2 t:$dff
+
+# u1's copy of the inverter now has the register behind it, on a net that was
+# leaf's output port ...
+select -assert-count 1 top/c:u1.l_not %x:+[A] top/w:a %i
+select -assert-count 1 top/c:f1 %x:+[Q] top/w:u1.z %i
+# ... while leaf, the module, is exactly as it was, and u2 still instantiates
+# it with the register in front. Two instance sites, one body, one of them
+# retimed: there is no leaf.v edit that says this.
+select -assert-count 1 leaf/c:l_not %x:+[A] leaf/w:x %i
+select -assert-count 1 top/c:u2 %x:+[x] top/w:q2 %i
+select -assert-count 1 top/c:f2 %x:+[Q] top/w:q2 %i
+
+flatten
+hierarchy -top top
+rename top gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
