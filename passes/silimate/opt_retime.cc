@@ -3674,8 +3674,13 @@ void cross_boundary(Hier &h, Module *&module, Cell *&flop, bool backward,
 // and then the ordinary move is made. Naming an instance as the cut asks for
 // the crossing on its own, which is the move with no cells in it: the register
 // changes modules and nothing else changes at all.
+//
+// `lower` asks for the forward move's control lowering, which is the retry the
+// caller makes when the plain move refused. It happens where the register
+// landed rather than where it started, since that is where the operand
+// registers the move would have merged are.
 void apply_hier_move(Design *design, Module *module, Cell *flop, Module *cut_module,
-		Cell *cut, bool backward, IdString &landed)
+		Cell *cut, bool backward, bool lower, IdString &landed)
 {
 	Hier h(design);
 	Module *cut_child = design->module(cut->type);
@@ -3696,10 +3701,18 @@ void apply_hier_move(Design *design, Module *module, Cell *flop, Module *cut_mod
 		cross_boundary(h, module, flop, backward, nullptr, cut_module);
 	}
 
-	if (backward)
+	if (backward) {
 		apply_backward_move(module, flop, cut);
-	else
+	} else if (!lower) {
 		apply_forward_move(module, flop, cut);
+	} else {
+		// Lowering replaces every register it touches, so nothing collected
+		// before it survives and both ends are looked up again by name.
+		IdString flop_name = flop->name, cut_name = cut->name;
+		if (!lower_path_controls(module, flop, cut))
+			refuse("Lowering the controls would not change this move.\n");
+		apply_forward_move(module, module->cell(flop_name), module->cell(cut_name));
+	}
 	landed = module->name;
 }
 
@@ -3783,11 +3796,11 @@ struct OptRetimePass : public Pass {
 		log("\n");
 		log("The two cells may be in different modules. The register then\n");
 		log("crosses the boundaries between them first, one instance port at a\n");
-		log("time, and the move is made where it lands. Where the vacated net\n");
-		log("feeds more than one instance, the boundary is the instance the\n");
-		log("cut is behind. Naming an instance as -cut asks for the crossing\n");
-		log("on its own: the register changes modules and nothing else\n");
-		log("changes at all.\n");
+		log("time, and the move made where it lands is the ordinary one,\n");
+		log("control lowering included. Where the vacated net feeds more than\n");
+		log("one instance, the boundary is the instance the cut is behind.\n");
+		log("Naming an instance as -cut asks for the crossing on its own: the\n");
+		log("register changes modules and nothing else changes at all.\n");
 		log("\n");
 		log("A crossing needs the register's clock, enable and resets to exist\n");
 		log("as nets on the far side, and needs the destination module to have\n");
@@ -3976,30 +3989,51 @@ struct OptRetimePass : public Pass {
 			// already made. Nothing puts a rebuilt register back, so the whole
 			// move is rehearsed on a copy of the design and only repeated here
 			// once it has worked. Same reasoning as the control-lowering
-			// rehearsal below, one module wider.
+			// rehearsal below, one module wider - and the lowering retry runs
+			// through the same rehearsal here, since across a boundary it has
+			// a crossing to undo as well as a register it rewrote.
 			IdString fmod_name = module->name, flop_name = flop_cell->name;
 			IdString cmod_name = cut_module->name, cut_name = cut->name;
-			auto hier_move = [&](Design *target) {
+			auto hier_move = [&](Design *target, bool lower) {
 				Module *fmod = target->module(fmod_name);
 				Module *cmod = target->module(cmod_name);
 				return try_move([&] {
 					apply_hier_move(target, fmod, fmod->cell(flop_name), cmod,
-							cmod->cell(cut_name), backward, landed);
+							cmod->cell(cut_name), backward, lower, landed);
 				});
 			};
-			Design *rehearsal = new Design;
-			for (auto mod : design->modules())
-				rehearsal->add(mod->clone());
-			{
-				// Muted the way tee -q is, so the rehearsal does not narrate a
-				// move the caller is about to see made for real.
-				auto quiet = logger().sink_scope();
-				logger().clear();
-				refused = hier_move(rehearsal);
+			auto rehearsed = [&](bool lower) {
+				Design *rehearsal = new Design;
+				for (auto mod : design->modules())
+					rehearsal->add(mod->clone());
+				std::string reason;
+				{
+					// Muted the way tee -q is, so the rehearsal does not
+					// narrate a move the caller is about to see made for real.
+					auto quiet = logger().sink_scope();
+					logger().clear();
+					reason = hier_move(rehearsal, lower);
+				}
+				delete rehearsal;
+				if (reason.empty())
+					reason = hier_move(design, lower);
+				return reason;
+			};
+			refused = rehearsed(false);
+			// The same retry the ordinary forward move gets below. Where the
+			// register lands is an ordinary module with ordinary operand
+			// registers in it, and a crossing does not make their controls
+			// agree any better than they did - so a move refused there for a
+			// mismatched enable is refused for a reason that has nothing to do
+			// with the boundary, and lowering rescues it the same way. The
+			// reason kept on failure is the plain move's, since that is the
+			// move the caller asked for.
+			if (!refused.empty() && forward && lower_controls) {
+				// Rehearsed like the plain attempt, so a lowering that does
+				// not finish leaves the design as the plain refusal found it.
+				if (rehearsed(true).empty())
+					refused.clear();
 			}
-			delete rehearsal;
-			if (refused.empty())
-				refused = hier_move(design);
 		}
 		else if (backward)
 			refused = try_move([&] { apply_backward_move(module, flop_cell, cut); });
@@ -4012,6 +4046,9 @@ struct OptRetimePass : public Pass {
 		// has worked. The reason kept on failure is the one the plain move
 		// gave, since that is the move the caller asked for.
 		if (!refused.empty() && forward && lower_controls && !cross) {
+			// The cross-module form of this retry is in the branch above,
+			// where the module the lowering happens in is the one the
+			// register landed in rather than the one it started in.
 			IdString flop_name = flop_cell->name, cut_name = cut->name;
 			auto lowered_move = [&](Module *mod) {
 				return try_move([&] {

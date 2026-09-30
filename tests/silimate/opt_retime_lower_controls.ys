@@ -427,3 +427,155 @@ select -assert-count 1 c:fa %x:+[D] w:a %i
 select -assert-count 1 c:n0 %x:+[Y] %co c:a0 %i
 design -reset
 log -pop
+
+# ---------------------------------------------------------------------------
+# Lowering across a module boundary, which is the same mechanism read one
+# module over.
+#
+# A cross-module move is a crossing and then the ordinary move, made where the
+# register landed. The operand registers that move meets are ordinary ones in
+# an ordinary module, and a boundary does nothing to make their controls agree
+# any better than they did - so an enable mismatch on the far side is a
+# refusal that has nothing to do with the crossing, and lowering rescues it the
+# way it rescues a flat one. The lowering therefore happens in the module the
+# register landed in rather than the one it started in, which is where the
+# registers it has to rewrite are.
+#
+# Leaving it out is a quiet gap rather than a wrong answer: the move comes
+# back refused with a reason that names an enable, and a caller reading that
+# reason has no way to tell it apart from an enable mismatch lowering cannot
+# fix.
+log -header "Moved: the lowering happens where the register lands"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module enkid(input clk, e1, e2, input [7:0] ra, b, output [7:0] q);
+  (* init = 8'h03 *) wire [7:0] rb;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clk), .EN(e2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+module entop(input clk, e1, e2, input [7:0] a, b, output [7:0] q);
+  (* init = 8'h05 *) wire [7:0] ra;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clk), .EN(e1), .D(a), .Q(ra));
+  enkid u (.clk(clk), .e1(e1), .e2(e2), .ra(ra), .b(b), .q(q));
+endmodule
+EOF
+# Mandatory: without it enkid is not a module of the design, the boundary is
+# invisible, and the refusal is about a missing driver rather than an enable.
+hierarchy -top entop
+check -assert
+design -save orig
+flatten
+hierarchy -top entop
+design -save goldflat
+
+# The refusal first, since it is the one a caller sees without this retry and
+# the one -no-lower-controls still asks for. Both modules are untouched: the
+# crossing the lowering attempt makes is rehearsed on a copy of the design, so
+# a lowering that turns out not to help leaves no half-crossed register behind.
+design -load orig
+# Cleared first: the pass sets this on every move it makes and never unsets
+# it, and this file has made several above.
+scratchpad -unset opt.did_something
+opt_retime -flop fa -cut a0 -forward -no-lower-controls
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different enable net than flop fa."
+scratchpad -assert-unset opt.did_something
+check -assert
+select -assert-count 2 t:$dffe
+select -assert-count 0 t:$mux
+select -assert-count 1 entop/c:fa %x:+[Q] entop/w:ra %i
+select -assert-count 1 entop/c:u %x:+[ra] entop/w:ra %i
+select -assert-count 1 enkid/c:a0 %x:+[A] enkid/w:ra %i
+select -assert-count 0 enkid/w:ra_q
+select -assert-count 0 enkid/t:$dff
+
+design -load orig
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved true
+scratchpad -assert-unset opt_retime.refusal
+# Both ends named, and they are two different modules: the register crossed
+# before the lowering rewrote anything.
+scratchpad -assert opt_retime.moved_from entop
+scratchpad -assert opt_retime.moved_to enkid
+check -assert
+
+# Every register is a cell of enkid now, and both enables are muxes there.
+select -assert-count 0 t:$dffe
+select -assert-count 2 t:$mux
+select -assert-count 3 t:$dff
+select -assert-count 0 entop/t:$dff
+select -assert-count 1 enkid/c:fa_ce_d
+select -assert-count 1 enkid/c:fb_ce_d
+# The moved register landed on the cut output under its own name, starting at
+# the fold of both operands' inits rather than at a zero anyone assumed.
+select -assert-count 1 enkid/c:fa %x:+[Q] enkid/w:q %i
+select -assert-count 1 enkid/w:q a:init=8'h08 %i
+# and the adder reads the next values, which is what lets the operands update
+# on different cycles
+select -assert-count 0 enkid/c:a0 %x:+[B] enkid/w:rb %i
+
+flatten
+hierarchy -top entop
+rename entop gate
+design -import goldflat -as gold
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+proc; opt
+sat -seq 8 -prove-asserts -verify
+design -reset
+log -pop
+
+# ---------------------------------------------------------------------------
+# The line lowering does not cross, read across a boundary: two clocks are not
+# something logic can reconcile, so the retry declines and the reason the
+# caller gets is the plain move's. What matters here is what is left behind -
+# the retry crosses the boundary before it can discover that lowering will not
+# help, and that crossing has already rebuilt a register in another module by
+# the time the answer comes back. It happens on a copy of the design, so both
+# modules are as they were.
+log -header "Refused: a boundary does not make two clocks reconcilable"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module clkkid(input clka, clkb, e1, e2, input [7:0] ra, b, output [7:0] q);
+  wire [7:0] rb;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fb (.CLK(clkb), .EN(e2), .D(b), .Q(rb));
+  $add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    a0 (.A(ra), .B(rb), .Y(q));
+endmodule
+module clktop(input clka, clkb, e1, e2, input [7:0] a, b, output [7:0] q);
+  wire [7:0] ra;
+  $dffe #(.WIDTH(8), .CLK_POLARITY(1'b1), .EN_POLARITY(1'b1))
+    fa (.CLK(clka), .EN(e1), .D(a), .Q(ra));
+  clkkid u (.clka(clka), .clkb(clkb), .e1(e1), .e2(e2), .ra(ra), .b(b), .q(q));
+endmodule
+EOF
+hierarchy -top clktop
+check -assert
+# Cleared first, as above: the pass never unsets it on a refusal.
+scratchpad -unset opt.did_something
+
+opt_retime -flop fa -cut a0 -forward
+scratchpad -assert opt_retime.moved false
+scratchpad -assert opt_retime.refusal "Flop fb on input B of cell a0 has a different clock net than flop fa."
+scratchpad -assert-unset opt.did_something
+check -assert
+
+# Neither module moved: no register crossed, nothing was lowered, and no port
+# was punched at the instance site.
+select -assert-count 2 t:$dffe
+select -assert-count 0 t:$mux
+select -assert-count 0 t:$dff
+select -assert-count 1 clktop/c:fa %x:+[Q] clktop/w:ra %i
+select -assert-count 1 clktop/c:u %x:+[ra] clktop/w:ra %i
+select -assert-count 1 clkkid/c:a0 %x:+[A] clkkid/w:ra %i
+select -assert-count 1 clkkid/c:fb %x:+[Q] clkkid/w:rb %i
+select -assert-count 0 clkkid/w:ra_q
+select -assert-count 8 clkkid/w:* %a
+design -reset
+log -pop
