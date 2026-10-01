@@ -522,27 +522,40 @@ void replace_const_cells(RTLIL::Design *design, RTLIL::Module *module, bool cons
 #define ACTION_DO(_p_, _s_) do { replace_cell(assign_map, module, cell, input.as_string(), _p_, _s_); goto next_cell; } while (0)
 #define ACTION_DO_Y(_v_) ACTION_DO(ID::Y, RTLIL::SigSpec(RTLIL::State::S ## _v_))
 
-		// SILIMATE: a full adder column with a constant input is at most a half adder, so give it plain logic to fold
-		if (cell->type == ID($fa) && !keepdc) { // plain logic drops the carry's x when the sum is x
+		// SILIMATE: lower a constant $fa column to Y = A^B^C, X = (A&B)|(C&(A^B)); the next pass folds 0/1.
+		// These gates drive X when Y is x, so -keepdc leaves the $fa.
+		if (cell->type == ID($fa) && !keepdc) {
+			// Fetch the five ports once, and see what really drives each input
 			const IdString names[5] = {ID::A, ID::B, ID::C, ID::X, ID::Y};
-			SigSpec a = assign_map(cell->getPort(ID::A)), b = assign_map(cell->getPort(ID::B)), c = assign_map(cell->getPort(ID::C));
-			SigSpec live[5], fold[5];
-			for (int i = 0; i < GetSize(a); i++)
-				for (int p = 0; p < 5; p++)
-					(a[i].wire && b[i].wire && c[i].wire ? live[p] : fold[p]).append(cell->getPort(names[p])[i]);
-			if (!fold[0].empty()) {
+			SigSpec port[5], live[5], fold[5];
+			for (int p = 0; p < 5; p++)
+				port[p] = cell->getPort(names[p]);
+			const SigSpec a = assign_map(port[0]), b = assign_map(port[1]), c = assign_map(port[2]);
+			// Only a cell with a constant input has a column to fold
+			if (a.has_const() || b.has_const() || c.has_const()) {
+				// Send each column to live when all three inputs are signals, else to fold
+				for (int i = 0; i < GetSize(a); i++) {
+					auto &side = a[i].wire && b[i].wire && c[i].wire ? live : fold;
+					for (int p = 0; p < 5; p++)
+						side[p].append(port[p][i]);
+				}
+				// Rebuild the folded columns as plain gates
+				const SigSpec &fa = fold[0], &fb = fold[1], &fc = fold[2], &fx = fold[3], &fy = fold[4];
 				std::string src = cell->get_src_attribute();
-				SigSpec ab = module->Xor(NEW_ID2_SUFFIX("fa_xor"), fold[0], fold[1], false, src); // SILIMATE: Improve the naming
-				module->connect(fold[4], module->Xor(NEW_ID2_SUFFIX("fa_xor"), ab, fold[2], false, src));
-				SigSpec both = module->And(NEW_ID2_SUFFIX("fa_and"), fold[0], fold[1], false, src);
-				module->connect(fold[3], module->Or(NEW_ID2_SUFFIX("fa_or"), both, module->And(NEW_ID2_SUFFIX("fa_and"), fold[2], ab, false, src), false, src));
-				if (live[0].empty()) {
+				SigSpec ab = module->Xor(NEW_ID2_SUFFIX("fa_xor"), fa, fb, false, src);
+				module->connect(fy, module->Xor(NEW_ID2_SUFFIX("fa_xor"), ab, fc, false, src));
+				SigSpec both = module->And(NEW_ID2_SUFFIX("fa_and"), fa, fb, false, src);
+				module->connect(fx, module->Or(NEW_ID2_SUFFIX("fa_or"), both,
+						module->And(NEW_ID2_SUFFIX("fa_and"), fc, ab, false, src), false, src));
+				// Drop the full adder, or shrink it to the live columns
+				if (live[0].empty())
 					module->remove(cell);
-				} else {
+				else {
 					for (int p = 0; p < 5; p++)
 						cell->setPort(names[p], live[p]);
 					cell->setParam(ID::WIDTH, GetSize(live[0]));
 				}
+				// Run the loop again so the new gates fold their constants
 				did_something = true;
 				continue;
 			}
