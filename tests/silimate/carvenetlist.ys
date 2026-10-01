@@ -71,6 +71,8 @@ end
 EOF
 flatten -noscopeinfo
 carvenetlist
+# a netlist without the unflopped-designs marker never claims to have honored it
+scratchpad -assert-unset carvenetlist.unflopped_designs
 # carved cell exists, flops are gone, no temporary buffers survive
 select -assert-none cell/t:$_DFF_P_
 select -assert-none cell/t:$_BUF_
@@ -551,6 +553,8 @@ end
 EOT
 flatten -noscopeinfo
 carvenetlist
+# the pass tells its caller it honored the marker
+scratchpad -assert carvenetlist.unflopped_designs true
 # every design register and inverter stays; the tie is cloned, never shared
 select -assert-count 4 design_slow_dz/t:$_DFF_P_
 select -assert-count 2 design_slow_dz/t:$_NOT_

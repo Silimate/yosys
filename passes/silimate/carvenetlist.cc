@@ -165,7 +165,9 @@ struct CarveNetlistPass : public Pass {
 		log("ports (not crossing the shared clock network or a constant source), and each output\n");
 		log("port is rebuilt as a clean carve bus. With no flop of its own to record, the design\n");
 		log("takes the most common launch/capture flop recorded by its speed's cells. Netlists\n");
-		log("without the marker carve their designs at the surround flops as before.\n");
+		log("without the marker carve their designs at the surround flops as before. Honoring the\n");
+		log("marker sets the scratchpad flag carvenetlist.unflopped_designs, so the caller can\n");
+		log("tell this pass from an older one that would silently carve such a design wrong.\n");
 		log("\n");
 		log("Known issue: fast QN-output (DFFHQNx1) carves can leave dangling n_<num> inputs,\n");
 		log("including AES keys and some wide arithmetic, shift, memory, division, and modulo\n");
@@ -192,8 +194,10 @@ struct CarveNetlistPass : public Pass {
 		const IdString UNFLOPPED_DESIGNS = RTLIL::escape_id("pq_unflopped_designs");
 		Wire *unflopped_marker = train->wire(UNFLOPPED_DESIGNS);
 		const bool unflopped_designs = unflopped_marker != nullptr && unflopped_marker->port_input;
-		if (unflopped_designs)
+		if (unflopped_designs) {
 			log("Found %s: carving DESIGN cells at the train ports.\n", log_id(UNFLOPPED_DESIGNS));
+			design->scratchpad_set_bool("carvenetlist.unflopped_designs", true);
+		}
 
 		// Marks the zero-area $_BUF_ cells we insert at the capture-flop boundary (below) so
 		// they can be turned back into plain assigns after carving.
