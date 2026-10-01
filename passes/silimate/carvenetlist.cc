@@ -21,6 +21,8 @@
 #include "kernel/yosys.h"
 #include <algorithm>
 #include <map>
+#include <set>
+#include <tuple>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -156,6 +158,15 @@ struct CarveNetlistPass : public Pass {
 		log("self-containment, retie clocks to shared slow_clk/fast_clk, and skip the final\n");
 		log("1-in/1-out passthrough-to-wire cleanup so real inversions stay equivalent to RTL.\n");
 		log("\n");
+		log("Unflopped designs: when 'train' has a pq_unflopped_designs input port, its DESIGN\n");
+		log("cells were synthesized with no surround flops (synthesis would otherwise fold design\n");
+		log("logic into them, which the carve then strips out with the flop). Such a design is\n");
+		log("carved at the train ports themselves: its cell set is everything connected to its\n");
+		log("ports (not crossing the shared clock network or a constant source), and each output\n");
+		log("port is rebuilt as a clean carve bus. With no flop of its own to record, the design\n");
+		log("takes the most common launch/capture flop recorded by its speed's cells. Netlists\n");
+		log("without the marker carve their designs at the surround flops as before.\n");
+		log("\n");
 		log("Known issue: fast QN-output (DFFHQNx1) carves can leave dangling n_<num> inputs,\n");
 		log("including AES keys and some wide arithmetic, shift, memory, division, and modulo\n");
 		log("cells; slow Q-output clones carve cleanly.\n");
@@ -175,6 +186,14 @@ struct CarveNetlistPass : public Pass {
 			log_warning("No 'train' module found; nothing to carve.\n");
 			return;
 		}
+
+		// An unloaded input that marks the design ports as unflopped (see help). Ports are all
+		// that is sure to survive synthesis, so the marker is one.
+		const IdString UNFLOPPED_DESIGNS = RTLIL::escape_id("pq_unflopped_designs");
+		Wire *unflopped_marker = train->wire(UNFLOPPED_DESIGNS);
+		const bool unflopped_designs = unflopped_marker != nullptr && unflopped_marker->port_input;
+		if (unflopped_designs)
+			log("Found %s: carving DESIGN cells at the train ports.\n", log_id(UNFLOPPED_DESIGNS));
 
 		// Marks the zero-area $_BUF_ cells we insert at the capture-flop boundary (below) so
 		// they can be turned back into plain assigns after carving.
@@ -298,6 +317,8 @@ struct CarveNetlistPass : public Pass {
 		for (auto wire : train->wires()) {
 			if (!wire->port_input && !wire->port_output)
 				continue;
+			if (wire->name == UNFLOPPED_DESIGNS)
+				continue;
 			std::string name = unescape(wire->name.str());
 			auto us = name.rfind('_');
 			if (us == std::string::npos || us == 0)
@@ -375,130 +396,201 @@ struct CarveNetlistPass : public Pass {
 		};
 
 		std::map<std::string, BoundaryRec> boundary;
+		// Carved unflopped designs (no flop of their own recorded), and their output ports that
+		// were handed to carve buses
+		std::set<std::string> port_bounded_finals;
+		std::vector<Wire *> demoted_outputs;
 		std::map<std::string, std::string> final_of_base; // carved module name -> the base it came from
 		int tagged_total = 0;
 		for (auto &grp : groups) {
 			const std::string &base = grp.first;
 			Group &g = grp.second;
 
-			// Capture flops first: hop back through buffers from each data output.
+			// A DESIGN cell-under-test (slow_design_/fast_design_) is a whole sequential design,
+			// not a single mapped cell; flag it so the self-containment pass below also rebuilds
+			// its launch-flop input boundary (step (1)), which a single-cell carve never needs.
+			bool is_design = base.rfind("slow_design_", 0) == 0 || base.rfind("fast_design_", 0) == 0;
+
+			// An unflopped design has no surround flops: it is carved at the train ports.
+			bool port_bounded = is_design && unflopped_designs;
+
+			// Speed comes from the pre-rename base's "<speed>_" prefix ("fast_" covers both
+			// "fast_<enc>" and "fast_design_<enc>"). The post-rename `final` can't be used:
+			// pq_rename strips the speed prefix off plain cells, so `final` carries no speed.
+			std::string speed = base.rfind("fast_", 0) == 0 ? "fast" : "slow";
+
 			pool<Cell *> launch, capture, cut_flops, boundary_cells, logic;
-			pool<SigBit> seed;
+			pool<SigBit> seed, driven;
 			std::string drv_cell, drv_pin;
-			for (auto bit : g.outs) {
-				Cell *flop = hop_back(bit);
-				if (flop != nullptr)
-					capture.insert(flop);
-			}
-
-			// Launch flops drive the inputs. hop_fwd returns the first >2-port cell and the
-			// pin we arrived on. A sequential cell-under-test is itself a flop: if synthesis
-			// dropped the surround launch flop on a reset pin, hop_fwd lands on that cell's
-			// RESET/SET/ARST. Putting it in `launch` would exclude it from the cone and carve
-			// the cell gate-less. Keep those as cut_flops (in-cone), not boundary.
-			for (auto bit : g.ins) {
-				auto hop = hop_fwd(bit);
-				Cell *flop = hop.first;
-				if (flop == nullptr)
-					continue;
-				if (is_set_reset_pin(unescape(hop.second.str()))) {
-					cut_flops.insert(flop);
-					continue;
+			if (port_bounded) {
+				// Every cell connected to the design's ports is the design's. Walk both ways --
+				// forward from the inputs, backward from the outputs (so logic only an output
+				// sees, like a free-running counter, is kept), and through every reached cell's
+				// other pins. Two kinds of net are shared between cells and must not be crossed:
+				// the shared clock network, and a constant source's output (synthesis may share
+				// one tie netlist-wide; the self-containment pass below clones it instead).
+				std::vector<Cell *> stack;
+				auto visit = [&](Cell *c) {
+					if (logic.count(c) || !cell_in_bits.count(c) || cell_in_bits.at(c).empty())
+						return;
+					std::string owner = c->get_string_attribute(RTLIL::escape_id("submod"));
+					if (!owner.empty())
+						log_warning("carvenetlist: design %s reaches cell %s already carved into "
+							    "%s; moving it.\n",
+							    base.c_str(), log_id(c), owner.c_str());
+					logic.insert(c);
+					stack.push_back(c);
+				};
+				for (auto bit : g.ins) {
+					auto it = loads.find(bit);
+					if (it == loads.end() || clk_nets.count(bit))
+						continue;
+					for (auto &pr : it->second)
+						visit(pr.first);
 				}
-				launch.insert(flop);
-				for (auto ob : cell_out_bits[flop]) {
-					if (clk_nets.count(ob))
-						continue; // a launch flop's data output, never a generated clock
-					if (!loads.count(ob))
-						continue; // only the flop output that actually drives the cell
-					seed.insert(ob);
+				for (auto bit : g.outs) {
+					auto it = driver.find(bit);
+					if (it != driver.end() && !clk_nets.count(bit))
+						visit(it->second.first);
 				}
-			}
-
-			// A hop_fwd flop driven by another hop_fwd flop is the cell-under-test (e.g. D
-			// wired straight to the sequential cell while ARST still has a launch flop).
-			{
-				pool<Cell *> false_launch;
-				for (auto b : launch) {
-					for (auto ib : cell_in_bits[b]) {
+				while (!stack.empty()) {
+					Cell *c = stack.back();
+					stack.pop_back();
+					for (auto ob : cell_out_bits[c]) {
+						if (clk_nets.count(ob))
+							continue;
+						driven.insert(ob);
+						auto it = loads.find(ob);
+						if (it == loads.end())
+							continue;
+						for (auto &pr : it->second)
+							visit(pr.first);
+					}
+					for (auto ib : cell_in_bits[c]) {
 						if (clk_nets.count(ib))
 							continue;
-						auto dit = driver.find(ib);
-						if (dit != driver.end() && launch.count(dit->second.first) &&
-						    dit->second.first != b)
-							false_launch.insert(b);
+						auto it = driver.find(ib);
+						if (it != driver.end())
+							visit(it->second.first);
 					}
 				}
-				for (auto c : false_launch) {
-					launch.erase(c);
-					cut_flops.insert(c);
+			} else {
+				// Capture flops first: hop back through buffers from each data output.
+				for (auto bit : g.outs) {
+					Cell *flop = hop_back(bit);
+					if (flop != nullptr)
+						capture.insert(flop);
 				}
-			}
 
-			// A flop that hop_fwd and hop_back both find is the cell-under-test (both
-			// surround flops were optimized away: in_port -> CUT -> out_port).
-			for (auto c : launch)
-				if (capture.count(c))
-					cut_flops.insert(c);
-
-			// The cell-under-test is never a surround launch or capture flop
-			for (auto c : cut_flops) {
-				launch.erase(c);
-				capture.erase(c);
-			}
-
-			boundary_cells = launch;
-			for (auto c : capture)
-				boundary_cells.insert(c);
-
-			// Record the surround launch (type, out-pin) after dropping any false launch
-			// that was actually the sequential cell-under-test.
-			for (auto flop : launch) {
-				if (!drv_cell.empty())
-					break;
-				for (auto ob : cell_out_bits[flop]) {
-					if (clk_nets.count(ob) || !loads.count(ob))
+				// Launch flops drive the inputs. hop_fwd returns the first >2-port cell and the
+				// pin we arrived on. A sequential cell-under-test is itself a flop: if synthesis
+				// dropped the surround launch flop on a reset pin, hop_fwd lands on that cell's
+				// RESET/SET/ARST. Putting it in `launch` would exclude it from the cone and carve
+				// the cell gate-less. Keep those as cut_flops (in-cone), not boundary.
+				for (auto bit : g.ins) {
+					auto hop = hop_fwd(bit);
+					Cell *flop = hop.first;
+					if (flop == nullptr)
 						continue;
-					drv_cell = unescape(flop->type.str());
-					drv_pin = unescape(driver[ob].second.str());
-					break;
-				}
-			}
-
-			// Both surround launches gone: seed from the CUT's outputs so the cone still
-			// includes it (and any polarity-restore inverter on QN).
-			if (launch.empty()) {
-				for (auto c : cut_flops) {
-					logic.insert(c);
-					for (auto ob : cell_out_bits[c]) {
-						if (clk_nets.count(ob) || !loads.count(ob))
-							continue;
+					if (is_set_reset_pin(unescape(hop.second.str()))) {
+						cut_flops.insert(flop);
+						continue;
+					}
+					launch.insert(flop);
+					for (auto ob : cell_out_bits[flop]) {
+						if (clk_nets.count(ob))
+							continue; // a launch flop's data output, never a generated clock
+						if (!loads.count(ob))
+							continue; // only the flop output that actually drives the cell
 						seed.insert(ob);
 					}
 				}
-			}
 
-			// Walk the logic cone forward from the launch outputs, excluding boundary flops
-			pool<SigBit> driven = seed;
-			std::vector<SigBit> stack(seed.begin(), seed.end());
-			while (!stack.empty()) {
-				SigBit k = stack.back();
-				stack.pop_back();
-				if (clk_nets.count(k))
-					continue; // hard boundary: never expand through the shared clock tree
-				auto it = loads.find(k);
-				if (it == loads.end())
-					continue;
-				for (auto &pr : it->second) {
-					Cell *c = pr.first;
-					if (boundary_cells.count(c) || logic.count(c))
+				// A hop_fwd flop driven by another hop_fwd flop is the cell-under-test (e.g. D
+				// wired straight to the sequential cell while ARST still has a launch flop).
+				{
+					pool<Cell *> false_launch;
+					for (auto b : launch) {
+						for (auto ib : cell_in_bits[b]) {
+							if (clk_nets.count(ib))
+								continue;
+							auto dit = driver.find(ib);
+							if (dit != driver.end() && launch.count(dit->second.first) &&
+							    dit->second.first != b)
+								false_launch.insert(b);
+						}
+					}
+					for (auto c : false_launch) {
+						launch.erase(c);
+						cut_flops.insert(c);
+					}
+				}
+
+				// A flop that hop_fwd and hop_back both find is the cell-under-test (both
+				// surround flops were optimized away: in_port -> CUT -> out_port).
+				for (auto c : launch)
+					if (capture.count(c))
+						cut_flops.insert(c);
+
+				// The cell-under-test is never a surround launch or capture flop
+				for (auto c : cut_flops) {
+					launch.erase(c);
+					capture.erase(c);
+				}
+
+				boundary_cells = launch;
+				for (auto c : capture)
+					boundary_cells.insert(c);
+
+				// Record the surround launch (type, out-pin) after dropping any false launch
+				// that was actually the sequential cell-under-test.
+				for (auto flop : launch) {
+					if (!drv_cell.empty())
+						break;
+					for (auto ob : cell_out_bits[flop]) {
+						if (clk_nets.count(ob) || !loads.count(ob))
+							continue;
+						drv_cell = unescape(flop->type.str());
+						drv_pin = unescape(driver[ob].second.str());
+						break;
+					}
+				}
+
+				// Both surround launches gone: seed from the CUT's outputs so the cone still
+				// includes it (and any polarity-restore inverter on QN).
+				if (launch.empty()) {
+					for (auto c : cut_flops) {
+						logic.insert(c);
+						for (auto ob : cell_out_bits[c]) {
+							if (clk_nets.count(ob) || !loads.count(ob))
+								continue;
+							seed.insert(ob);
+						}
+					}
+				}
+
+				// Walk the logic cone forward from the launch outputs, excluding boundary flops
+				driven = seed;
+				std::vector<SigBit> stack(seed.begin(), seed.end());
+				while (!stack.empty()) {
+					SigBit k = stack.back();
+					stack.pop_back();
+					if (clk_nets.count(k))
+						continue; // hard boundary: never expand through the shared clock tree
+					auto it = loads.find(k);
+					if (it == loads.end())
 						continue;
-					logic.insert(c);
-					for (auto ob : cell_out_bits[c]) {
-						if (clk_nets.count(ob))
-							continue; // don't follow a cell's generated/forwarded clock
-						driven.insert(ob);
-						stack.push_back(ob);
+					for (auto &pr : it->second) {
+						Cell *c = pr.first;
+						if (boundary_cells.count(c) || logic.count(c))
+							continue;
+						logic.insert(c);
+						for (auto ob : cell_out_bits[c]) {
+							if (clk_nets.count(ob))
+								continue; // don't follow a cell's generated/forwarded clock
+							driven.insert(ob);
+							stack.push_back(ob);
+						}
 					}
 				}
 			}
@@ -548,16 +640,6 @@ struct CarveNetlistPass : public Pass {
 				c->set_string_attribute(RTLIL::escape_id("submod"), final);
 			tagged_total += GetSize(logic);
 
-			// A DESIGN cell-under-test (slow_design_/fast_design_) is a whole sequential design,
-			// not a single mapped cell; flag it so the self-containment pass below also rebuilds
-			// its launch-flop input boundary (step (1)), which a single-cell carve never needs.
-			bool is_design = base.rfind("slow_design_", 0) == 0 || base.rfind("fast_design_", 0) == 0;
-
-			// Speed comes from the pre-rename base's "<speed>_" prefix ("fast_" covers both
-			// "fast_<enc>" and "fast_design_<enc>"). The post-rename `final` can't be used:
-			// pq_rename strips the speed prefix off plain cells, so `final` carries no speed.
-			std::string speed = base.rfind("fast_", 0) == 0 ? "fast" : "slow";
-
 			// Rebuild the output boundary at the capture flops. submod can only export a
 			// clean output port for a net driven *inside* the carve and read *outside* it.
 			// After synthesis the bit a capture flop captures often is not such a net: a
@@ -574,11 +656,62 @@ struct CarveNetlistPass : public Pass {
 			// characterized rather than stranded in the deleted train module. The carve wire
 			// is named "__pqcarve.<base>_<pin>" so the trailing port cleanup (which drops the
 			// scope-dot prefix) recovers the clean "<base>_<pin>" port name.
+			//
+			// carve_buf drives one carve-bus bit `dst` from the net `draw` with such a buffer.
+			auto carve_buf = [&](SigBit draw, SigBit dst) {
+				// Pick the buffer's source: clone an otherwise-unreachable constant/source
+				// cell (e.g. a tie) into the cell so the output bit gains an in-cone
+				// driver; otherwise copy the net as-is.
+				SigBit src = sigmap(draw);
+				if (src.wire != nullptr) {
+					auto dit = driver.find(src);
+					if (dit != driver.end()) {
+						Cell *dc = dit->second.first;
+						IdString opin = dit->second.second;
+						bool is_source = !cell_in_bits.count(dc) || cell_in_bits.at(dc).empty();
+						// A genuine constant source (a tie): 0 data inputs, single-bit
+						// output, unreachable by the forward cone. Clone it into the cell
+						// (rather than steal the shared original) so the output bit gets an
+						// in-cone driver and the tie's power is characterized.
+						if (is_source && GetSize(dc->getPort(opin)) == 1 &&
+						    !logic.count(dc) && !boundary_cells.count(dc)) {
+							Cell *clone = train->addCell(NEW_ID, dc->type);
+							clone->parameters = dc->parameters;
+							// Copy every port (e.g. a $lut's zero-width A pin must exist for
+							// the cell to pass check) before redirecting the output to a
+							// fresh net.
+							for (auto &cc : dc->connections())
+								clone->setPort(cc.first, cc.second);
+							Wire *tn = train->addWire(NEW_ID, 1);
+							clone->setPort(opin, SigSpec(tn));
+							clone->set_string_attribute(RTLIL::escape_id("submod"), final);
+							src = SigBit(tn);
+						}
+					}
+				}
+				Cell *buf = train->addBufGate(NEW_ID, src, dst);
+				buf->set_string_attribute(RTLIL::escape_id("submod"), final);
+				buf->set_string_attribute(PQ_PASS, "1");
+				// Keep the $_BUF_ alive through submod's internal clean (it would
+				// otherwise re-alias Y to A, re-merging the boundary); converted to a
+				// plain assign after the carve.
+				buf->set_bool_attribute(ID::keep);
+			};
 			std::string load_cell, load_pin;
 			for (auto pw : g.out_wires) {
 				Wire *cw = train->addWire(
 				    RTLIL::escape_id("__pqcarve." + unescape(pw->name.str())), pw->width);
 				cw->set_bool_attribute(PQ_CARVE_OUT);
+				// No capture flop to rewire: the carve bus takes over the train output port
+				// itself, and the demoted port wire is renamed after the carve loop.
+				if (port_bounded) {
+					for (int i = 0; i < pw->width; i++)
+						carve_buf(SigBit(pw, i), SigBit(cw, i));
+					cw->port_output = true;
+					pw->port_output = false;
+					demoted_outputs.push_back(pw);
+					continue;
+				}
 				for (int i = 0; i < pw->width; i++) {
 					Cell *fc = hop_back(sigmap(SigBit(pw, i)));
 					if (fc == nullptr || !capture.count(fc))
@@ -609,43 +742,7 @@ struct CarveNetlistPass : public Pass {
 						load_cell = unescape(fc->type.str());
 						load_pin = unescape(dpin.str());
 					}
-					// Pick the buffer's source: clone an otherwise-unreachable constant/source
-					// cell (e.g. a tie) into the cell so the output bit gains an in-cone
-					// driver; otherwise copy the net the flop reads as-is.
-					SigBit src = sigmap(draw);
-					if (src.wire != nullptr) {
-						auto dit = driver.find(src);
-						if (dit != driver.end()) {
-							Cell *dc = dit->second.first;
-							IdString opin = dit->second.second;
-							bool is_source = !cell_in_bits.count(dc) || cell_in_bits.at(dc).empty();
-							// A genuine constant source (a tie): 0 data inputs, single-bit
-							// output, unreachable by the forward cone. Clone it into the cell
-							// (rather than steal the shared original) so the output bit gets an
-							// in-cone driver and the tie's power is characterized.
-							if (is_source && GetSize(dc->getPort(opin)) == 1 &&
-							    !logic.count(dc) && !boundary_cells.count(dc)) {
-								Cell *clone = train->addCell(NEW_ID, dc->type);
-								clone->parameters = dc->parameters;
-								// Copy every port (e.g. a $lut's zero-width A pin must exist for
-								// the cell to pass check) before redirecting the output to a
-								// fresh net.
-								for (auto &cc : dc->connections())
-									clone->setPort(cc.first, cc.second);
-								Wire *tn = train->addWire(NEW_ID, 1);
-								clone->setPort(opin, SigSpec(tn));
-								clone->set_string_attribute(RTLIL::escape_id("submod"), final);
-								src = SigBit(tn);
-							}
-						}
-					}
-					Cell *buf = train->addBufGate(NEW_ID, src, SigBit(cw, i));
-					buf->set_string_attribute(RTLIL::escape_id("submod"), final);
-					buf->set_string_attribute(PQ_PASS, "1");
-					// Keep the $_BUF_ alive through submod's internal clean (it would
-					// otherwise re-alias Y to A, re-merging the boundary); converted to a
-					// plain assign after the carve.
-					buf->set_bool_attribute(ID::keep);
+					carve_buf(draw, SigBit(cw, i));
 					std::vector<SigBit> dbits = fc->getPort(dpin).bits();
 					dbits[dpos] = SigBit(cw, i);
 					fc->setPort(dpin, SigSpec(dbits));
@@ -839,6 +936,49 @@ struct CarveNetlistPass : public Pass {
 			}
 
 			boundary[final] = {speed, drv_cell, drv_pin, load_cell, load_pin};
+			if (port_bounded)
+				port_bounded_finals.insert(final);
+		}
+
+		// An unflopped design has no flop of its own to record, so give it the launch and
+		// capture flops most of its speed's cells recorded: the boundary its characterization
+		// imposed back when designs had surround flops of their own.
+		if (unflopped_designs) {
+			// speed -> (cell, pin) -> number of cells that recorded it
+			typedef std::map<std::pair<std::string, std::string>, int> Votes;
+			std::map<std::string, Votes> drv_votes, load_votes;
+			for (auto &it : boundary) {
+				if (port_bounded_finals.count(it.first))
+					continue;
+				const BoundaryRec &r = it.second;
+				if (!r.driving_cell.empty())
+					drv_votes[r.speed][{r.driving_cell, r.driving_pin}]++;
+				if (!r.load_cell.empty())
+					load_votes[r.speed][{r.load_cell, r.load_pin}]++;
+			}
+			auto most_common = [](const Votes &votes) {
+				std::pair<std::string, std::string> best;
+				int n = 0;
+				for (auto &v : votes)
+					if (v.second > n)
+						best = v.first, n = v.second;
+				return best;
+			};
+			for (auto &final : port_bounded_finals) {
+				BoundaryRec &r = boundary.at(final);
+				std::tie(r.driving_cell, r.driving_pin) = most_common(drv_votes[r.speed]);
+				std::tie(r.load_cell, r.load_pin) = most_common(load_votes[r.speed]);
+				if (r.driving_cell.empty() || r.load_cell.empty())
+					log_warning("carvenetlist: no %s cell recorded a surround flop to give design %s.\n", r.speed.c_str(),
+						    final.c_str());
+			}
+
+			// Rename each demoted output port so it cannot collide with the clean name its
+			// carve bus recovers. Only now: a SigBit hashes on its wire's name, so renaming
+			// inside the loop would orphan the net in every map keyed on it.
+			for (auto pw : demoted_outputs)
+				train->rename(pw, RTLIL::escape_id(unescape(pw->name.str()) + "__pqo"));
+			train->fixup_ports();
 		}
 
 		log("Carved %d cells (%d logic cells tagged)\n", GetSize(boundary), tagged_total);

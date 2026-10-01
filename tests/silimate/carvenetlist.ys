@@ -455,3 +455,148 @@ miter -equiv -flatten -make_assert golden cell miter
 sat -verify -prove-asserts -enable_undef miter
 design -reset
 log -pop
+
+# -----------------------------------------------------------------------------
+# Test 7: unflopped design (train has the pq_unflopped_designs marker port).
+# The design's ports are primary I/O with no surround flops, so carvenetlist
+# must carve it at the ports: its own input register (din[0] -> ireg) and output
+# register (oreg -> q) look exactly like surround flops to a hop and must stay,
+# the inverter feeding nreg (what a surround flop would absorb into QN) must stay,
+# an output-only counter must be reached backward from its port, a feed-through
+# and a tie-driven constant output must keep clean ports, and the walk must not
+# cross the tie it shares with the surrounded op cell next to it. With no flop of
+# its own, the design takes the op cell's recorded launch/capture flops.
+# -----------------------------------------------------------------------------
+log -header "Unflopped design carved at its ports"
+log -push
+design -reset
+read_rtlil <<EOT
+autoidx 1
+module \train
+  wire input 1 \fast_clk
+  wire input 2 \slow_clk
+  wire input 3 \pq_unflopped_designs
+  wire input 4 \slow_op_A
+  wire output 5 \slow_op_Y
+  wire width 2 input 6 \slow_design_dz_din
+  wire output 7 \slow_design_dz_q
+  wire output 8 \slow_design_dz_cnt
+  wire output 9 \slow_design_dz_thru
+  wire output 10 \slow_design_dz_zero
+  wire \slow_op_A__pqi
+  wire \slow_op_Y__pqo
+  wire \tie0
+  wire \ireg
+  wire \ninv
+  wire \nreg
+  wire \x
+  wire \cnt_n
+  cell $lut \tie
+    parameter \WIDTH 0
+    parameter \LUT 1'0
+    connect \A {}
+    connect \Y \tie0
+  end
+  cell $_DFF_P_ \op_inff
+    connect \C \slow_clk
+    connect \D \slow_op_A
+    connect \Q \slow_op_A__pqi
+  end
+  cell $_OR_ \op_or
+    connect \A \slow_op_A__pqi
+    connect \B \tie0
+    connect \Y \slow_op_Y__pqo
+  end
+  cell $_DFF_P_ \op_outff
+    connect \C \slow_clk
+    connect \D \slow_op_Y__pqo
+    connect \Q \slow_op_Y
+  end
+  cell $_DFF_P_ \d_ireg
+    connect \C \slow_clk
+    connect \D \slow_design_dz_din [0]
+    connect \Q \ireg
+  end
+  cell $_NOT_ \d_inv
+    connect \A \slow_design_dz_din [1]
+    connect \Y \ninv
+  end
+  cell $_DFF_P_ \d_nreg
+    connect \C \slow_clk
+    connect \D \ninv
+    connect \Q \nreg
+  end
+  cell $_XOR_ \d_xor
+    connect \A \ireg
+    connect \B \nreg
+    connect \Y \x
+  end
+  cell $_DFF_P_ \d_oreg
+    connect \C \slow_clk
+    connect \D \x
+    connect \Q \slow_design_dz_q
+  end
+  cell $_NOT_ \d_cinv
+    connect \A \slow_design_dz_cnt
+    connect \Y \cnt_n
+  end
+  cell $_DFF_P_ \d_creg
+    connect \C \slow_clk
+    connect \D \cnt_n
+    connect \Q \slow_design_dz_cnt
+  end
+  connect \slow_design_dz_thru \slow_design_dz_din [1]
+  connect \slow_design_dz_zero \tie0
+end
+EOT
+flatten -noscopeinfo
+carvenetlist
+# every design register and inverter stays; the tie is cloned, never shared
+select -assert-count 4 design_slow_dz/t:$_DFF_P_
+select -assert-count 2 design_slow_dz/t:$_NOT_
+select -assert-count 1 design_slow_dz/t:$_XOR_
+select -assert-count 1 design_slow_dz/t:$lut
+select -assert-none design_slow_dz/t:$_OR_ design_slow_dz/t:$_BUF_
+# the op cell next to it carves as before, with its own tie clone
+select -assert-count 1 op/t:$_OR_
+select -assert-count 1 op/t:$lut
+select -assert-none op/t:$_DFF_P_ op/t:$_XOR_
+# clean primary I/O: the data input, the shared clock, and the four outputs (no inout)
+select -assert-count 1 design_slow_dz/i:slow_design_dz_din
+select -assert-count 1 design_slow_dz/i:slow_clk
+select -assert-count 2 design_slow_dz/i:*
+select -assert-count 4 design_slow_dz/o:*
+select -assert-count 1 design_slow_dz/o:slow_design_dz_q
+select -assert-count 1 design_slow_dz/o:slow_design_dz_cnt
+select -assert-count 1 design_slow_dz/o:slow_design_dz_thru
+select -assert-count 1 design_slow_dz/o:slow_design_dz_zero
+select -assert-none design_slow_dz/w:*__pq*
+# the design borrows the op cell's surround flops as its boundary
+select -assert-mod-count 2 A:pq_driving_cell=$_DFF_P_
+select -assert-mod-count 2 A:pq_driving_pin=Q
+select -assert-mod-count 2 A:pq_load_cell=$_DFF_P_
+select -assert-mod-count 2 A:pq_load_pin=D
+# the carved design is sequentially equivalent to its RTL from reset
+read_verilog <<EOT
+module golden(slow_clk, slow_design_dz_din, slow_design_dz_q, slow_design_dz_cnt,
+              slow_design_dz_thru, slow_design_dz_zero);
+  input slow_clk;
+  input [1:0] slow_design_dz_din;
+  output reg slow_design_dz_q, slow_design_dz_cnt;
+  output slow_design_dz_thru, slow_design_dz_zero;
+  reg ireg, nreg;
+  always @(posedge slow_clk) begin
+    ireg <= slow_design_dz_din[0];
+    nreg <= ~slow_design_dz_din[1];
+    slow_design_dz_q <= ireg ^ nreg;
+    slow_design_dz_cnt <= ~slow_design_dz_cnt;
+  end
+  assign slow_design_dz_thru = slow_design_dz_din[1];
+  assign slow_design_dz_zero = 1'b0;
+endmodule
+EOT
+proc
+miter -equiv -flatten -make_assert golden design_slow_dz miter
+sat -verify -prove-asserts -set-init-zero -seq 8 miter
+design -reset
+log -pop
