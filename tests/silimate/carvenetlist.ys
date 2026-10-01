@@ -604,3 +604,58 @@ miter -equiv -flatten -make_assert golden design_slow_dz miter
 sat -verify -prove-asserts -set-init-zero -seq 8 miter
 design -reset
 log -pop
+
+# -----------------------------------------------------------------------------
+# Test 8: an unflopped design whose speed has no surrounded cell borrows the
+# other speed's recorded flops, and a stray "<port>__pqo" net does not block
+# renaming the demoted output port.
+# -----------------------------------------------------------------------------
+log -header "Unflopped design borrows the other speed's flops"
+log -push
+design -reset
+read_rtlil <<EOT
+autoidx 1
+module \train
+  wire input 1 \fast_clk
+  wire input 2 \slow_clk
+  wire input 3 \pq_unflopped_designs
+  wire input 4 \fast_op_A
+  wire output 5 \fast_op_Y
+  wire input 6 \slow_design_dy_d
+  wire output 7 \slow_design_dy_q
+  wire \fast_op_A__pqi
+  wire \fast_op_Y__pqo
+  wire \slow_design_dy_q__pqo
+  cell $_DFF_N_ \op_inff
+    connect \C \fast_clk
+    connect \D \fast_op_A
+    connect \Q \fast_op_A__pqi
+  end
+  cell $_NOT_ \op_not
+    connect \A \fast_op_A__pqi
+    connect \Y \fast_op_Y__pqo
+  end
+  cell $_DFF_N_ \op_outff
+    connect \C \fast_clk
+    connect \D \fast_op_Y__pqo
+    connect \Q \fast_op_Y
+  end
+  cell $_DFF_P_ \d_reg
+    connect \C \slow_clk
+    connect \D \slow_design_dy_d
+    connect \Q \slow_design_dy_q
+  end
+end
+EOT
+flatten -noscopeinfo
+carvenetlist
+scratchpad -assert carvenetlist.unflopped_designs true
+select -assert-count 1 design_slow_dy/t:$_DFF_P_
+select -assert-count 1 design_slow_dy/i:slow_design_dy_d
+select -assert-count 1 design_slow_dy/o:slow_design_dy_q
+select -assert-mod-count 2 A:pq_driving_cell=$_DFF_N_
+select -assert-mod-count 2 A:pq_load_cell=$_DFF_N_
+select -assert-mod-count 1 A:pq_speed=slow
+design -reset
+log -pop
+

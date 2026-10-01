@@ -164,8 +164,9 @@ struct CarveNetlistPass : public Pass {
 		log("carved at the train ports themselves: its cell set is everything connected to its\n");
 		log("ports (not crossing the shared clock network or a constant source), and each output\n");
 		log("port is rebuilt as a clean carve bus. With no flop of its own to record, the design\n");
-		log("takes the most common launch/capture flop recorded by its speed's cells. Netlists\n");
-		log("without the marker carve their designs at the surround flops as before. Honoring the\n");
+		log("takes the most common launch/capture flop recorded by its speed's cells (the other\n");
+		log("speed's if it has none). Netlists without the marker carve their designs at the\n");
+		log("surround flops as before. Honoring the\n");
 		log("marker sets the scratchpad flag carvenetlist.unflopped_designs, so the caller can\n");
 		log("tell this pass from an older one that would silently carve such a design wrong.\n");
 		log("\n");
@@ -946,7 +947,8 @@ struct CarveNetlistPass : public Pass {
 
 		// An unflopped design has no flop of its own to record, so give it the launch and
 		// capture flops most of its speed's cells recorded: the boundary its characterization
-		// imposed back when designs had surround flops of their own.
+		// imposed back when designs had surround flops of their own. A train with no cell of
+		// that speed falls back to the other speed's (the same library's flops) before giving up.
 		if (unflopped_designs) {
 			// speed -> (cell, pin) -> number of cells that recorded it
 			typedef std::map<std::pair<std::string, std::string>, int> Votes;
@@ -968,20 +970,26 @@ struct CarveNetlistPass : public Pass {
 						best = v.first, n = v.second;
 				return best;
 			};
+			auto vote = [&](std::map<std::string, Votes> &votes, const std::string &speed) {
+				auto best = most_common(votes[speed]);
+				return best.first.empty() ? most_common(votes[speed == "fast" ? "slow" : "fast"]) : best;
+			};
 			for (auto &final : port_bounded_finals) {
 				BoundaryRec &r = boundary.at(final);
-				std::tie(r.driving_cell, r.driving_pin) = most_common(drv_votes[r.speed]);
-				std::tie(r.load_cell, r.load_pin) = most_common(load_votes[r.speed]);
+				std::tie(r.driving_cell, r.driving_pin) = vote(drv_votes, r.speed);
+				std::tie(r.load_cell, r.load_pin) = vote(load_votes, r.speed);
 				if (r.driving_cell.empty() || r.load_cell.empty())
-					log_warning("carvenetlist: no %s cell recorded a surround flop to give design %s.\n", r.speed.c_str(),
-						    final.c_str());
+					log_warning("carvenetlist: no cell recorded a surround flop to give design %s.\n", final.c_str());
 			}
 
 			// Rename each demoted output port so it cannot collide with the clean name its
-			// carve bus recovers. Only now: a SigBit hashes on its wire's name, so renaming
-			// inside the loop would orphan the net in every map keyed on it.
-			for (auto pw : demoted_outputs)
-				train->rename(pw, RTLIL::escape_id(unescape(pw->name.str()) + "__pqo"));
+			// carve bus recovers (a fresh name if "<port>__pqo" is somehow taken). Only now: a
+			// SigBit hashes on its wire's name, so renaming inside the loop would orphan the net
+			// in every map keyed on it.
+			for (auto pw : demoted_outputs) {
+				IdString nn = RTLIL::escape_id(unescape(pw->name.str()) + "__pqo");
+				train->rename(pw, train->wire(nn) == nullptr ? nn : NEW_ID);
+			}
 			train->fixup_ports();
 		}
 
