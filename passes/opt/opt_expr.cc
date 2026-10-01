@@ -522,6 +522,35 @@ void replace_const_cells(RTLIL::Design *design, RTLIL::Module *module, bool cons
 #define ACTION_DO(_p_, _s_) do { replace_cell(assign_map, module, cell, input.as_string(), _p_, _s_); goto next_cell; } while (0)
 #define ACTION_DO_Y(_v_) ACTION_DO(ID::Y, RTLIL::SigSpec(RTLIL::State::S ## _v_))
 
+		// SILIMATE: a full adder column with a constant input is at most a half adder, so give it plain logic to fold
+		if (cell->type == ID($fa)) {
+			SigSpec ports[5] = {assign_map(cell->getPort(ID::A)), assign_map(cell->getPort(ID::B)),
+					assign_map(cell->getPort(ID::C)), cell->getPort(ID::X), cell->getPort(ID::Y)};
+			SigSpec live[5], fold[5];
+			for (int i = 0; i < GetSize(ports[0]); i++)
+				for (int p = 0; p < 5; p++)
+					(ports[0][i].wire && ports[1][i].wire && ports[2][i].wire ? live[p] : fold[p]).append(ports[p][i]);
+			if (!fold[0].empty()) {
+				std::string src = cell->get_src_attribute();
+				SigSpec ab = module->Xor(NEW_ID2_SUFFIX("fa_xor"), fold[0], fold[1], false, src); // SILIMATE: Improve the naming
+				module->connect(fold[4], module->Xor(NEW_ID2_SUFFIX("fa_xor"), ab, fold[2], false, src));
+				SigSpec both = module->And(NEW_ID2_SUFFIX("fa_and"), fold[0], fold[1], false, src);
+				module->connect(fold[3], module->Or(NEW_ID2_SUFFIX("fa_or"), both, module->And(NEW_ID2_SUFFIX("fa_and"), fold[2], ab, false, src), false, src));
+				if (live[0].empty()) {
+					module->remove(cell);
+				} else {
+					cell->setPort(ID::A, live[0]);
+					cell->setPort(ID::B, live[1]);
+					cell->setPort(ID::C, live[2]);
+					cell->setPort(ID::X, live[3]);
+					cell->setPort(ID::Y, live[4]);
+					cell->setParam(ID::WIDTH, GetSize(live[0]));
+				}
+				did_something = true;
+				continue;
+			}
+		}
+
 		bool detect_const_and = false;
 		bool detect_const_or = false;
 

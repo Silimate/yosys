@@ -1,0 +1,44 @@
+# Full adder columns with a constant input fold to plain logic, the live columns stay a full adder
+read_rtlil <<EOT
+module \fa_const
+  wire width 4 input 1 \a
+  wire width 4 input 2 \b
+  wire width 2 input 3 \c
+  wire width 4 output 4 \x
+  wire width 4 output 5 \y
+  cell $fa $fa0
+    parameter \WIDTH 4
+    connect \A \a
+    connect \B \b
+    connect \C { \c 1'1 1'0 }
+    connect \X \x
+    connect \Y \y
+  end
+end
+EOT
+equiv_opt -assert opt_expr
+design -load postopt
+select -assert-count 1 t:$fa
+select -assert-count 1 t:$fa r:WIDTH=2 %i
+design -reset
+
+# A full adder with no live column is only logic
+read_rtlil <<EOT
+module \fa_dead
+  wire width 2 input 1 \a
+  wire width 2 input 2 \b
+  wire width 2 output 3 \x
+  wire width 2 output 4 \y
+  cell $fa $fa0
+    parameter \WIDTH 2
+    connect \A \a
+    connect \B \b
+    connect \C 2'00
+    connect \X \x
+    connect \Y \y
+  end
+end
+EOT
+equiv_opt -assert opt_expr
+design -load postopt
+select -assert-none t:$fa
