@@ -54,10 +54,11 @@ define run_test
 	fi
 endef
 
+# -L: tests/silimate is a symlink into the silimate-passes submodule.
 .PHONY: summary
 summary:
-	@pass=$$(find . -type f -name '*.result' -exec grep '^PASS$$' {} + | wc -l); \
-	fail=$$(find . -type f -name '*.result' -exec grep '^FAIL$$' {} + | wc -l); \
+	@pass=$$(find -L . -type f -name '*.result' -exec grep '^PASS$$' {} + | wc -l); \
+	fail=$$(find -L . -type f -name '*.result' -exec grep '^FAIL$$' {} + | wc -l); \
 	total=$$((pass + fail)); \
 	echo "=========================="; \
 	echo "Tests: $$total"; \
@@ -74,7 +75,7 @@ summary:
 report:
 	@echo "=========================="
 	@echo "Failing tests:"
-	@find . -name '*.result' -type f -exec grep -H '^FAIL$$' {} + \
+	@find -L . -name '*.result' -type f -exec grep -H '^FAIL$$' {} + \
 	  | cut -d: -f1 \
 	  | sed 's|^\./||; s|\.result$$||'
 	@echo "=========================="
