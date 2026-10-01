@@ -198,6 +198,9 @@ struct CarveNetlistPass : public Pass {
 		if (unflopped_designs) {
 			log("Found %s: carving DESIGN cells at the train ports.\n", log_id(UNFLOPPED_DESIGNS));
 			design->scratchpad_set_bool("carvenetlist.unflopped_designs", true);
+		} else {
+			// Never let an earlier marked carve vouch for this one
+			design->scratchpad_unset("carvenetlist.unflopped_designs");
 		}
 
 		// Marks the zero-area $_BUF_ cells we insert at the capture-flop boundary (below) so

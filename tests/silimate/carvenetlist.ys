@@ -656,6 +656,34 @@ select -assert-count 1 design_slow_dy/o:slow_design_dy_q
 select -assert-mod-count 2 A:pq_driving_cell=$_DFF_N_
 select -assert-mod-count 2 A:pq_load_cell=$_DFF_N_
 select -assert-mod-count 1 A:pq_speed=slow
+# a later carve of a marker-free train clears the flag rather than inheriting it
+read_rtlil <<EOT
+autoidx 1
+module \train
+  wire input 1 \fast_clk
+  wire input 2 \fast_cell_A
+  wire output 3 \fast_cell_Y
+  wire \fast_cell_A__pqi
+  wire \fast_cell_Y__pqo
+  cell $_DFF_P_ \linff
+    connect \C \fast_clk
+    connect \D \fast_cell_A
+    connect \Q \fast_cell_A__pqi
+  end
+  cell $_NOT_ \g_not
+    connect \A \fast_cell_A__pqi
+    connect \Y \fast_cell_Y__pqo
+  end
+  cell $_DFF_P_ \coutff
+    connect \C \fast_clk
+    connect \D \fast_cell_Y__pqo
+    connect \Q \fast_cell_Y
+  end
+end
+EOT
+carvenetlist
+scratchpad -assert-unset carvenetlist.unflopped_designs
+select -assert-count 1 cell/t:$_NOT_
 design -reset
 log -pop
 
