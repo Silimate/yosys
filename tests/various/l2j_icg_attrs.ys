@@ -1,0 +1,64 @@
+# Regression test: an integrated clock gate keeps its gating style and pin roles.
+#
+# The frontend makes every Liberty cell a blackbox, so a consumer that has to stand in for
+# one (simulating a gated clock that a waveform dump does not carry) cannot tell from the
+# module alone which pin is the clock, which the enable, or whether the gate latches its
+# enable on the low or the high phase of the clock. The cell's clock_gating_integrated_cell
+# value lands on the module, and each clock_gate_*_pin role on its port.
+#
+# Pins that play no clock-gate role (supplies included) get no clock_gate_pin attribute,
+# and a cell that is not a clock gate gets no clock_gating_integrated_cell attribute.
+
+read_liberty2json << EOT
+{"library": {"leakage_power_unit": "1nW", "groups": [
+  {"cell": {"names": ["CKGATE"], "area": 2.0, "clock_gating_integrated_cell": "latch_posedge_precontrol",
+    "groups": [
+    {"pg_pin": {"names": ["VDD"], "pg_type": "primary_power", "voltage_name": "VDD"}},
+    {"pin": {"names": ["CP"], "direction": "input", "clock": "true", "clock_gate_clock_pin": "true"}},
+    {"pin": {"names": ["E"], "direction": "input", "clock_gate_enable_pin": "true"}},
+    {"pin": {"names": ["TE"], "direction": "input", "clock_gate_test_pin": "true"}},
+    {"pin": {"names": ["Q"], "direction": "output", "clock_gate_out_pin": "true",
+      "state_function": "CP & IQ"}},
+    {"pin": {"names": ["OBS"], "direction": "output", "clock_gate_obs_pin": "true"}}
+  ]}},
+  {"cell": {"names": ["AND2"], "area": 1.0, "groups": [
+    {"pin": {"names": ["A"], "direction": "input"}},
+    {"pin": {"names": ["Y"], "direction": "output", "function": "A"}}
+  ]}}
+]}}
+EOT
+
+logger -expect log "attribute \\clock_gating_integrated_cell \"latch_posedge_precontrol\"" 1
+logger -expect log "attribute \\clock_gate_pin \"clock\"" 1
+logger -expect log "attribute \\clock_gate_pin \"enable\"" 1
+logger -expect log "attribute \\clock_gate_pin \"test\"" 1
+logger -expect log "attribute \\clock_gate_pin \"out\"" 1
+logger -expect log "attribute \\clock_gate_pin \"obs\"" 1
+logger -expect-no-warnings
+dump =CKGATE
+logger -check-expected
+
+# Only the clock gate is tagged, and only its five role pins: not its supply, not AND2's pins
+select -assert-mod-count 1 =A:clock_gating_integrated_cell
+select -assert-count 5 =*/a:clock_gate_pin
+select -assert-none =CKGATE/w:VDD =CKGATE/a:clock_gate_pin %i
+
+# The attributes survive the blackbox Verilog that Liberty caches are written as
+design -reset
+read_liberty2json << EOT
+{"library": {"leakage_power_unit": "1nW", "groups": [
+  {"cell": {"names": ["CKGATE"], "area": 2.0, "clock_gating_integrated_cell": "latch_negedge",
+    "groups": [
+    {"pin": {"names": ["CPN"], "direction": "input", "clock_gate_clock_pin": "true"}},
+    {"pin": {"names": ["E"], "direction": "input", "clock_gate_enable_pin": "true"}},
+    {"pin": {"names": ["Q"], "direction": "output", "clock_gate_out_pin": "true"}}
+  ]}}
+]}}
+EOT
+write_verilog -blackboxes l2j_icg_attrs.out
+design -reset
+read_verilog l2j_icg_attrs.out
+select -assert-mod-count 1 =A:clock_gating_integrated_cell=latch_negedge
+select -assert-count 1 =CKGATE/w:CPN =CKGATE/a:clock_gate_pin=clock %i
+select -assert-count 1 =CKGATE/w:E =CKGATE/a:clock_gate_pin=enable %i
+select -assert-count 1 =CKGATE/w:Q =CKGATE/a:clock_gate_pin=out %i

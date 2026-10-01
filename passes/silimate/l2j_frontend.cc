@@ -256,6 +256,11 @@ struct L2JFrontend : public Frontend {
 		log("\n");
 		log("    Read cells from files emitted from liberty2json as blackbox modules into");
 		log("    current design.\n");
+		log("\n");
+		log("    An integrated clock gate keeps its clock_gating_integrated_cell value as a\n");
+		log("    module attribute of the same name, and each of its pins that carries a\n");
+		log("    clock_gate_{clock,enable,test,out,obs}_pin attribute gets a clock_gate_pin\n");
+		log("    attribute naming that role.\n");
 	}
 	void execute(std::istream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design *design) override
 	{
@@ -329,6 +334,13 @@ struct L2JFrontend : public Frontend {
 				current_module->set_src_attribute(cell["src"].get<std::string>());
 			}
 
+			// An integrated clock gate keeps its gating style and pin roles, so a consumer that
+			// has to stand in for the blackbox (power resimulation) knows what it computes
+			auto icg_style = cell.value<std::string>("clock_gating_integrated_cell", "");
+			if (!icg_style.empty()) {
+				current_module->set_string_attribute(ID(clock_gating_integrated_cell), icg_style);
+			}
+
 			// Power/ground pins, collected while walking the signal pins and declared after them
 			// (see below). Pairs of pin name and pg_type.
 			std::vector<std::pair<std::string, std::string>> pg_pins;
@@ -338,8 +350,17 @@ struct L2JFrontend : public Frontend {
 					const json pin = g["pin"].get<json::object_t>();
 					const auto direction = pin.value<std::string>("direction", "input");
 					const auto pin_names = pin.value<json::array_t>("names", {});
+					// The pin's role in a clock gate, from its clock_gate_*_pin attribute
+					std::string icg_role;
+					for (auto role : {"clock", "enable", "test", "out", "obs"}) {
+						if (value_as_boolean(pin, "clock_gate_"s + role + "_pin", false)) {
+							icg_role = role;
+						}
+					}
 					for (auto &pin_name: pin_names) {
-						add_port(current_module, pin_name.get<std::string>(), 1, direction);
+						RTLIL::Wire *port = add_port(current_module, pin_name.get<std::string>(), 1, direction);
+						if (port && !icg_role.empty())
+							port->set_string_attribute(ID(clock_gate_pin), icg_role);
 					}
 				} else if (g.count("pg_pin")) {
 					const json pg_pin = g["pg_pin"].get<json::object_t>();
