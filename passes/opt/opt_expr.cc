@@ -523,7 +523,8 @@ void replace_const_cells(RTLIL::Design *design, RTLIL::Module *module, bool cons
 #define ACTION_DO_Y(_v_) ACTION_DO(ID::Y, RTLIL::SigSpec(RTLIL::State::S ## _v_))
 
 		// SILIMATE: a full adder column with a constant input is at most a half adder, so give it plain logic to fold
-		if (cell->type == ID($fa)) {
+		// The plain logic drops the carry's x when the sum is x, so -keepdc and kept cells leave the $fa alone
+		if (cell->type == ID($fa) && !keepdc && !cell->has_keep_attr()) {
 			SigSpec ports[5] = {assign_map(cell->getPort(ID::A)), assign_map(cell->getPort(ID::B)),
 					assign_map(cell->getPort(ID::C)), cell->getPort(ID::X), cell->getPort(ID::Y)};
 			SigSpec live[5], fold[5];

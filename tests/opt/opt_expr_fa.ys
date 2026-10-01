@@ -16,10 +16,16 @@ module \fa_const
   end
 end
 EOT
+design -save fa_const
 equiv_opt -assert opt_expr
 design -load postopt
 select -assert-count 1 t:$fa
 select -assert-count 1 t:$fa r:WIDTH=2 %i
+
+# Under -keepdc the carry has to stay x when the sum is, so the full adder is left whole
+design -load fa_const
+opt_expr -keepdc
+select -assert-count 1 t:$fa r:WIDTH=4 %i
 design -reset
 
 # A full adder with no live column is only logic
