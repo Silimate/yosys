@@ -6,8 +6,9 @@
 # enable on the low or the high phase of the clock. The cell's clock_gating_integrated_cell
 # value lands on the module, and each clock_gate_*_pin role on its port.
 #
-# Pins that play no clock-gate role (supplies included) get no clock_gate_pin attribute,
-# and a cell that is not a clock gate gets no clock_gating_integrated_cell attribute.
+# Pins that play no clock-gate role (supplies included, and a role flag that is false, whether
+# 0 as liberty2json writes it or spelled out) get no clock_gate_pin attribute, and a cell that is
+# not a clock gate gets no clock_gating_integrated_cell attribute.
 
 read_liberty2json << EOT
 {"library": {"leakage_power_unit": "1nW", "groups": [
@@ -19,7 +20,9 @@ read_liberty2json << EOT
     {"pin": {"names": ["TE"], "direction": "input", "clock_gate_test_pin": "true"}},
     {"pin": {"names": ["Q"], "direction": "output", "clock_gate_out_pin": "true",
       "state_function": "CP & IQ"}},
-    {"pin": {"names": ["OBS"], "direction": "output", "clock_gate_obs_pin": "true"}}
+    {"pin": {"names": ["OBS"], "direction": "output", "clock_gate_obs_pin": "true"}},
+    {"pin": {"names": ["SE"], "direction": "input", "clock_gate_test_pin": "False",
+      "clock_gate_enable_pin": 0}}
   ]}},
   {"cell": {"names": ["AND2"], "area": 1.0, "groups": [
     {"pin": {"names": ["A"], "direction": "input"}},
@@ -38,10 +41,11 @@ logger -expect-no-warnings
 dump =CKGATE
 logger -check-expected
 
-# Only the clock gate is tagged, and only its five role pins: not its supply, not AND2's pins
+# Only the clock gate is tagged, and only its five role pins: not its supply, not SE, not AND2's
 select -assert-mod-count 1 =A:clock_gating_integrated_cell
 select -assert-count 5 =*/a:clock_gate_pin
 select -assert-none =CKGATE/w:VDD =CKGATE/a:clock_gate_pin %i
+select -assert-none =CKGATE/w:SE =CKGATE/a:clock_gate_pin %i
 
 # The attributes survive the blackbox Verilog that Liberty caches are written as
 design -reset

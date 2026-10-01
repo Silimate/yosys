@@ -21,6 +21,7 @@
 #include "kernel/log.h"
 
 #include "libs/nlohmann_json/json.hpp"
+#include <algorithm>
 #include <stdexcept>
 
 using namespace std::literals::string_literals;
@@ -61,7 +62,7 @@ inline double get_or_parse_number(const json &o, std::string key, double default
 /// @brief Gets an attribute as an boolean, or if the key is undefined,
 ///        returns a default value. If the attribute exists but is not a
 ///        boolean, it emulates the behavior of the Python programming language
-///        as to "truthiness."
+///        as to "truthiness," except that the string "false" (any case) is false.
 /// @param o The container object
 /// @param key The key used to access the attribute in question
 /// @param default_ The fallback default value
@@ -79,8 +80,13 @@ inline bool value_as_boolean(const json &o, std::string key, bool default_) {
 	case json::value_t::number_unsigned:
 	case json::value_t::number_float:
 		return bool(boolean.get<double>());
-	case json::value_t::string:
-		return bool(boolean.get<std::string>().length());
+	case json::value_t::string: {
+		// liberty2json emits Liberty's true/false as 1/0; a "false" spelled out (any case) must
+		// not read as true just because the string is nonempty
+		std::string text = boolean.get<std::string>();
+		std::transform(text.begin(), text.end(), text.begin(), ::tolower);
+		return !text.empty() && text != "false";
+	}
 	case json::value_t::array:
 	case json::value_t::object:
 	case json::value_t::binary:
