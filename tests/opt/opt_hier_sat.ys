@@ -1,0 +1,67 @@
+# opt_hier -sat runs opt_dff -sat between rounds, so a register an arriving constant
+# pins only by induction folds too, and the rounds after it carry that on.
+
+# `r` resets to 2 and loads `nxt`, a hold mux that also leaves the module, so opt_dff
+# cannot pull an enable out of it. Once d[2] arrives as 0, r[2] loads either 0 or
+# itself: stuck at its reset value, but only provably so by induction. `hi` reads r[2]
+# through a gate, and `r2` loads it through one, so each is only constant once the
+# logic behind it folds after r[2] does. `p` delays r[2] through 20 stages, more than
+# one round's fold loop takes, so its tail folds in the round after.
+read_verilog <<EOT
+module leaf(input clk, input rst, input en, input x, input [2:0] d,
+            output [2:0] q, output [2:0] nxt, output hi, output q2, output qp);
+	reg [2:0] r;
+	reg r2;
+	reg [19:0] p;
+	assign nxt = en ? d : r;
+	always @(posedge clk) r <= rst ? 3'd2 : nxt;
+	always @(posedge clk) r2 <= r[2] & x;
+	always @(posedge clk) p <= {p[18:0], r[2]};
+	assign q = r;
+	assign hi = r[2] & x;
+	assign q2 = r2;
+	assign qp = p[19];
+endmodule
+module top(input clk, input rst, input en, input x, input [1:0] d,
+           output [2:0] q, output [2:0] nxt, output hi, output q2, output qp);
+	leaf u(.clk(clk), .rst(rst), .en(en), .x(x), .d({1'b0, d}), .q(q), .nxt(nxt), .hi(hi), .q2(q2), .qp(qp));
+endmodule
+EOT
+hierarchy -top top
+proc
+opt_dff
+select -assert-count 1 leaf/t:$sdff r:WIDTH=3 %i
+design -save start
+
+# Plain opt_dff between rounds leaves the bit in place.
+opt_hier -max_iter 0
+select -assert-count 1 leaf/t:$sdff r:WIDTH=3 %i
+
+# With -sat it folds, then r2 and all of p behind it, and the rounds after carry all four
+# constant outputs (q[2], hi, q2, qp) back out.
+design -load start
+logger -expect log "Setting constant 0-bit at position 2 on .* from module leaf" 1
+logger -expect log "Substituting constant for 1 output bits of instance 'u'" 4
+opt_hier -max_iter 0 -sat
+logger -check-expected
+select -assert-count 1 leaf/t:$sdff r:WIDTH=2 %i
+select -assert-count 1 leaf/t:*dff*
+scratchpad -assert opt_hier.saturated true
+design -save folded
+
+# The folds keep the design equivalent to the original. qp repeats r[2] from 20 cycles
+# back, so the induction has to look further back than that. The purge drops u.x, an
+# input opt_hier disconnected once nothing in leaf read it.
+design -load start
+flatten
+design -save gold
+design -load folded
+flatten
+opt_clean -purge
+design -save gate
+design -load gold
+design -copy-from gate -as gate top
+equiv_make top gate equiv
+equiv_induct -seq 24 equiv
+equiv_status -assert equiv
+design -reset

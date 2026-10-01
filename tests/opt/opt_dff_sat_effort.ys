@@ -53,6 +53,28 @@ select -clear
 opt_clean -purge
 select -assert-count 3 t:$dff
 
+# a design-wide pool caps the call, is written back empty, and later calls skip their
+# proofs instead of drawing a fresh per-module budget
+design -load gold
+scratchpad -set opt_dff.sat_effort 0
+scratchpad -set opt_dff.sat_effort_pool 1
+logger -expect warning "design-wide solver effort pool is used up" 1
+logger -expect warning "solver effort budget for module test_case is exhausted" 1
+opt_dff -sat
+opt_dff -sat
+logger -check-expected
+scratchpad -assert opt_dff.sat_effort_pool 0
+opt_clean -purge
+select -assert-count 4 t:$dff
+
+# a pool with room folds as much as the unpooled default
+design -load gold
+scratchpad -set opt_dff.sat_effort_pool 1000000000
+opt_dff -sat
+opt_clean -purge
+select -assert-count 0 t:$dff
+scratchpad -unset opt_dff.sat_effort_pool
+
 # eq
 design -load gold
 design -copy-from gate_full -as gate_full test_case
