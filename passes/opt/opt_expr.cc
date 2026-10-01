@@ -523,14 +523,13 @@ void replace_const_cells(RTLIL::Design *design, RTLIL::Module *module, bool cons
 #define ACTION_DO_Y(_v_) ACTION_DO(ID::Y, RTLIL::SigSpec(RTLIL::State::S ## _v_))
 
 		// SILIMATE: a full adder column with a constant input is at most a half adder, so give it plain logic to fold
-		// The plain logic drops the carry's x when the sum is x, so -keepdc and kept cells leave the $fa alone
-		if (cell->type == ID($fa) && !keepdc && !cell->has_keep_attr()) {
-			SigSpec ports[5] = {assign_map(cell->getPort(ID::A)), assign_map(cell->getPort(ID::B)),
-					assign_map(cell->getPort(ID::C)), cell->getPort(ID::X), cell->getPort(ID::Y)};
+		if (cell->type == ID($fa) && !keepdc) { // plain logic drops the carry's x when the sum is x
+			const IdString names[5] = {ID::A, ID::B, ID::C, ID::X, ID::Y};
+			SigSpec a = assign_map(cell->getPort(ID::A)), b = assign_map(cell->getPort(ID::B)), c = assign_map(cell->getPort(ID::C));
 			SigSpec live[5], fold[5];
-			for (int i = 0; i < GetSize(ports[0]); i++)
+			for (int i = 0; i < GetSize(a); i++)
 				for (int p = 0; p < 5; p++)
-					(ports[0][i].wire && ports[1][i].wire && ports[2][i].wire ? live[p] : fold[p]).append(ports[p][i]);
+					(a[i].wire && b[i].wire && c[i].wire ? live[p] : fold[p]).append(cell->getPort(names[p])[i]);
 			if (!fold[0].empty()) {
 				std::string src = cell->get_src_attribute();
 				SigSpec ab = module->Xor(NEW_ID2_SUFFIX("fa_xor"), fold[0], fold[1], false, src); // SILIMATE: Improve the naming
@@ -540,11 +539,8 @@ void replace_const_cells(RTLIL::Design *design, RTLIL::Module *module, bool cons
 				if (live[0].empty()) {
 					module->remove(cell);
 				} else {
-					cell->setPort(ID::A, live[0]);
-					cell->setPort(ID::B, live[1]);
-					cell->setPort(ID::C, live[2]);
-					cell->setPort(ID::X, live[3]);
-					cell->setPort(ID::Y, live[4]);
+					for (int p = 0; p < 5; p++)
+						cell->setPort(names[p], live[p]);
 					cell->setParam(ID::WIDTH, GetSize(live[0]));
 				}
 				did_something = true;
