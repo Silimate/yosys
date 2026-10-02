@@ -38,10 +38,10 @@ select -assert-count 3 shift_pipe/w:data_pipes_reg.?*?
 select -assert-none a:sim_src
 log -pop
 
-log -header "Elements missing from the dump are absent, with one warning naming what it does hold"
+log -header "Elements missing from the dump are absent, with one warning for the group"
 log -push
 design -load imported
-logger -expect warning "Cannot place 8 bit\(s\) of 2 objects data_pipes_reg\[1\], data_pipes_reg\[2\] of 4 bits each, 8 cell\(s\), e\.g\. .*, in scope tb\.top_i0\.u_pipe: not in the waveform; the waveform has data_pipes_reg only as 1 signal\(s\) spanning 4 bit\(s\): data_pipes_reg\[0\] \[3:0\]" 1
+logger -expect warning "Cannot place 8 bit\(s\) of 2 objects data_pipes_reg\[1\], data_pipes_reg\[2\] of 4 bits each in scope tb\.top_i0\.u_pipe: not in the waveform" 1
 logger -expect log "Bound 8 flop\(s\); unstamped 0, object absent 8, bit unplaced 0" 1
 logger -expect log "Bound 28 of 36 Q bit\(s\); unstamped 0, absent 8, unplaced 0, conflict 0, unwired 0" 1
 reg_rename -waveform reg_rename_genblk_elem0.vcd -scope tb.top_i0

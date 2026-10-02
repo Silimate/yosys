@@ -149,6 +149,38 @@ std::string RtlBinder::Shape::spell() const
 	return out;
 }
 
+// Leaf members below `node`, top bits first, as `rtl_bind_members` spells them
+void RtlBinder::spell_members(const TypeRange *node, const std::string &path, std::string &out) const
+{
+	if (node->IsTypeStructure() && !node->IsTypeVerilogUnion()) {
+		Map *members = node->GetElementTypeRangeMap();
+		MapIter mi;
+		const char *name;
+		TypeRange *member;
+		if (members)
+			FOREACH_MAP_ITEM(members, mi, &name, &member)
+				if (!member->IsTypeVerilogModport()) // a modport lists the interface's own members again
+					spell_members(member, path + "." + name, out);
+		return;
+	}
+	// An unpacked array of structs is dumped one element per index, lowest index on top
+	const TypeRange *elem = node;
+	while (elem->IsTypeArray() && !range_packed(elem) && elem->GetNext())
+		elem = elem->GetNext();
+	if (elem != node && elem->IsTypeStructure() && !elem->IsTypeVerilogUnion()) {
+		int lo = std::min(node->LeftRangeBound(), node->RightRangeBound());
+		int hi = std::max(node->LeftRangeBound(), node->RightRangeBound());
+		for (int i = lo; i <= hi; i++)
+			spell_members(node->GetNext(), path + "[" + std::to_string(i) + "]", out);
+		return;
+	}
+	Shape shape;
+	decl_shape(node, shape);
+	std::string ranges = shape.spell();
+	out += stringf("%s%s:%lld%s%s", out.empty() ? "" : ";", path.c_str(), (long long)node->NumElements(),
+			ranges.empty() ? "" : ":", ranges.c_str());
+}
+
 // Q bit `b` of this location -> bit index in the whole variable
 bool RtlBinder::Location::var_bit(long long b, long long &out) const
 {
@@ -242,6 +274,12 @@ std::optional<RtlBinder::Location> RtlBinder::locate(const std::string &var, con
 	Shape obj_shape;
 	if (decl_shape(points[anchor].node, obj_shape))
 		loc.dims = obj_shape.spell();
+	// The element under those ranges, whose members a dump may list one by one
+	const TypeRange *elem = points[anchor].node;
+	while (elem && elem->IsTypeArray())
+		elem = elem->GetNext();
+	if (elem && elem->IsTypeStructure() && !elem->IsTypeVerilogUnion())
+		loc.elem = elem;
 	loc.offset = points[depth].offset; // where this span sits in the variable
 	loc.obj_offset = points[anchor].offset;
 	loc.obj_width = points[anchor].span; // dump width of that unpacked element
@@ -388,6 +426,8 @@ void RtlBinder::stamp(Instance *inst, const RTLIL::SigSpec &sig_q, const std::ve
 			binds[b] = reg ? reg->bind(b) : loc->bind(sig_q[b].offset);
 			if (binds[b].valid && !loc->dims.empty())
 				obj_dims[loc->obj] = loc->dims;
+			if (binds[b].valid && loc->elem && !obj_members.count(loc->obj))
+				spell_members(loc->elem, "", obj_members[loc->obj]);
 		}
 		(!binds[b].valid ? missing_bits : reg ? decoded_bits : fallback_bits)++;
 	}
@@ -416,9 +456,16 @@ void RtlBinder::finish(RTLIL::Module *module)
 		dims += (dims.empty() ? "" : " ") + it.first + "=" + it.second;
 	if (!dims.empty())
 		module->set_string_attribute(ID(rtl_bind_dims), dims);
+	std::string members;
+	for (auto &it : obj_members)
+		if (!it.second.empty())
+			members += (members.empty() ? "" : " ") + it.first + "=" + it.second;
+	if (!members.empty())
+		module->set_string_attribute(ID(rtl_bind_members), members);
 	decoded_bits = fallback_bits = missing_bits = 0;
 	net_places.clear();
 	obj_dims.clear();
+	obj_members.clear();
 }
 
 #endif /* YOSYS_ENABLE_VERIFIC */
