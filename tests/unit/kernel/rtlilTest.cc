@@ -340,18 +340,18 @@ namespace RTLIL {
 		EXPECT_NO_FATAL_FAILURE(mod->addWire(ID(test), RTLIL::WIDTH_LIMIT - 1));
 	}
 
-	TEST_F(KernelRtlilTest, ModuleCloneKeepsAttributeOrder) {
-		std::unique_ptr<Module> mod = std::make_unique<Module>();
-		mod->set_string_attribute(ID(zz), "1");
-		mod->set_string_attribute(ID(aa), "2");
-		mod->set_string_attribute(ID(mm), "3");
-		std::unique_ptr<Module> copy(mod->clone());
-		std::vector<IdString> want, got;
-		for (auto &attr : mod->attributes)
-			want.push_back(attr.first);
-		for (auto &attr : copy->attributes)
-			got.push_back(attr.first);
-		EXPECT_EQ(got, want);
+	TEST_F(KernelRtlilTest, ModuleRtlilDumpIgnoresAttributeOrder) {
+		std::unique_ptr<Module> fwd = std::make_unique<Module>();
+		std::unique_ptr<Module> rev = std::make_unique<Module>();
+		fwd->name = rev->name = ID(m);
+		for (auto name : {ID(zz), ID(aa), ID(mm)})
+			fwd->set_string_attribute(name, "1");
+		for (auto name : {ID(mm), ID(aa), ID(zz)})
+			rev->set_string_attribute(name, "1");
+		EXPECT_EQ(fwd->rtlil_dump(), rev->rtlil_dump());
+
+		std::unique_ptr<Module> copy(fwd->clone());
+		EXPECT_EQ(copy->rtlil_hash(), fwd->rtlil_hash());
 	}
 
 	TEST_F(KernelRtlilTest, ConstEqualStr) {

@@ -22,7 +22,6 @@
 #include "kernel/newcelltypes.h"
 #include "kernel/sigtools.h"
 #include "kernel/threading.h"
-#include "kernel/utils.h"
 #include "frontends/verilog/verilog_frontend.h"
 #include "frontends/verilog/preproc.h"
 #include "backends/rtlil/rtlil_backend.h"
@@ -2740,8 +2739,7 @@ void RTLIL::Module::cloneInto(RTLIL::Module *new_mod) const
 	for (auto &conn : connections_)
 		new_mod->connect(conn);
 
-	// Dicts iterate newest-first, so re-insert in reverse to keep the source's order
-	for (auto &attr : reversed(attributes))
+	for (auto &attr : attributes)
 		new_mod->attributes[attr.first] = attr.second;
 
 	for (auto &it : wires_)
@@ -3018,8 +3016,10 @@ void RTLIL::Module::swap_names(RTLIL::Wire *w1, RTLIL::Wire *w2)
 
 // Returns the RTLIL dump of a module
 std::string RTLIL::Module::rtlil_dump() {
-	// Sorting the module to have a canonical RTLIL
+	// Sorting the module to have a canonical RTLIL; sort() leaves module attributes in
+	// insertion order, which clone() reverses
 	sort();
+	attributes.sort(sort_by_id_str());
 	// Dumping the RTLIL in an in-memory stringstream
 	std::stringstream stream;
 	RTLIL_BACKEND::dump_module(stream, " ", this, design, false, true, false);
