@@ -163,15 +163,20 @@ void RtlBinder::spell_members(const TypeRange *node, const std::string &path, st
 					spell_members(member, path + "." + name, out);
 		return;
 	}
-	// An unpacked array of structs is dumped one element per index, lowest index on top
+	// An array of structs can be dumped one element per index, so its elements' members are listed too
 	const TypeRange *elem = node;
-	while (elem->IsTypeArray() && !range_packed(elem) && elem->GetNext())
+	while (elem->IsTypeArray() && elem->GetNext())
 		elem = elem->GetNext();
 	if (elem != node && elem->IsTypeStructure() && !elem->IsTypeVerilogUnion()) {
-		int lo = std::min(node->LeftRangeBound(), node->RightRangeBound());
-		int hi = std::max(node->LeftRangeBound(), node->RightRangeBound());
-		for (int i = lo; i <= hi; i++)
+		// Top first: an unpacked range puts its lowest index there, a packed one its left index
+		int left = node->LeftRangeBound(), right = node->RightRangeBound();
+		bool packed = range_packed(node);
+		int from = packed ? left : std::min(left, right), to = packed ? right : std::max(left, right);
+		for (int i = from;; i += from <= to ? 1 : -1) {
 			spell_members(node->GetNext(), path + "[" + std::to_string(i) + "]", out);
+			if (i == to)
+				break;
+		}
 		return;
 	}
 	Shape shape;

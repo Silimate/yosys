@@ -1,9 +1,15 @@
 typedef struct packed {
+  logic [1:0] p;
+  logic       q;
+} pq_t;
+
+typedef struct packed {
   logic [3:0] a;
   struct packed {
     logic [1:0] p;
     logic       q;
   } n;
+  pq_t  [1:0] pa;
   logic b;
 } s_t;
 
