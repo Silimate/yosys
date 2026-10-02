@@ -340,6 +340,20 @@ namespace RTLIL {
 		EXPECT_NO_FATAL_FAILURE(mod->addWire(ID(test), RTLIL::WIDTH_LIMIT - 1));
 	}
 
+	TEST_F(KernelRtlilTest, ModuleCloneKeepsAttributeOrder) {
+		std::unique_ptr<Module> mod = std::make_unique<Module>();
+		mod->set_string_attribute(ID(zz), "1");
+		mod->set_string_attribute(ID(aa), "2");
+		mod->set_string_attribute(ID(mm), "3");
+		std::unique_ptr<Module> copy(mod->clone());
+		std::vector<IdString> want, got;
+		for (auto &attr : mod->attributes)
+			want.push_back(attr.first);
+		for (auto &attr : copy->attributes)
+			got.push_back(attr.first);
+		EXPECT_EQ(got, want);
+	}
+
 	TEST_F(KernelRtlilTest, ConstEqualStr) {
 		EXPECT_EQ(Const("abc"), Const("abc"));
 		EXPECT_NE(Const("abc"), Const("def"));

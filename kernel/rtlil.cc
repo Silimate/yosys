@@ -22,6 +22,7 @@
 #include "kernel/newcelltypes.h"
 #include "kernel/sigtools.h"
 #include "kernel/threading.h"
+#include "kernel/utils.h"
 #include "frontends/verilog/verilog_frontend.h"
 #include "frontends/verilog/preproc.h"
 #include "backends/rtlil/rtlil_backend.h"
@@ -2739,7 +2740,8 @@ void RTLIL::Module::cloneInto(RTLIL::Module *new_mod) const
 	for (auto &conn : connections_)
 		new_mod->connect(conn);
 
-	for (auto &attr : attributes)
+	// Dicts iterate newest-first, so re-insert in reverse to keep the source's order
+	for (auto &attr : reversed(attributes))
 		new_mod->attributes[attr.first] = attr.second;
 
 	for (auto &it : wires_)
