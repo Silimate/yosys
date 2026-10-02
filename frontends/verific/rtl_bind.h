@@ -23,6 +23,8 @@ YOSYS_NAMESPACE_BEGIN
 // primitives of one netlist, decoding each primitive's name through the netlist's type ranges.
 // The module's `rtl_bind_dims` lists each stamped object's declared ranges, e.g.
 // `data_q=p15:0 mem=u0:3,p7:0`: unpacked (u) then packed (p), outermost first.
+// Its `rtl_bind_members` lists the leaf members of each struct-typed object's element, top bits
+// first, as path, width and declared ranges, e.g. `s=.a:4:p3:0;.b.c:1`.
 struct RtlBinder
 {
 	void begin(Verific::Netlist *nl);
@@ -64,6 +66,7 @@ private:
 	struct Location {
 		std::string var, obj;
 		std::string dims; // obj's declared ranges, as `rtl_bind_dims` spells them
+		const Verific::TypeRange *elem = nullptr; // obj's element type, when it is a struct
 		Shape shape;
 		long long offset = 0, obj_offset = 0, obj_width = 0;
 		bool var_bit(long long b, long long &out) const;
@@ -75,12 +78,14 @@ private:
 	std::map<RTLIL::Wire *, std::optional<Location>> net_places;
 	std::map<std::string, std::string> flattened; // `q0_sel` -> `q0.sel`
 	std::map<std::string, std::string> obj_dims; // stamped obj -> its declared ranges
+	std::map<std::string, std::string> obj_members; // stamped struct-typed obj -> its leaf members
 	int decoded_bits = 0, fallback_bits = 0, missing_bits = 0;
 
 	bool parse_steps(const std::string &path, size_t pos, std::vector<Step> &steps) const;
 	const Verific::TypeRange *find_variable(const std::string &path, std::string &var, std::vector<Step> &steps) const;
 	bool range_packed(const Verific::TypeRange *t) const;
 	bool decl_shape(const Verific::TypeRange *tr, Shape &shape) const;
+	void spell_members(const Verific::TypeRange *node, const std::string &path, std::string &out) const;
 	std::vector<WalkPoint> walk(const Verific::TypeRange *head, const std::vector<Step> &steps) const;
 	std::optional<Location> locate(const std::string &var, const std::vector<WalkPoint> &points, size_t depth) const;
 	bool narrow(Location &loc, const Verific::TypeRange *node, int a, int b) const;
