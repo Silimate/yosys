@@ -39,7 +39,7 @@ jobs:
         with:
           submodules: recursive
           ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
-      - run: git fetch --unshallow --tags # yosys version string counts commits since the last tag
+      - run: git fetch --unshallow --tags --no-recurse-submodules # version string counts commits since last tag
       - uses: actions/cache@v6
         with:
           path: .ccache
@@ -71,7 +71,7 @@ jobs:
         with:
           submodules: recursive
           ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
-      - run: git fetch --unshallow --tags # yosys version string counts commits since the last tag
+      - run: git fetch --unshallow --tags --no-recurse-submodules # version string counts commits since last tag
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
