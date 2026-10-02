@@ -413,24 +413,6 @@ struct ModWalker
 		}
 	}
 
-	void remove_cell(RTLIL::Cell *cell)
-	{
-		for (auto &conn : cell->connections()) {
-			std::vector<RTLIL::SigBit> bits = sigmap(conn.second);
-			for (int i = 0; i < int(bits.size()); i++) {
-				PortBit pbit {cell, conn.first, i};
-				auto drv = signal_drivers.find(bits[i]);
-				if (drv != signal_drivers.end() && drv->second.erase(pbit) && drv->second.empty())
-					signal_drivers.erase(drv);
-				auto con = signal_consumers.find(bits[i]);
-				if (con != signal_consumers.end() && con->second.erase(pbit) && con->second.empty())
-					signal_consumers.erase(con);
-			}
-		}
-		cell_outputs.erase(cell);
-		cell_inputs.erase(cell);
-	}
-
 	ModWalker(RTLIL::Design *design, RTLIL::Module *module = nullptr) : design(design), module(NULL)
 	{
 		ct.setup(design);

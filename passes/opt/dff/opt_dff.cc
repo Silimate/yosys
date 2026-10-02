@@ -44,12 +44,9 @@ void OptDffWorker::remove_ff_bits(Cell *cell, const pool<int> &drop)
 
 	FfData new_ff = ff.slice(keep);
 	new_ff.cell = cell;
-	// emit() replaces the cell, so keep the shared walker on live cells
-	if (modwalker_ptr)
-		modwalker_ptr->remove_cell(cell);
-	Cell *new_cell = new_ff.emit();
-	if (modwalker_ptr && new_cell)
-		modwalker_ptr->add_cell(new_cell);
+	// emit() deletes the cell, so drop the shared walker that still points at it
+	modwalker_ptr.reset();
+	new_ff.emit();
 }
 
 YOSYS_NAMESPACE_END
