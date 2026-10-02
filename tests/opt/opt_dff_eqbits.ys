@@ -55,6 +55,25 @@ equiv_make gold gate equiv
 equiv_induct equiv
 equiv_status -assert
 
+# eqbits reads the cone of a flop that constbits already removed
+design -reset
+read_verilog -sv <<EOT
+module test_case(input clk, input en, input d, output reg x, output reg b, output reg c);
+	initial x = 1'b0;
+	initial b = 1'b0;
+	initial c = 1'b0;
+	always @(posedge clk) x <= x & en;
+	always @(posedge clk) b <= x | d;
+	always @(posedge clk) c <= x | d;
+endmodule
+EOT
+hierarchy -top test_case
+proc
+techmap
+opt_dff -sat
+opt_clean -purge
+select -assert-count 1 t:$_DFF_P_
+
 # verify keepdc exclusivity
 design -reset
 read_verilog -sv <<EOT
