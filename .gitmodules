@@ -30,3 +30,6 @@
 	path = libs/symfpu
 	url = https://github.com/YosysHQ/symfpu
 	branch = floatWithStatusFlags
+[submodule "silimate-passes"]
+	path = silimate-passes
+	url = git@github.com:Silimate/silimate-passes.git

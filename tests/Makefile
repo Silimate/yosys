@@ -127,7 +127,7 @@ clean:
 	@rm -f ./svinterfaces/*.log_stdout ./svinterfaces/*.log_stderr ./svinterfaces/dut_result.txt ./svinterfaces/reference_result.txt ./svinterfaces/a.out ./svinterfaces/*_syn.v ./svinterfaces/*.diff
 	@rm -f  ./tools/cmp_tbdata
 	@rm -f $(addsuffix /Makefile,$(MK_TEST_DIRS))
-	@find . -name '*.result' -type f -exec rm -f {} +
+	@find -L . -name '*.result' -type f -exec rm -f {} +
 
 .PHONY: coverage
 coverage:
