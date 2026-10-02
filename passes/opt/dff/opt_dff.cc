@@ -154,8 +154,10 @@ struct OptDffPass : public Pass {
 				did_something = true;
 			// constbits also runs without -sat: it folds bits with all-constant
 			// inputs, -sat additionally proves bits with wire inputs
-			if (worker.run_constbits())
+			if (worker.run_constbits()) {
 				did_something = true;
+				worker.refresh_after_edits();
+			}
 			if (mod_opt.sat && worker.run_eqbits())
 				did_something = true;
 			if (mod_opt.sat && worker.sat_budget.enabled()) {

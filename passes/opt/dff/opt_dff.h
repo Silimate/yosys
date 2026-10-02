@@ -62,6 +62,16 @@ struct OptDffWorker
 		return *modwalker_ptr;
 	}
 
+	// remove_ff_bits re-emits an FF as a new cell and frees the old one, and folding ties Q
+	// bits to constants, so after either the walker holds freed cells and stale drivers and
+	// sigmap/initvals miss the new connections. Rebuild all three before analyzing again.
+	void refresh_after_edits()
+	{
+		modwalker_ptr.reset();
+		sigmap.set(module);
+		initvals.set(&sigmap, module);
+	}
+
 	bool warn_if_budget_spent()
 	{
 		if (!sat_budget.spent())

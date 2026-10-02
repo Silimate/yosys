@@ -1,0 +1,48 @@
+# eqbits must see the flops constbits has just folded. k is stuck at its reset value, so
+# a (d[1] | k) equals b (d[1]) once k is known to be 0. eqbits used to reuse the ModWalker
+# built before the fold, which still read k as a live FF (a cell constbits had freed),
+# so the merge went unproven.
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire [1:0] d,
+	output wire o1,
+	output wire o2,
+	output wire o3
+);
+	reg k, a, b;
+	always @(posedge clk or posedge rst)
+		if (rst) begin
+			k <= 1'b0;
+			a <= 1'b0;
+			b <= 1'b0;
+		end else begin
+			k <= k & d[0];
+			a <= d[1] | k;
+			b <= d[1];
+		end
+	assign o1 = a;
+	assign o2 = b;
+	// k is observable so equiv_induct can carry k == 0 from one step to the next
+	assign o3 = k;
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+# gate level, so the simulation prefilter can evaluate the D cones
+techmap
+design -save gold
+
+opt_dff -sat
+opt_clean -purge
+select -assert-count 1 t:$_DFF_PP0_
+design -save gate
+
+design -copy-from gold -as gold test_case
+design -copy-from gate -as gate test_case
+async2sync
+equiv_make gold gate equiv
+equiv_induct equiv
+equiv_status -assert
