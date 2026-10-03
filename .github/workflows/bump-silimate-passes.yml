@@ -1,0 +1,29 @@
+name: Bump silimate-passes
+
+# Triggered by silimate-passes on every push to main, or manually.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: bump-silimate-passes
+  cancel-in-progress: true
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - run: git submodule update --remote silimate-passes
+
+      # A PAT rather than GITHUB_TOKEN, so CI runs on the PR.
+      - uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.YOSYS_BOT_TOKEN }}
+          branch: bump/silimate-passes
+          commit-message: Bump silimate-passes
+          title: Bump silimate-passes
+          body: Updates the `silimate-passes` submodule to the latest `main`.
