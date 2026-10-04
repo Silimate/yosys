@@ -83,6 +83,8 @@ match add
 	filter !(!offset_negative && varport_signed)
 	// -> data >> (var-c) (with var unsigned) is illegal
 	filter !(offset_negative && !varport_signed)
+	// shift must read B with the add/sub signedness
+	filter varport_signed == (param(shift, \B_SIGNED).as_bool() && !msb_zeros)
 
 	// state-variables are assigned at the end only:
 	// shift the log2scale offset in-front of add to get true value: (var+c)<<N -> (var<<N)+(c<<N)
@@ -109,6 +111,12 @@ code
 					location.c_str(), log_signal(old_a), log_signal(var_signal), -offset);
 		reject;
 	}
+
+	// $shr and $shift sign-extend A to max(A_WIDTH, Y_WIDTH), so bake that in
+	// before reslicing A and clear A_SIGNED, or it gets applied twice
+	bool a_signed = shift->type.in($shr, $shift) && param(shift, \A_SIGNED).as_bool();
+	if (a_signed && !old_a.empty())
+		old_a.extend_u0(max(GetSize(old_a), GetSize(port(shift, \Y))), true);
 
 	did_something = true;
 	log("shiftadd pattern in %s: shift=%s, add/sub=%s, offset: %d\n", \
@@ -143,6 +151,8 @@ code
 
 	shift->setPort(\A, new_a);
 	shift->setParam(\A_WIDTH, GetSize(new_a));
+	if (a_signed)
+		shift->setParam(\A_SIGNED, 0);
 	shift->setPort(\B, new_b);
 	shift->setParam(\B_WIDTH, GetSize(new_b));
 	blacklist(add);

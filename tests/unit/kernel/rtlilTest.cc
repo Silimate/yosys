@@ -340,6 +340,20 @@ namespace RTLIL {
 		EXPECT_NO_FATAL_FAILURE(mod->addWire(ID(test), RTLIL::WIDTH_LIMIT - 1));
 	}
 
+	TEST_F(KernelRtlilTest, ModuleRtlilDumpIgnoresAttributeOrder) {
+		std::unique_ptr<Module> fwd = std::make_unique<Module>();
+		std::unique_ptr<Module> rev = std::make_unique<Module>();
+		fwd->name = rev->name = ID(m);
+		for (auto name : {ID(zz), ID(aa), ID(mm)})
+			fwd->set_string_attribute(name, "1");
+		for (auto name : {ID(mm), ID(aa), ID(zz)})
+			rev->set_string_attribute(name, "1");
+		EXPECT_EQ(fwd->rtlil_dump(), rev->rtlil_dump());
+
+		std::unique_ptr<Module> copy(fwd->clone());
+		EXPECT_EQ(copy->rtlil_hash(), fwd->rtlil_hash());
+	}
+
 	TEST_F(KernelRtlilTest, ConstEqualStr) {
 		EXPECT_EQ(Const("abc"), Const("abc"));
 		EXPECT_NE(Const("abc"), Const("def"));

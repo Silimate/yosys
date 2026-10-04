@@ -375,6 +375,12 @@ struct EqBitsContext
 		for (int i = 0; i < GetSize(classes); i++)
 			worklist.push_back(i);
 
+		// The hypo is one literal, rebuilt only when a split weakens it. As one assumption per
+		// member pair, each pair became its own MiniSat decision level, and once the learnt
+		// clauses outgrow MiniSat's limit it sorts all of them (reduceDB) before every decision.
+		// The propagation budget never sees that: on a masked adder it was minutes of sorting.
+		int hypo = 0;
+
 		while (!worklist.empty()) {
 			int cls_idx = worklist.back();
 			worklist.pop_back();
@@ -384,13 +390,17 @@ struct EqBitsContext
 			if (GetSize(cls) < 2) continue;
 
 			// Induction hypo: assume every candidate class is equal
-			std::vector<int> assumptions;
-			for (auto &c : classes) {
-				if (GetSize(c) < 2) continue;
-				int rep = c[0];
-				for (int k = 1; k < GetSize(c); k++)
-					assumptions.push_back(qcsat.ez->IFF(q_lit[rep], q_lit[c[k]]));
+			if (!hypo) {
+				std::vector<int> eqs;
+				for (auto &c : classes) {
+					if (GetSize(c) < 2) continue;
+					int rep = c[0];
+					for (int k = 1; k < GetSize(c); k++)
+						eqs.push_back(qcsat.ez->IFF(q_lit[rep], q_lit[c[k]]));
+				}
+				hypo = qcsat.ez->expression(ezSAT::OpAnd, eqs);
 			}
+			std::vector<int> assumptions = {hypo};
 
 			// Scan the class members against the representative and issue a query per pair,
 			// stopping early at the first counterexample, which is reused to split the entire
@@ -438,6 +448,7 @@ struct EqBitsContext
 					in_worklist.push_back(false);
 
 					// Partition was split -> the induction hypo weakened
+					hypo = 0;
 					for (int j = 0; j < GetSize(classes); j++) {
 						if (GetSize(classes[j]) >= 2 && !in_worklist[j]) {
 							worklist.push_back(j);

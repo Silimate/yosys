@@ -8,5 +8,6 @@ mkdir -p $TMPDIR
 ccache -z
 
 make -C verific/tclmain -j$(getconf _NPROCESSORS_ONLN)
-python3 -m pip wheel . --no-build-isolation -Ccmake=-DYOSYS_COMPILER_LAUNCHER=ccache -w wheelhouse
+python3 -m pip wheel . --no-build-isolation -Ccmake="-DCMAKE_BUILD_TYPE=Release -DYOSYS_COMPILER_LAUNCHER=ccache" -w wheelhouse
+python3 .github/workflows/wheels/silimate_check_release.py wheelhouse
 ccache -s

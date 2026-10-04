@@ -36,6 +36,8 @@ OptDffWorker::OptDffWorker(const OptDffOptions &opt, Module *mod, int64_t sat_ef
 
 void OptDffWorker::remove_ff_bits(Cell *cell, const pool<int> &drop)
 {
+	modwalker_ptr.reset();
+
 	FfData ff(&initvals, cell);
 	std::vector<int> keep;
 	for (int i = 0; i < ff.width; i++)
@@ -154,8 +156,10 @@ struct OptDffPass : public Pass {
 				did_something = true;
 			// constbits also runs without -sat: it folds bits with all-constant
 			// inputs, -sat additionally proves bits with wire inputs
-			if (worker.run_constbits())
+			if (worker.run_constbits()) {
 				did_something = true;
+				worker.refresh_after_edits();
+			}
 			if (mod_opt.sat && worker.run_eqbits())
 				did_something = true;
 			if (mod_opt.sat && worker.sat_budget.enabled()) {
