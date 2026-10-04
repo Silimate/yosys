@@ -1,0 +1,47 @@
+# eqbits proves a class under the hypo that every candidate class is internally equal, and a
+# split must rebuild that hypo. b differs from a only when x hits one value in 2^20, so random
+# simulation keeps {a, b, c, e} together and only SAT splits b off. c and e equal a only under
+# the hypo, and f/g/h copy a/c/b. A hypo still assuming a == b would keep h merged with f and g.
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire d,
+	input wire [19:0] x,
+	output wire [6:0] o
+);
+	reg a, b, c, e, f, g, h;
+	always @(posedge clk or posedge rst)
+		if (rst) begin
+			{a, b, c, e, f, g, h} <= 7'b0;
+		end else begin
+			a <= d;
+			b <= d ^ (x == 20'habcde);
+			c <= d ^ (a ^ c);
+			e <= d ^ (a ^ e);
+			f <= a;
+			g <= c;
+			h <= b;
+		end
+	assign o = {a, b, c, e, f, g, h};
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+# gate level, so the simulation prefilter can evaluate the D cones
+techmap
+design -save gold
+
+opt_dff -sat
+opt_clean -purge
+# {a, c, e}, {b}, {f, g}, {h}
+select -assert-count 4 t:$_DFF_PP0_
+design -save gate
+
+design -copy-from gold -as gold test_case
+design -copy-from gate -as gate test_case
+async2sync
+equiv_make gold gate equiv
+equiv_induct equiv
+equiv_status -assert
