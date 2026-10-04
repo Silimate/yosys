@@ -3016,8 +3016,10 @@ void RTLIL::Module::swap_names(RTLIL::Wire *w1, RTLIL::Wire *w2)
 
 // Returns the RTLIL dump of a module
 std::string RTLIL::Module::rtlil_dump() {
-	// Sorting the module to have a canonical RTLIL
+	// Sorting the module to have a canonical RTLIL; sort() leaves module attributes in
+	// insertion order, which clone() reverses
 	sort();
+	attributes.sort(sort_by_id_str());
 	// Dumping the RTLIL in an in-memory stringstream
 	std::stringstream stream;
 	RTLIL_BACKEND::dump_module(stream, " ", this, design, false, true, false);
