@@ -65,8 +65,8 @@ jobs:
     runs-on: macos-15
     env:
       PYOSYS_VERSION_OVERRIDE: ${{ needs.set-version.outputs.version }}
-      MACOSX_DEPLOYMENT_TARGET: "13.0" # Verific's prebuilt libraries need macOS 13
-      _PYTHON_HOST_PLATFORM: macosx-13.0-arm64 # Python is universal2, but the wheel is arm64 only
+      MACOSX_DEPLOYMENT_TARGET: "15.0" # the Homebrew libraries bundled into the wheel need macOS 15
+      _PYTHON_HOST_PLATFORM: macosx-15.0-arm64 # Python is universal2, but the wheel is arm64 only
     steps:
       - uses: actions/checkout@v7
         with:
