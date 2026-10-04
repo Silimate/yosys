@@ -65,7 +65,8 @@ jobs:
     runs-on: macos-15
     env:
       PYOSYS_VERSION_OVERRIDE: ${{ needs.set-version.outputs.version }}
-      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      MACOSX_DEPLOYMENT_TARGET: "13.0" # Verific's prebuilt libraries need macOS 13
+      _PYTHON_HOST_PLATFORM: macosx-13.0-arm64 # Python is universal2, but the wheel is arm64 only
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,17 +80,18 @@ jobs:
         run: |
           brew install bison flex gperf tcl-tk@8 libffi dwarfutils libelf ccache llvm
           printf '%s\n' $(brew --prefix bison)/bin $(brew --prefix flex)/bin $(brew --prefix llvm)/bin >> $GITHUB_PATH
-          python3 -m pip install wheel packaging 'pybind11>=3,<4' 'cxxheaderparser>=1.4'
+          python3 -m pip install wheel packaging 'pybind11>=3,<4' 'cxxheaderparser>=1.4' delocate
       - uses: actions/cache@v6
         with:
           path: .ccache
           key: ccache-macos-${{ github.sha }}
           restore-keys: ccache-macos-
       - run: .github/workflows/wheels/build.sh
+      - run: delocate-wheel -v -w dist wheelhouse/*.whl # bundle the Homebrew libraries into the wheel
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-macos
-          path: wheelhouse/*.whl
+          path: dist/*.whl
 
   release:
     name: Create GitHub releases
@@ -118,12 +120,12 @@ jobs:
           ### Assets
           | File | Platform |
           |------|----------|
-          | \`pyosys-*-manylinux2014*.whl\` | Linux x86-64 (manylinux2014, glibc 2.17+) |
-          | \`pyosys-*-macosx_*_arm64.whl\` | macOS Apple Silicon |
+          | \`silimate_pyosys-*-manylinux2014*.whl\` | Linux x86-64 (manylinux2014, glibc 2.17+) |
+          | \`silimate_pyosys-*-macosx_*_arm64.whl\` | macOS Apple Silicon |
 
           ### Installation
           \`\`\`bash
-          pip install pyosys-*.whl
+          pip install silimate_pyosys-*.whl
           \`\`\`
           EOF
 
