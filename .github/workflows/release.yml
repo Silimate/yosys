@@ -75,10 +75,13 @@ jobs:
               make
               cd /src
 
-              # Build the wheel via setup.py
+              # Build the wheel via pyosys/build/local_backend.py. It no longer defaults the
+              # CMake build type, so pass Release or the wheel is built unoptimized.
               pip install --break-system-packages pybind11 cxxheaderparser
               mkdir -p /src/dist-x86_64-musllinux
-              python3 -m pip wheel . --wheel-dir /src/dist-x86_64-musllinux
+              python3 -m pip wheel . --wheel-dir /src/dist-x86_64-musllinux \
+                --config-settings=cmake=-DCMAKE_BUILD_TYPE=Release
+              python3 .github/workflows/wheels/silimate_check_release.py /src/dist-x86_64-musllinux
             '
 
   build-manylinux-wheel:
@@ -144,13 +147,16 @@ jobs:
               WHEEL_DIR=/src/dist-x86_64-manylinux
               pip3 install --upgrade pip setuptools wheel pybind11 cxxheaderparser
               mkdir -p dist-manylinux
-              python3 -m pip wheel . --wheel-dir $WHEEL_DIR
+              # local_backend.py no longer defaults the CMake build type: pass Release
+              python3 -m pip wheel . --wheel-dir $WHEEL_DIR \
+                --config-settings=cmake=-DCMAKE_BUILD_TYPE=Release
 
               # Tag wheel as manylinux2014
               pip3 install auditwheel || true
               for whl in $WHEEL_DIR/*.whl; do
                 auditwheel repair "$whl" --plat manylinux2014_x86_64 -w $WHEEL_DIR/ 2>/dev/null || true
               done
+              python3 .github/workflows/wheels/silimate_check_release.py $WHEEL_DIR
             '
 
   build-macos-wheel:
@@ -195,7 +201,10 @@ jobs:
           export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
           export MACOSX_DEPLOYMENT_TARGET=11.0
           mkdir -p dist
-          python3 -m pip wheel . --wheel-dir dist-aarch64-macos
+          # local_backend.py no longer defaults the CMake build type: pass Release
+          python3 -m pip wheel . --wheel-dir dist-aarch64-macos \
+            --config-settings=cmake=-DCMAKE_BUILD_TYPE=Release
+          python3 .github/workflows/wheels/silimate_check_release.py dist-aarch64-macos
 
   release:
     # allow testing outside main branch
