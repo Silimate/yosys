@@ -2,305 +2,138 @@ name: Release (pyosys wheels)
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: serial # race condition with version names
+  group: ${{ github.workflow }} # one at a time: versions are numbered from existing releases
 
 jobs:
   set-version:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.set_version.outputs.version }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-    - uses: actions/checkout@v6
-    - id: install_deps
-      run: |
-        python3 -m pip install githubkit
-    - id: set_version
-      run: |
-        echo "version=$(python3 ./.github/workflows/wheels/silimate_get_version.py --github-token $GH_TOKEN silimate/yosys-wheels)">>$GITHUB_OUTPUT
-      env:
+      - uses: actions/checkout@v7
+      - id: version
+        run: |
+          python3 -m pip install githubkit
+          echo "version=$(python3 .github/workflows/wheels/silimate_get_version.py --github-token $GH_TOKEN silimate/yosys-wheels)" >> $GITHUB_OUTPUT
+        env:
           GH_TOKEN: ${{ secrets.YOSYS_WHEELS_TOKEN }}
-  build-linux-wheel:
+
+  linux:
+    name: Linux x86_64 wheel (manylinux2014, glibc 2.17+)
+    needs: set-version
     runs-on: ubuntu-latest
-    name: Build Linux amd64 wheel (musl)
-    if: ${{ ! always() }}
-    needs: [set-version]
+    permissions:
+      contents: read
+      packages: write # build image lives on ghcr.io
+    env:
+      PYOSYS_VERSION_OVERRIDE: ${{ needs.set-version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
-          submodules: recursive
-          persist-credentials: false
-          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - name: Cache Dist Directory
-        uses: actions/cache@v6
-        with:
-          path: dist-x86_64-musllinux
-          key: ${{ github.run_id }}-x86_64-musllinux-wheel
-          enableCrossOsArchive: true
-
-      - name: Build wheel in Alpine container
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/src" \
-            -w /src \
-            -e PYOSYS_VERSION_OVERRIDE="${{ needs.set-version.outputs.version }}" \
-            --platform linux/amd64 \
-            alpine:3.20 sh -c '
-              set -ex
-              apk add --no-cache \
-                build-base bison flex flex-dev gperf \
-                tcl-dev zlib-dev libffi-dev \
-                libdwarf-dev elfutils-dev \
-                python3 python3-dev py3-pip py3-setuptools py3-wheel \
-                git pkgconf cmake
-
-              git config --global --add safe.directory /src
-              git submodule foreach --recursive git config --global --add safe.directory \$toplevel/\$sm_path
-
-              # Alpine/musl compatibility shims for Verific tclmain link step
-              ln -sf /usr/lib/libtcl8.6.so /usr/lib/libtcl.so
-              echo "void dummy_nsl(void){}" | gcc -shared -o /usr/lib/libnsl.so -x c -
-
-              # Build Verific TCL main (needed before Yosys)
-              cd /src/verific/tclmain
-              make
-              cd /src
-
-              # Build the wheel via pyosys/build/local_backend.py. It no longer defaults the
-              # CMake build type, so pass Release or the wheel is built unoptimized.
-              pip install --break-system-packages pybind11 cxxheaderparser
-              mkdir -p /src/dist-x86_64-musllinux
-              python3 -m pip wheel . --wheel-dir /src/dist-x86_64-musllinux \
-                --config-settings=cmake=-DCMAKE_BUILD_TYPE=Release
-              python3 .github/workflows/wheels/silimate_check_release.py /src/dist-x86_64-musllinux
-            '
-
-  build-manylinux-wheel:
-    runs-on: ubuntu-latest
-    name: Build Linux amd64 wheel (manylinux2014, glibc 2.17+)
-    needs: [set-version]
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+          fetch-depth: 0 # yosys version string counts commits since the last tag
           submodules: recursive
           ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - name: Cache Dist Directory
-        uses: actions/cache@v6
+      - uses: actions/cache@v6
         with:
-          path: dist-x86_64-manylinux
-          key: ${{ github.run_id }}-x86_64-manylinux-wheel
-          enableCrossOsArchive: true
-
-      - name: Build wheel in manylinux2014 container
+          path: .ccache
+          key: ccache-linux-${{ github.sha }}
+          restore-keys: ccache-linux-
+      - name: Build wheel
+        env:
+          IMAGE: ghcr.io/silimate/yosys-manylinux:${{ hashFiles('.github/workflows/wheels/manylinux.Dockerfile') }}
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/src" \
-            -w /src \
-            -e PYOSYS_VERSION_OVERRIDE="${{ needs.set-version.outputs.version }}" \
-            --platform linux/amd64 \
-            quay.io/pypa/manylinux2014_x86_64 bash -c '
-              set -ex
+          # The build image is only rebuilt when its Dockerfile changes
+          echo ${{ github.token }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker pull $IMAGE || (docker build -t $IMAGE - < .github/workflows/wheels/manylinux.Dockerfile && docker push $IMAGE)
+          docker run --rm -v $PWD:$PWD -w $PWD -e PYOSYS_VERSION_OVERRIDE $IMAGE \
+            sh -c '.github/workflows/wheels/build.sh && auditwheel repair --plat manylinux2014_x86_64 -w dist wheelhouse/*.whl'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-linux
+          path: dist/*.whl
 
-              yum install -y tcl-devel zlib-devel libffi-devel \
-                devtoolset-11 gperf patchelf \
-                elfutils-devel elfutils-libelf-devel libdwarf-devel
-
-              source /opt/rh/devtoolset-11/enable
-
-              # Build bison >= 3.x from source (CentOS 7 ships an old version)
-              curl -fL -o /tmp/bison-3.8.2.tar.gz https://ftpmirror.gnu.org/gnu/bison/bison-3.8.2.tar.gz \
-                || curl -fL -o /tmp/bison-3.8.2.tar.gz https://mirrors.kernel.org/gnu/bison/bison-3.8.2.tar.gz
-              tar -xzC /tmp -f /tmp/bison-3.8.2.tar.gz
-              cd /tmp/bison-3.8.2 && ./configure && make -j$(nproc) && make install
-              cd /src
-
-              # Build flex >= 2.6 from source (CentOS 7 ships 2.5.37, Yosys needs >= 2.6)
-              curl -L https://github.com/westes/flex/releases/download/v2.6.4/flex-2.6.4.tar.gz | tar -xzC /tmp
-              cd /tmp/flex-2.6.4 && ./configure && make -j$(nproc) && make install
-              cd /src
-
-              # Use the manylinux2014 Python 3.13
-              export PATH=/opt/python/cp313-cp313/bin:$PATH
-
-              git config --global --add safe.directory /src
-              git submodule foreach --recursive git config --global --add safe.directory \$toplevel/\$sm_path
-
-              # musl/manylinux compatibility shim for Verific tclmain link step
-              echo "void dummy_nsl(void){}" | gcc -shared -o /usr/lib64/libnsl.so -x c - || true
-
-              # Build Verific TCL main
-              cd /src/verific/tclmain
-              make
-              cd /src
-
-              WHEEL_DIR=/src/dist-x86_64-manylinux
-              pip3 install --upgrade pip setuptools wheel pybind11 cxxheaderparser
-              mkdir -p dist-manylinux
-              # local_backend.py no longer defaults the CMake build type: pass Release
-              python3 -m pip wheel . --wheel-dir $WHEEL_DIR \
-                --config-settings=cmake=-DCMAKE_BUILD_TYPE=Release
-
-              # Tag wheel as manylinux2014
-              pip3 install auditwheel || true
-              for whl in $WHEEL_DIR/*.whl; do
-                auditwheel repair "$whl" --plat manylinux2014_x86_64 -w $WHEEL_DIR/ 2>/dev/null || true
-              done
-              python3 .github/workflows/wheels/silimate_check_release.py $WHEEL_DIR
-            '
-
-  build-macos-wheel:
+  macos:
+    name: macOS arm64 wheel
+    needs: set-version
     runs-on: macos-15
-    name: Build macOS arm64 wheel
-    needs: [set-version]
+    env:
+      PYOSYS_VERSION_OVERRIDE: ${{ needs.set-version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "15.0" # the Homebrew libraries bundled into the wheel need macOS 15
+      _PYTHON_HOST_PLATFORM: macosx-15.0-arm64 # Python is universal2, but the wheel is arm64 only
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # yosys version string counts commits since the last tag
           submodules: recursive
-          persist-credentials: false
           ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-
       - name: Install dependencies
         run: |
           brew install bison flex gperf tcl-tk@8 libffi dwarfutils libelf ccache llvm
-          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
-          pip3 install pybind11 cxxheaderparser setuptools wheel
-
-      - name: Build Verific tclmain
-        run: |
-          export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
-          export MACOSX_DEPLOYMENT_TARGET=11.0
-          cd verific/tclmain
-          make
-
-      - name: Cache Dist Directory
-        uses: actions/cache@v6
+          printf '%s\n' $(brew --prefix bison)/bin $(brew --prefix flex)/bin $(brew --prefix llvm)/bin >> $GITHUB_PATH
+          python3 -m pip install wheel packaging 'pybind11>=3,<4' 'cxxheaderparser>=1.4' delocate
+      - uses: actions/cache@v6
         with:
-          path: dist-aarch64-macos
-          key: ${{ github.run_id }}-aarch64-macos-wheel
-          enableCrossOsArchive: true
-
-      - name: Build wheel
-        run: |
-          export PYOSYS_VERSION_OVERRIDE="${{ needs.set-version.outputs.version }}"
-          export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
-          export MACOSX_DEPLOYMENT_TARGET=11.0
-          mkdir -p dist
-          # local_backend.py no longer defaults the CMake build type: pass Release
-          python3 -m pip wheel . --wheel-dir dist-aarch64-macos \
-            --config-settings=cmake=-DCMAKE_BUILD_TYPE=Release
-          python3 .github/workflows/wheels/silimate_check_release.py dist-aarch64-macos
+          path: .ccache
+          key: ccache-macos-${{ github.sha }}
+          restore-keys: ccache-macos-
+      - run: .github/workflows/wheels/build.sh
+      - run: delocate-wheel -v -w dist wheelhouse/*.whl # bundle the Homebrew libraries into the wheel
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-macos
+          path: dist/*.whl
 
   release:
-    # allow testing outside main branch
-    # if: github.ref_name == 'main'
-    runs-on: ubuntu-latest
-    needs: [set-version, build-manylinux-wheel, build-macos-wheel]
     name: Create GitHub releases
-
+    needs: [set-version, linux, macos]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-        with:
-          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
-          fetch-depth: 0
-      - id: meta
-        name: Get repo metadata and clean up
-        run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          FULL_SHA=$(git rev-parse HEAD)
-          DATE=$(date -u +%Y-%m-%d)
-          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
-          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
-          echo "full_sha=$FULL_SHA" >> "$GITHUB_OUTPUT"
-          echo "date=$DATE" >> "$GITHUB_OUTPUT"
-          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
-          rm -rf ./* ./.*
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           repository: silimate/yosys-wheels
           ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
-          fetch-depth: 0
-      # - name: Restore dist from cache (x86_64-musllinux)
-      #   uses: actions/cache@v6
-      #   with:
-      #     path: dist-x86_64-musllinux
-      #     key: ${{ github.run_id }}-x86_64-musllinux-wheel
-      #     enableCrossOsArchive: true
-      #     fail-on-cache-miss: true
-      - name: Restore dist from cache (x86_64-manylinux)
-        uses: actions/cache@v6
+      - uses: actions/download-artifact@v8
         with:
-          path: dist-x86_64-manylinux
-          key: ${{ github.run_id }}-x86_64-manylinux-wheel
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Restore dist from cache (aarch64-macos)
-        uses: actions/cache@v6
-        with:
-          path: dist-aarch64-macos
-          key: ${{ github.run_id }}-aarch64-macos-wheel
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Update release notes
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.YOSYS_WHEELS_TOKEN }}
+          VERSION: ${{ needs.set-version.outputs.version }}
         run: |
-          printf '%s\n' \
-            "Automated build from \`main\` @ [\`${{ steps.meta.outputs.short_sha }}\`](${{ steps.meta.outputs.repo_url }}/commit/${{ steps.meta.outputs.full_sha }})" \
-            "" \
-            "**Built:** ${{ steps.meta.outputs.date }}" \
-            "" \
-            "### Assets" \
-            "| File | Platform |" \
-            "|------|----------|" \
-            "| \`pyosys-*-manylinux2014*.whl\` | Linux x86-64 (manylinux2014, glibc 2.17+) |" \
-            "| \`pyosys-*-macosx_*_arm64.whl\` | macOS Apple Silicon |" \
-            "" \
-            "### Installation" \
-            "\`\`\`bash" \
-            "pip install pyosys-*.whl" \
-            "\`\`\`" \
-            > release_notes.md
-      - name: Commit and push
-        run: |
+          SHA=${GITHUB_SHA::7} DATE=$(date -u +%F)
+          cat > release_notes.md <<EOF
+          Automated build from \`main\` @ [\`$SHA\`]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA)
+
+          **Built:** $DATE
+
+          ### Assets
+          | File | Platform |
+          |------|----------|
+          | \`silimate_pyosys-*-manylinux2014*.whl\` | Linux x86-64 (manylinux2014, glibc 2.17+) |
+          | \`silimate_pyosys-*-macosx_*_arm64.whl\` | macOS Apple Silicon |
+
+          ### Installation
+          \`\`\`bash
+          pip install silimate_pyosys-*.whl
+          \`\`\`
+          EOF
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit --all --message="Build for ${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.short_sha }}"
-          git push
-      - name: Create permanent release
-        run: |
-          TAG="v${{ needs.set-version.outputs.version }}"
-          gh release create "$TAG" \
-            dist-*/*.whl \
-            --target "$(git rev-parse HEAD)" \
-            --title "Build ${{ steps.meta.outputs.date }} (${{ steps.meta.outputs.short_sha }})" \
-            --notes-file release_notes.md
-        env:
-          GH_TOKEN: ${{ secrets.YOSYS_WHEELS_TOKEN }}
+          git commit -am "Build for $DATE-$SHA" && git push
 
-      - name: Update latest release
-        run: |
-          git tag -f latest HEAD
-          git push -f origin latest
-          gh release delete latest --yes 2>/dev/null || true
-          gh release create latest \
-            dist-*/*.whl \
-            --target "$(git rev-parse HEAD)" \
-            --title "Latest Build (${{ steps.meta.outputs.date }})" \
-            --notes-file release_notes.md \
-            --prerelease
-        env:
-          GH_TOKEN: ${{ secrets.YOSYS_WHEELS_TOKEN }}
+          gh release create "v$VERSION" dist/*.whl --target $(git rev-parse HEAD) --title "Build $DATE ($SHA)" --notes-file release_notes.md
+          git tag -f latest && git push -f origin latest
+          gh release delete latest --yes || true
+          gh release create latest dist/*.whl --target $(git rev-parse HEAD) --title "Latest Build ($DATE)" --notes-file release_notes.md --prerelease
