@@ -95,6 +95,7 @@ jobs:
 
   release:
     name: Create GitHub releases
+    if: false # TEMP: test run only, do not publish
     needs: [set-version, linux, macos]
     runs-on: ubuntu-latest
     steps:
