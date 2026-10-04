@@ -88,6 +88,7 @@ jobs:
           restore-keys: ccache-macos-
       - run: .github/workflows/wheels/build.sh
       - run: delocate-wheel -v -w dist wheelhouse/*.whl # bundle the Homebrew libraries into the wheel
+      - run: ls dist && unzip -l dist/*.whl | grep -i dylib; unzip -oq dist/*.whl -d $RUNNER_TEMP/w && find $RUNNER_TEMP/w -type f -perm +111 -o -name '*.so' -o -name '*.dylib' | xargs otool -L # TEMP
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-macos
@@ -95,6 +96,7 @@ jobs:
 
   release:
     name: Create GitHub releases
+    if: false # TEMP: test run only, do not publish
     needs: [set-version, linux, macos]
     runs-on: ubuntu-latest
     steps:
