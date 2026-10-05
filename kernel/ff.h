@@ -154,7 +154,7 @@ std::string rtl_bind_compress(const std::vector<RtlBindBit> &bits);
 // SILIMATE: what reg_rename made of each Q bit (passes/silimate/reg_rename.cc says what each
 // word means). The cell's `rtl_bind_status` attribute lists them in Q bit order from Q[0] as
 // runs, each `status` for one bit or `status*count` for `count` bits in a row: "bound*4 absent*28".
-inline constexpr const char *RTL_BIND_STATUS_WORDS[] = {"bound", "unstamped", "absent", "unplaced", "conflict", "unwired"};
+inline constexpr const char *RTL_BIND_STATUS_WORDS[] = {"bound", "unstamped", "absent", "unplaced", "conflict", "unwired", "low"};
 std::vector<std::string> rtl_bind_status_expand(const std::string &value); // empty on a malformed value
 std::string rtl_bind_status_compress(const std::vector<std::string> &bits);
 
