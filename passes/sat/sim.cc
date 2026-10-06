@@ -135,7 +135,7 @@ struct SimShared
 	std::vector<std::pair<uint64_t,std::map<int,Const>>> output_data;
 	bool ignore_x = false;
 	bool norm_xz = false;
-	bool fast = false; // SILIMATE: -fast lives here so SimInstance can read it
+	bool fast = false;
 	bool date = false;
 	bool multiclock = false;
 	int next_output_id = 0;
@@ -204,7 +204,7 @@ struct SimInstance
 		State past_srst;
 
 		FfData data;
-		// SILIMATE: signals mapped once for -fast, since the netlist does not change while simulating
+		// Signals mapped once for -fast
 		SigSpec m_q, m_d, m_ad, m_clk, m_ce, m_srst, m_arst, m_aload, m_clr, m_set;
 	};
 
@@ -428,6 +428,7 @@ struct SimInstance
 				ff.past_ce = State::Sx;
 				ff.past_srst = State::Sx;
 				ff.data = ff_data;
+				// Map each flop's signals once so -fast reads skip sigmap every step
 				if (ff_fast()) {
 					ff.m_q = sigmap(ff_data.sig_q);
 					ff.m_d = sigmap(ff_data.sig_d);
@@ -553,13 +554,13 @@ struct SimInstance
 		return value;
 	}
 
-	// SILIMATE: flops take the fast paths under -fast, except with -d, which keeps the full read trace
+	// Flops take the fast paths under -fast, except with -d, which keeps the full read trace
 	bool ff_fast() const
 	{
 		return shared->fast && !shared->debug;
 	}
 
-	// SILIMATE: one mapped bit's value without building a Const
+	// Reads one mapped bit's value without building a Const
 	State get_bit_state(const SigBit &bit)
 	{
 		if (shared->norm_xz)
@@ -570,7 +571,7 @@ struct SimInstance
 		return it != state_nets.end() ? it->second : State::Sz;
 	}
 
-	// SILIMATE: a flop signal, read through its pre-mapped copy under -fast
+	// Reads a flop signal through its pre-mapped copy under -fast
 	Const get_ff_state(const SigSpec &sig, const SigSpec &mapped)
 	{
 		return ff_fast() ? get_state_mapped(mapped) : get_state(sig);
@@ -581,7 +582,7 @@ struct SimInstance
 		return ff_fast() ? get_bit_state(mapped[0]) : get_state(sig)[0];
 	}
 
-	// SILIMATE: under -fast, refill a flop's past value in place instead of allocating a new Const
+	// Under -fast, refill a flop's past value in place instead of allocating a new Const
 	void get_ff_state_into(const SigSpec &sig, const SigSpec &mapped, Const &out)
 	{
 		if (!ff_fast() || shared->norm_xz || GetSize(out) != GetSize(mapped)) {
@@ -892,7 +893,7 @@ struct SimInstance
 			ff_state_t &ff = it.second;
 			FfData &ff_data = ff.data;
 
-			// SILIMATE: under -fast, skip a flop with no async controls whose clock did not edge, as Q cannot change
+			// Under -fast, skip a flop with no async controls whose clock did not edge
 			if (ff_fast() && !shared->norm_xz && !ff_data.has_aload && !ff_data.has_arst && !ff_data.has_sr && !ff_data.has_gclk) {
 				bool edge = false;
 				if (ff_data.has_clk && !stable_past_update) {
