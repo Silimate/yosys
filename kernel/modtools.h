@@ -415,7 +415,7 @@ struct ModWalker
 
 	ModWalker(RTLIL::Design *design, RTLIL::Module *module = nullptr) : design(design), module(NULL)
 	{
-		ct.setup(design);
+		ct.setup();
 		if (module)
 			setup(module);
 	}
@@ -432,6 +432,13 @@ struct ModWalker
 		signal_outputs.clear();
 		cell_inputs.clear();
 		cell_outputs.clear();
+
+		// SILIMATE: set up only the module types instantiated here, since add_cell looks up no others
+		if (design)
+			for (auto &it : module->cells_)
+				if (!ct.cell_known(it.second->type))
+					if (RTLIL::Module *type_module = design->module(it.second->type))
+						ct.setup_module(type_module);
 
 		for (auto &it : module->wires_)
 			add_wire(it.second);
