@@ -428,7 +428,7 @@ struct SimInstance
 				ff.past_ce = State::Sx;
 				ff.past_srst = State::Sx;
 				ff.data = ff_data;
-				if (shared->fast) {
+				if (ff_fast()) {
 					ff.m_q = sigmap(ff_data.sig_q);
 					ff.m_d = sigmap(ff_data.sig_d);
 					ff.m_ad = sigmap(ff_data.sig_ad);
@@ -553,6 +553,12 @@ struct SimInstance
 		return value;
 	}
 
+	// SILIMATE: flops take the fast paths under -fast, except with -d, which keeps the full read trace
+	bool ff_fast() const
+	{
+		return shared->fast && !shared->debug;
+	}
+
 	// SILIMATE: one mapped bit's value without building a Const
 	State get_bit_state(const SigBit &bit)
 	{
@@ -567,18 +573,18 @@ struct SimInstance
 	// SILIMATE: a flop signal, read through its pre-mapped copy under -fast
 	Const get_ff_state(const SigSpec &sig, const SigSpec &mapped)
 	{
-		return shared->fast ? get_state_mapped(mapped) : get_state(sig);
+		return ff_fast() ? get_state_mapped(mapped) : get_state(sig);
 	}
 
 	State get_ff_bit(const SigSpec &sig, const SigSpec &mapped)
 	{
-		return shared->fast ? get_bit_state(mapped[0]) : get_state(sig)[0];
+		return ff_fast() ? get_bit_state(mapped[0]) : get_state(sig)[0];
 	}
 
 	// SILIMATE: under -fast, refill a flop's past value in place instead of allocating a new Const
 	void get_ff_state_into(const SigSpec &sig, const SigSpec &mapped, Const &out)
 	{
-		if (!shared->fast || shared->norm_xz || GetSize(out) != GetSize(mapped)) {
+		if (!ff_fast() || shared->norm_xz || GetSize(out) != GetSize(mapped)) {
 			out = get_state(sig);
 			return;
 		}
@@ -887,7 +893,7 @@ struct SimInstance
 			FfData &ff_data = ff.data;
 
 			// SILIMATE: under -fast, skip a flop with no async controls whose clock did not edge, as Q cannot change
-			if (shared->fast && !shared->norm_xz && !ff_data.has_aload && !ff_data.has_arst && !ff_data.has_sr && !ff_data.has_gclk) {
+			if (ff_fast() && !shared->norm_xz && !ff_data.has_aload && !ff_data.has_arst && !ff_data.has_sr && !ff_data.has_gclk) {
 				bool edge = false;
 				if (ff_data.has_clk && !stable_past_update) {
 					State clk = get_bit_state(ff.m_clk[0]);
