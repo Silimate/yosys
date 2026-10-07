@@ -1,0 +1,44 @@
+# write_verilog -dropsrc leaves src entries with a prefix out of the netlist, and
+# repeats in a src it drops from, so a caller can carry IDs in src without them
+# reaching anything that reads the netlist.
+read_rtlil <<EOF
+module \top
+  wire input 1 \a
+  wire output 2 \x
+  wire output 3 \y
+  wire output 4 \z
+  attribute \src "top.v:2.3-2.9|pqid:a1|top.v:2.3-2.9|pqid:b2|top.v:4.1-4.5"
+  cell $not \u0
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \a
+    connect \Y \x
+  end
+  attribute \src "pqid:c3"
+  cell $not \u1
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \a
+    connect \Y \y
+  end
+  attribute \src "top.v:6.1-6.5|top.v:6.1-6.5"
+  cell $not \u2
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \a
+    connect \Y \z
+  end
+end
+EOF
+write_verilog -noexpr -srcattronly -dropsrc pqid: dropsrc.v
+design -reset
+read_verilog dropsrc.v
+select -assert-count 1 c:u0 a:src=top.v:2.3-2.9|top.v:4.1-4.5 %i
+# Left with no src, so the frontend gives it the netlist line instead
+select -assert-count 1 c:u1 a:src=dropsrc.v:* %i
+# A src it drops nothing from is written as it was, repeats and all
+select -assert-count 1 c:u2 a:src=top.v:6.1-6.5|top.v:6.1-6.5 %i
+select -assert-none a:src=*pqid*

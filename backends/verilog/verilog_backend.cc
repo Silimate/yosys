@@ -29,6 +29,7 @@
 #include "kernel/mem.h"
 #include "kernel/fmt.h"
 #include "backends/verilog/verilog_backend.h"
+#include <optional> // SILIMATE: -dropsrc
 #include <string>
 #include <sstream>
 #include <set>
@@ -101,6 +102,7 @@ int auto_name_counter, auto_name_offset, auto_name_digits, extmem_counter;
 dict<RTLIL::IdString, int> auto_name_map;
 std::set<RTLIL::IdString> reg_wires;
 std::string auto_prefix, extmem_prefix;
+std::vector<std::string> dropsrc; // SILIMATE: -dropsrc prefixes
 
 RTLIL::Module *active_module;
 dict<RTLIL::SigBit, RTLIL::State> active_initdata;
@@ -426,6 +428,28 @@ void dump_sigspec(std::ostream &f, const RTLIL::SigSpec &sig)
 	}
 }
 
+// SILIMATE: the src entries -dropsrc leaves in, each once, or nullopt when it drops none, so a
+// src it does not touch is written as it was
+std::optional<RTLIL::Const> kept_src(const RTLIL::Const &src)
+{
+	std::vector<std::string> kept;
+	pool<std::string> seen;
+	bool dropped = false;
+	for (auto &entry : split_tokens(src.decode_string(), "|")) {
+		if (std::any_of(dropsrc.begin(), dropsrc.end(),
+				[&](const std::string &prefix) { return entry.compare(0, prefix.size(), prefix) == 0; }))
+			dropped = true;
+		else if (seen.insert(entry).second)
+			kept.push_back(entry);
+	}
+	if (!dropped)
+		return std::nullopt;
+	std::string joined;
+	for (auto &entry : kept)
+		joined += (joined.empty() ? "" : "|") + entry;
+	return RTLIL::Const(joined);
+}
+
 void dump_attributes(std::ostream &f, std::string indent, dict<RTLIL::IdString, RTLIL::Const> &attributes, std::string term = "\n", bool modattr = false, bool regattr = false, bool as_comment = false)
 {
 	if (noattr)
@@ -436,14 +460,20 @@ void dump_attributes(std::ostream &f, std::string indent, dict<RTLIL::IdString, 
 		if (it->first == ID::single_bit_vector) continue;
 		if (it->first == ID::init && regattr) continue;
 		if (srcattronly && it->first != ID::src) continue;
+		// SILIMATE: write src without the entries -dropsrc names, and not at all once empty
+		std::optional<RTLIL::Const> src;
+		if (it->first == ID::src && !dropsrc.empty())
+			src = kept_src(it->second);
+		if (src && src->decode_string().empty()) continue;
+		const RTLIL::Const &value = src ? *src : it->second;
 		f << stringf("%s" "%s %s", indent, as_comment ? "/*" : "(*", id(it->first));
 		f << stringf(" = ");
-		if (modattr && (it->second == State::S0 || it->second == Const(0)))
+		if (modattr && (value == State::S0 || value == Const(0)))
 			f << stringf(" 0 ");
-		else if (modattr && (it->second == State::S1 || it->second == Const(1)))
+		else if (modattr && (value == State::S1 || value == Const(1)))
 			f << stringf(" 1 ");
 		else
-			dump_const(f, it->second, -1, 0, false, as_comment);
+			dump_const(f, value, -1, 0, false, as_comment);
 		f << stringf(" %s%s", as_comment ? "*/" : "*)", term);
 	}
 }
@@ -2587,6 +2617,11 @@ struct VerilogBackend : public Backend {
 		log("    -srcattronly\n");
 		log("        with this option only src attributes are included in the output\n");
 		log("\n");
+		log("    -dropsrc <prefix>\n");
+		log("        leave out src entries starting with <prefix>, and repeated ones in a\n");
+		log("        src this drops from. A src left empty is not written. Can be given\n");
+		log("        more than once.\n");
+		log("\n");
 		log("    -attr2comment\n");
 		log("        with this option attributes are included as comments in the output\n");
 		log("\n");
@@ -2682,6 +2717,7 @@ struct VerilogBackend : public Backend {
 		noparallelcase = false;
 		default_params = false;
 		auto_prefix = "";
+		dropsrc.clear(); // SILIMATE
 
 		bool blackboxes = false;
 		bool selected = false;
@@ -2710,6 +2746,11 @@ struct VerilogBackend : public Backend {
 			}
 			if (arg == "-srcattronly") {
 				srcattronly = true;
+				continue;
+			}
+			// SILIMATE: -dropsrc
+			if (arg == "-dropsrc" && argidx+1 < args.size()) {
+				dropsrc.push_back(args[++argidx]);
 				continue;
 			}
 			if (arg == "-attr2comment") {
