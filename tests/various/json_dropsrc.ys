@@ -1,0 +1,68 @@
+# write_json -dropsrc leaves src entries with a prefix out of the netlist, as write_verilog
+# -dropsrc does. Only src attributes are touched: a parameter named src, or another
+# attribute quoting an entry, keeps it.
+! mkdir -p temp
+read_rtlil <<EOF
+attribute \src "top.v:1.1-9.9|pqid:t0"
+module \top
+  attribute \src "top.v:2.1-2.5|pqid:w0"
+  wire input 1 \a
+  wire output 2 \x
+  wire output 3 \y
+  wire output 4 \z
+  attribute \src "top.v:3.1-3.5|pqid:m0"
+  memory width 4 size 4 \mem
+  attribute \src "top.v:4.3-4.9|pqid:a1|top.v:4.3-4.9|pqid:b2|top.v:5.1-5.5"
+  attribute \note "pqid:n1"
+  cell $not \u0
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \a
+    connect \Y \x
+  end
+  attribute \src "pqid:c3"
+  cell $not \u1
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \a
+    connect \Y \y
+  end
+  attribute \src "top.v:6.1-6.5|top.v:6.1-6.5"
+  cell \sub \u2
+    parameter \src "pqid:p1"
+    connect \A \a
+    connect \Y \z
+  end
+end
+EOF
+write_json -dropsrc pqid: temp/json_dropsrc.json
+json -dropsrc pqid: -o temp/json_dropsrc_pass.json
+write_json temp/json_dropsrc_none.json
+
+design -reset
+read_json temp/json_dropsrc.json
+select -assert-mod-count 1 A:src=top.v:1.1-9.9
+select -assert-count 1 w:a a:src=top.v:2.1-2.5 %i
+select -assert-count 1 m:mem a:src=top.v:3.1-3.5 %i
+# Each entry once, from a src it drops from
+select -assert-count 1 c:u0 a:src=top.v:4.3-4.9|top.v:5.1-5.5 %i
+select -assert-count 1 c:u0 a:note=pqid:n1 %i
+# Left with no src, so it is not written
+select -assert-count 0 c:u1 a:src %i
+# A src it drops nothing from is written as it was, repeats and all
+select -assert-count 1 c:u2 a:src=top.v:6.1-6.5|top.v:6.1-6.5 %i
+select -assert-count 1 c:u2 r:src=pqid:p1 %i
+select -assert-none a:src=*pqid*
+
+design -reset
+read_json temp/json_dropsrc_pass.json
+select -assert-count 1 c:u0 a:src=top.v:4.3-4.9|top.v:5.1-5.5 %i
+select -assert-none a:src=*pqid*
+
+# Without -dropsrc every entry is kept
+design -reset
+read_json temp/json_dropsrc_none.json
+select -assert-count 1 c:u0 a:src=top.v:4.3-4.9|pqid:a1|top.v:4.3-4.9|pqid:b2|top.v:5.1-5.5 %i
+select -assert-count 1 c:u1 a:src=pqid:c3 %i

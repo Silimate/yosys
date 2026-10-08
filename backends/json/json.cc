@@ -23,6 +23,7 @@
 #include "kernel/celltypes.h"
 #include "kernel/cellaigs.h"
 #include "kernel/log.h"
+#include "backends/verilog/verilog_backend.h" // SILIMATE: -dropsrc
 #include <string>
 
 USING_YOSYS_NAMESPACE
@@ -35,6 +36,7 @@ struct JsonWriter
 	bool aig_mode;
 	bool compat_int_mode;
 	bool scopeinfo_mode;
+	std::vector<std::string> dropsrc; // SILIMATE: -dropsrc prefixes
 
 	Design *design;
 	Module *module;
@@ -130,13 +132,19 @@ struct JsonWriter
 		}
 	}
 
-	void write_parameters(const dict<IdString, Const> &parameters, bool for_module=false)
+	void write_parameters(const dict<IdString, Const> &parameters, bool for_module=false, bool attributes=false)
 	{
 		bool first = true;
 		for (auto &param : parameters) {
+			// SILIMATE: write src without the entries -dropsrc names, and not at all once empty
+			std::optional<Const> src;
+			if (attributes && param.first == ID::src && !dropsrc.empty())
+				src = VERILOG_BACKEND::kept_src(param.second, dropsrc);
+			if (src && src->decode_string().empty())
+				continue;
 			f << stringf("%s\n", first ? "" : ",");
 			f << stringf("        %s%s: ", for_module ? "" : "    ", get_name(param.first));
-			write_parameter_value(param.second);
+			write_parameter_value(src ? *src : param.second);
 			first = false;
 		}
 	}
@@ -158,7 +166,7 @@ struct JsonWriter
 		f << stringf("    %s: {\n", get_name(module->name));
 
 		f << stringf("      \"attributes\": {");
-		write_parameters(module->attributes, /*for_module=*/true);
+		write_parameters(module->attributes, /*for_module=*/true, /*attributes=*/true);
 		f << stringf("\n      },\n");
 
 		if (module->parameter_default_values.size()) {
@@ -210,7 +218,7 @@ struct JsonWriter
 			write_parameters(c->parameters);
 			f << stringf("\n          },\n");
 			f << stringf("          \"attributes\": {");
-			write_parameters(c->attributes);
+			write_parameters(c->attributes, /*for_module=*/false, /*attributes=*/true);
 			f << stringf("\n          },\n");
 			if (c->known()) {
 				f << stringf("          \"port_directions\": {");
@@ -248,7 +256,7 @@ struct JsonWriter
 				f << stringf("        %s: {\n", get_name(it.second->name));
 				f << stringf("          \"hide_name\": %s,\n", it.second->name[0] == '$' ? "1" : "0");
 				f << stringf("          \"attributes\": {");
-				write_parameters(it.second->attributes);
+				write_parameters(it.second->attributes, /*for_module=*/false, /*attributes=*/true);
 				f << stringf("\n          },\n");
 				f << stringf("          \"width\": %d,\n", it.second->width);
 				f << stringf("          \"start_offset\": %d,\n", it.second->start_offset);
@@ -275,7 +283,7 @@ struct JsonWriter
 			if (w->is_signed)
 				f << stringf("          \"signed\": %d,\n", w->is_signed);
 			f << stringf("          \"attributes\": {");
-			write_parameters(w->attributes);
+			write_parameters(w->attributes, /*for_module=*/false, /*attributes=*/true);
 			f << stringf("\n          }\n");
 			f << stringf("        }");
 			first = false;
@@ -357,6 +365,11 @@ struct JsonBackend : public Backend {
 		log("\n");
 		log("    -noscopeinfo\n");
 		log("        don't include $scopeinfo cells in the output\n");
+		log("\n");
+		log("    -dropsrc <prefix>\n");
+		log("        leave out src entries starting with <prefix>, and repeated ones in a\n");
+		log("        src this drops from. A src left empty is not written. Can be given\n");
+		log("        more than once.\n");
 		log("\n");
 		log("\n");
 		log("The general syntax of the JSON output created by this command is as follows:\n");
@@ -604,6 +617,7 @@ struct JsonBackend : public Backend {
 		bool compat_int_mode = false;
 		bool use_selection = false;
 		bool scopeinfo_mode = true;
+		std::vector<std::string> dropsrc; // SILIMATE
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
@@ -624,6 +638,11 @@ struct JsonBackend : public Backend {
 				scopeinfo_mode = false;
 				continue;
 			}
+			// SILIMATE: -dropsrc
+			if (args[argidx] == "-dropsrc" && argidx+1 < args.size()) {
+				dropsrc.push_back(args[++argidx]);
+				continue;
+			}
 			break;
 		}
 		extra_args(f, filename, args, argidx);
@@ -631,6 +650,7 @@ struct JsonBackend : public Backend {
 		log_header(design, "Executing JSON backend.\n");
 
 		JsonWriter json_writer(*f, use_selection, aig_mode, compat_int_mode, scopeinfo_mode);
+		json_writer.dropsrc = dropsrc; // SILIMATE
 		json_writer.write_design(design);
 	}
 } JsonBackend;
@@ -658,6 +678,9 @@ struct JsonPass : public Pass {
 		log("    -noscopeinfo\n");
 		log("        don't include $scopeinfo cells in the output\n");
 		log("\n");
+		log("    -dropsrc <prefix>\n");
+		log("        leave out src entries starting with <prefix>, as write_json does\n");
+		log("\n");
 		log("See 'help write_json' for a description of the JSON format used.\n");
 		log("\n");
 	}
@@ -667,6 +690,7 @@ struct JsonPass : public Pass {
 		bool aig_mode = false;
 		bool compat_int_mode = false;
 		bool scopeinfo_mode = true;
+		std::vector<std::string> dropsrc; // SILIMATE
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
@@ -685,6 +709,11 @@ struct JsonPass : public Pass {
 			}
 			if (args[argidx] == "-noscopeinfo") {
 				scopeinfo_mode = false;
+				continue;
+			}
+			// SILIMATE: -dropsrc
+			if (args[argidx] == "-dropsrc" && argidx+1 < args.size()) {
+				dropsrc.push_back(args[++argidx]);
 				continue;
 			}
 			break;
@@ -709,6 +738,7 @@ struct JsonPass : public Pass {
 		}
 
 		JsonWriter json_writer(*f, true, aig_mode, compat_int_mode, scopeinfo_mode);
+		json_writer.dropsrc = dropsrc; // SILIMATE
 		json_writer.write_design(design);
 
 		if (!empty) {

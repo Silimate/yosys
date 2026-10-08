@@ -94,6 +94,28 @@ bool VERILOG_BACKEND::id_is_verilog_escaped(const std::string &str) {
 	return false;
 }
 
+// SILIMATE: the src entries -dropsrc leaves in, each once, or nullopt when it drops none, so a
+// src it does not touch is written as it was
+std::optional<RTLIL::Const> VERILOG_BACKEND::kept_src(const RTLIL::Const &src, const std::vector<std::string> &prefixes)
+{
+	std::vector<std::string> kept;
+	pool<std::string> seen;
+	bool dropped = false;
+	for (auto &entry : split_tokens(src.decode_string(), "|")) {
+		if (std::any_of(prefixes.begin(), prefixes.end(),
+				[&](const std::string &prefix) { return entry.compare(0, prefix.size(), prefix) == 0; }))
+			dropped = true;
+		else if (seen.insert(entry).second)
+			kept.push_back(entry);
+	}
+	if (!dropped)
+		return std::nullopt;
+	std::string joined;
+	for (auto &entry : kept)
+		joined += (joined.empty() ? "" : "|") + entry;
+	return RTLIL::Const(joined);
+}
+
 PRIVATE_NAMESPACE_BEGIN
 
 bool verbose, norename, noattr, srcattronly, attr2comment, noexpr, nodec, nohex, nostr, extmem, defparam, decimal, siminit, systemverilog, simple_lhs,
@@ -428,28 +450,6 @@ void dump_sigspec(std::ostream &f, const RTLIL::SigSpec &sig)
 	}
 }
 
-// SILIMATE: the src entries -dropsrc leaves in, each once, or nullopt when it drops none, so a
-// src it does not touch is written as it was
-std::optional<RTLIL::Const> kept_src(const RTLIL::Const &src)
-{
-	std::vector<std::string> kept;
-	pool<std::string> seen;
-	bool dropped = false;
-	for (auto &entry : split_tokens(src.decode_string(), "|")) {
-		if (std::any_of(dropsrc.begin(), dropsrc.end(),
-				[&](const std::string &prefix) { return entry.compare(0, prefix.size(), prefix) == 0; }))
-			dropped = true;
-		else if (seen.insert(entry).second)
-			kept.push_back(entry);
-	}
-	if (!dropped)
-		return std::nullopt;
-	std::string joined;
-	for (auto &entry : kept)
-		joined += (joined.empty() ? "" : "|") + entry;
-	return RTLIL::Const(joined);
-}
-
 void dump_attributes(std::ostream &f, std::string indent, dict<RTLIL::IdString, RTLIL::Const> &attributes, std::string term = "\n", bool modattr = false, bool regattr = false, bool as_comment = false)
 {
 	if (noattr)
@@ -463,7 +463,7 @@ void dump_attributes(std::ostream &f, std::string indent, dict<RTLIL::IdString, 
 		// SILIMATE: write src without the entries -dropsrc names, and not at all once empty
 		std::optional<RTLIL::Const> src;
 		if (it->first == ID::src && !dropsrc.empty())
-			src = kept_src(it->second);
+			src = kept_src(it->second, dropsrc);
 		if (src && src->decode_string().empty()) continue;
 		const RTLIL::Const &value = src ? *src : it->second;
 		f << stringf("%s" "%s %s", indent, as_comment ? "/*" : "(*", id(it->first));
