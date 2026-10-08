@@ -34,6 +34,18 @@ module \top
 end
 EOF
 write_verilog -noexpr -srcattronly -dropsrc pqid: dropsrc.v
+write_verilog -noexpr -srcattronly -dropsrc pqid: -dropsrc top.v:6 dropsrc_two.v
+write_verilog -noexpr -srcattronly dropsrc_none.v
+design -reset
+# Each prefix given is dropped
+read_verilog dropsrc_two.v
+select -assert-count 1 c:u0 a:src=top.v:2.3-2.9|top.v:4.1-4.5 %i
+select -assert-count 1 c:u2 a:src=dropsrc_two.v:* %i
+design -reset
+# A later write without -dropsrc keeps every entry
+read_verilog dropsrc_none.v
+select -assert-count 1 c:u0 a:src=top.v:2.3-2.9|pqid:a1|top.v:2.3-2.9|pqid:b2|top.v:4.1-4.5 %i
+select -assert-count 1 c:u1 a:src=pqid:c3 %i
 design -reset
 read_verilog dropsrc.v
 select -assert-count 1 c:u0 a:src=top.v:2.3-2.9|top.v:4.1-4.5 %i
