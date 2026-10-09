@@ -21,7 +21,9 @@
 #include "kernel/log.h"
 #include "kernel/newcelltypes.h"
 
-#include "libs/backward-cpp/backward.hpp"
+#ifndef YOSYS_WITHOUT_BACKWARD
+#  include "libs/backward-cpp/backward.hpp"
+#endif
 
 #ifdef YOSYS_ENABLE_READLINE
 #  include <readline/readline.h>
@@ -258,7 +260,9 @@ void yosys_setup()
 		return;
 	already_setup = true;
 	already_shutdown = false;
+#ifndef YOSYS_WITHOUT_BACKWARD
 	new backward::SignalHandling;
+#endif
 
 	IdString::ensure_prepopulated();
 

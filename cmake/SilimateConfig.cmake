@@ -18,3 +18,7 @@ if (APPLE)
 endif()
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/libs/backward-cpp)
+option(YOSYS_WITHOUT_BACKWARD "Don't install backward-cpp's signal handler in yosys_setup" OFF)
+if (YOSYS_WITHOUT_BACKWARD)
+	add_compile_definitions(YOSYS_WITHOUT_BACKWARD)
+endif()
