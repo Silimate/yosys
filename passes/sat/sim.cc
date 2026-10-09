@@ -135,6 +135,7 @@ struct SimShared
 	std::vector<std::pair<uint64_t,std::map<int,Const>>> output_data;
 	bool ignore_x = false;
 	bool norm_xz = false;
+	bool fast = false;
 	bool date = false;
 	bool multiclock = false;
 	int next_output_id = 0;
@@ -203,6 +204,8 @@ struct SimInstance
 		State past_srst;
 
 		FfData data;
+		// Signals mapped once for -fast
+		SigSpec m_q, m_d, m_ad, m_clk, m_ce, m_srst, m_arst, m_aload, m_clr, m_set;
 	};
 
 	struct mem_state_t
@@ -425,6 +428,19 @@ struct SimInstance
 				ff.past_ce = State::Sx;
 				ff.past_srst = State::Sx;
 				ff.data = ff_data;
+				// Map each flop's signals once so -fast reads skip sigmap every step
+				if (ff_fast()) {
+					ff.m_q = sigmap(ff_data.sig_q);
+					ff.m_d = sigmap(ff_data.sig_d);
+					ff.m_ad = sigmap(ff_data.sig_ad);
+					ff.m_clk = sigmap(ff_data.sig_clk);
+					ff.m_ce = sigmap(ff_data.sig_ce);
+					ff.m_srst = sigmap(ff_data.sig_srst);
+					ff.m_arst = sigmap(ff_data.sig_arst);
+					ff.m_aload = sigmap(ff_data.sig_aload);
+					ff.m_clr = sigmap(ff_data.sig_clr);
+					ff.m_set = sigmap(ff_data.sig_set);
+				}
 				ff_database[cell] = ff;
 
 				if (cell->get_bool_attribute(ID(clk2fflogic))) {
@@ -536,6 +552,45 @@ struct SimInstance
 		if (shared->norm_xz)
 			zinit(value);
 		return value;
+	}
+
+	// Flops take the fast paths under -fast, except with -d, which keeps the full read trace
+	bool ff_fast() const
+	{
+		return shared->fast && !shared->debug;
+	}
+
+	// Reads one mapped bit's value without building a Const
+	State get_bit_state(const SigBit &bit)
+	{
+		if (shared->norm_xz)
+			return get_state_mapped(bit)[0];
+		if (bit.wire == nullptr)
+			return bit.data;
+		auto it = state_nets.find(bit);
+		return it != state_nets.end() ? it->second : State::Sz;
+	}
+
+	// Reads a flop signal through its pre-mapped copy under -fast
+	Const get_ff_state(const SigSpec &sig, const SigSpec &mapped)
+	{
+		return ff_fast() ? get_state_mapped(mapped) : get_state(sig);
+	}
+
+	State get_ff_bit(const SigSpec &sig, const SigSpec &mapped)
+	{
+		return ff_fast() ? get_bit_state(mapped[0]) : get_state(sig)[0];
+	}
+
+	// Under -fast, refill a flop's past value in place instead of allocating a new Const
+	void get_ff_state_into(const SigSpec &sig, const SigSpec &mapped, Const &out)
+	{
+		if (!ff_fast() || shared->norm_xz || GetSize(out) != GetSize(mapped)) {
+			out = get_state(sig);
+			return;
+		}
+		for (int i = 0; i < GetSize(mapped); i++)
+			out.set(i, get_bit_state(mapped[i]));
 	}
 
 	Const get_state(SigSpec sig)
@@ -838,11 +893,23 @@ struct SimInstance
 			ff_state_t &ff = it.second;
 			FfData &ff_data = ff.data;
 
-			Const current_q = get_state(ff.data.sig_q);
+			// Under -fast, skip a flop with no async controls whose clock did not edge
+			if (ff_fast() && !shared->norm_xz && !ff_data.has_aload && !ff_data.has_arst && !ff_data.has_sr && !ff_data.has_gclk) {
+				bool edge = false;
+				if (ff_data.has_clk && !stable_past_update) {
+					State clk = get_bit_state(ff.m_clk[0]);
+					edge = ff_data.pol_clk ? (ff.past_clk == State::S0 && clk != State::S0) :
+							(ff.past_clk == State::S1 && clk != State::S1);
+				}
+				if (!edge)
+					continue;
+			}
+
+			Const current_q = get_ff_state(ff.data.sig_q, ff.m_q);
 
 			if (ff_data.has_clk && !stable_past_update) {
 				// flip-flops
-				State current_clk = get_state(ff_data.sig_clk)[0];
+				State current_clk = get_ff_bit(ff_data.sig_clk, ff.m_clk);
 				if (ff_data.pol_clk ? (ff.past_clk == State::S0 && current_clk != State::S0) :
 							(ff.past_clk == State::S1 && current_clk != State::S1)) {
 					bool ce = ff.past_ce == (ff_data.pol_ce ? State::S1 : State::S0);
@@ -859,22 +926,22 @@ struct SimInstance
 			}
 			// async load
 			if (ff_data.has_aload) {
-				State current_aload = get_state(ff_data.sig_aload)[0];
+				State current_aload = get_ff_bit(ff_data.sig_aload, ff.m_aload);
 				if (current_aload == (ff_data.pol_aload ? State::S1 : State::S0)) {
-					current_q = ff_data.has_clk && !stable_past_update ? ff.past_ad : get_state(ff.data.sig_ad);
+					current_q = ff_data.has_clk && !stable_past_update ? ff.past_ad : get_ff_state(ff.data.sig_ad, ff.m_ad);
 				}
 			}
 			// async reset
 			if (ff_data.has_arst) {
-				State current_arst = get_state(ff_data.sig_arst)[0];
+				State current_arst = get_ff_bit(ff_data.sig_arst, ff.m_arst);
 				if (current_arst == (ff_data.pol_arst ? State::S1 : State::S0)) {
 					current_q = ff_data.val_arst;
 				}
 			}
 			// handle set/reset
 			if (ff.data.has_sr) {
-				Const current_clr = get_state(ff.data.sig_clr);
-				Const current_set = get_state(ff.data.sig_set);
+				Const current_clr = get_ff_state(ff.data.sig_clr, ff.m_clr);
+				Const current_set = get_ff_state(ff.data.sig_set, ff.m_set);
 
 				for(int i=0;i<ff.past_d.size();i++) {
 					if (current_clr[i] == (ff_data.pol_clr ? State::S1 : State::S0)) {
@@ -982,19 +1049,19 @@ struct SimInstance
 			ff_state_t &ff = it.second;
 
 			if (ff.data.has_aload)
-				ff.past_ad = get_state(ff.data.sig_ad);
+				get_ff_state_into(ff.data.sig_ad, ff.m_ad, ff.past_ad);
 
 			if (ff.data.has_clk || ff.data.has_gclk)
-				ff.past_d = get_state(ff.data.sig_d);
+				get_ff_state_into(ff.data.sig_d, ff.m_d, ff.past_d);
 
 			if (ff.data.has_clk)
-				ff.past_clk = get_state(ff.data.sig_clk)[0];
+				ff.past_clk = get_ff_bit(ff.data.sig_clk, ff.m_clk);
 
 			if (ff.data.has_ce)
-				ff.past_ce = get_state(ff.data.sig_ce)[0];
+				ff.past_ce = get_ff_bit(ff.data.sig_ce, ff.m_ce);
 
 			if (ff.data.has_srst)
-				ff.past_srst = get_state(ff.data.sig_srst)[0];
+				ff.past_srst = get_ff_bit(ff.data.sig_srst, ff.m_srst);
 		}
 
 		for (auto &it : mem_database)
@@ -1604,7 +1671,6 @@ struct SimWorker : SimShared
 	std::string summary_filename;
 	std::string scope;
 	bool reg_overwrite = false;
-	bool fast = false;
 	bool retain_output_data = false;
 
 	// Stream output data if -fast is set and and sim files aren't written
