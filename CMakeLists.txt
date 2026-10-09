@@ -388,6 +388,8 @@ target_include_directories(yosys_common INTERFACE
 	${YOSYS_CMAKE_SOURCE_DIR}
 	${YOSYS_CMAKE_BINARY_DIR}
 )
+# silimate: kernel/gzip.h and libs/fst/fstapi.h include zlib.h
+target_link_libraries(yosys_common INTERFACE $<${YOSYS_ENABLE_ZLIB}:PkgConfig::zlib>)
 if (SANITIZE)
 	target_compile_options(yosys_common INTERFACE
 		${sanitize_options}
