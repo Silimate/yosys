@@ -3435,6 +3435,78 @@ void verific_cleanup()
 	verific_import_pending = false;
 }
 
+// SILIMATE: exported so direct Verific API calls get the pass's settings; reruns after verific_cleanup()
+void verific_setup()
+{
+	if (!set_verific_global_flags)
+		return;
+
+	Message::SetConsoleOutput(0);
+	Message::RegisterCallBackMsg(msg_func);
+
+	// RuntimeFlags::SetVar("db_preserve_user_instances", 1);
+	// RuntimeFlags::SetVar("db_preserve_user_nets", 1);
+	// RuntimeFlags::SetVar("db_preserve_x", 1);
+
+	RuntimeFlags::SetVar("db_allow_external_nets", 1);
+	RuntimeFlags::SetVar("db_infer_wide_operators", 1);
+	RuntimeFlags::SetVar("db_infer_set_reset_registers", 0);
+
+	// Properly respect order of read and write for rams
+	RuntimeFlags::SetVar("db_change_inplace_ram_blocking_write_before_read", 1);
+
+#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
+	RuntimeFlags::SetVar("veri_extract_dualport_rams", 0);
+	// RuntimeFlags::SetVar("veri_extract_multiport_rams", 1); // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("veri_allow_any_ram_in_loop", 1);  // SILIMATE: control this externally
+	RuntimeFlags::SetVar("veri_replace_const_exprs", 1);
+#endif
+#ifdef VERIFIC_VHDL_SUPPORT
+	RuntimeFlags::SetVar("vhdl_extract_dualport_rams", 0);
+	// RuntimeFlags::SetVar("vhdl_extract_multiport_rams", 1); // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("vhdl_allow_any_ram_in_loop", 1);  // SILIMATE: control this externally
+	RuntimeFlags::SetVar("vhdl_replace_const_exprs", 1);
+
+	RuntimeFlags::SetVar("vhdl_support_variable_slice", 1);
+	RuntimeFlags::SetVar("vhdl_ignore_assertion_statements", 0);
+
+	// RuntimeFlags::SetVar("vhdl_preserve_assignments", 1); // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("vhdl_preserve_comments", 1);    // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("vhdl_preserve_drivers", 1);     // SILIMATE: control this externally
+#endif
+#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
+	// RuntimeFlags::SetVar("veri_preserve_assignments", 1); // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("veri_preserve_comments", 1);    // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("veri_preserve_drivers", 1);     // SILIMATE: control this externally
+
+	// Workaround for VIPER #13851
+	RuntimeFlags::SetVar("veri_create_name_for_unnamed_gen_block", 1);
+
+	// WARNING: instantiating unknown module 'XYZ' (VERI-1063)
+	Message::SetMessageType("VERI-1063", VERIFIC_ERROR);
+
+	// Downgrade warnings about things that are normal
+	// VERIFIC-WARNING [VERI-1209] foo.sv:98: expression size 7 truncated to fit in target size 6
+	Message::SetMessageType("VERI-1209", VERIFIC_INFO);
+	// VERIFIC-WARNING [VERI-1142] foo.sv:55: system task 'display' is ignored for synthesis
+	Message::SetMessageType("VERI-1142", VERIFIC_INFO);
+	// VERIFIC-WARNING [VERI-2418] foo.svh:503: parameter 'all_cfgs_gp' declared inside package 'bp_common_pkg' shall be treated as localparam
+	Message::SetMessageType("VERI-2418", VERIFIC_INFO);
+
+	// https://github.com/YosysHQ/yosys/issues/1055
+	RuntimeFlags::SetVar("veri_elaborate_top_level_modules_having_interface_ports", 1) ;
+#endif
+	RuntimeFlags::SetVar("verific_produce_verbose_syntax_error_message", 1);
+
+/* SILIMATE: do not warn about initial value preservation
+#ifndef DB_PRESERVE_INITIAL_VALUE
+#  warning Verific was built without DB_PRESERVE_INITIAL_VALUE.
+#endif
+*/
+
+	set_verific_global_flags = false;
+}
+
 // SILIMATE: classify a complex portbus exactly the way Verific's Netlist::ChangePortBusStructures
 // does, so struct and multi-dimensional-array ports can be split independently. Classification is
 // purely by TypeRange, mirroring the stock splitter's predicate: a scalar is never split; a type
@@ -4071,73 +4143,7 @@ struct VerificPass : public Pass {
 
 		log_header(design, "Executing VERIFIC (loading SystemVerilog and VHDL designs using Verific).\n");
 
-		if (set_verific_global_flags)
-		{
-			Message::SetConsoleOutput(0);
-			Message::RegisterCallBackMsg(msg_func);
-
-			// RuntimeFlags::SetVar("db_preserve_user_instances", 1);
-			// RuntimeFlags::SetVar("db_preserve_user_nets", 1);
-			// RuntimeFlags::SetVar("db_preserve_x", 1);
-
-			RuntimeFlags::SetVar("db_allow_external_nets", 1);
-			RuntimeFlags::SetVar("db_infer_wide_operators", 1);
-			RuntimeFlags::SetVar("db_infer_set_reset_registers", 0);
-
-			// Properly respect order of read and write for rams
-			RuntimeFlags::SetVar("db_change_inplace_ram_blocking_write_before_read", 1);
-
-#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
-			RuntimeFlags::SetVar("veri_extract_dualport_rams", 0);
-			// RuntimeFlags::SetVar("veri_extract_multiport_rams", 1); // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("veri_allow_any_ram_in_loop", 1);  // SILIMATE: control this externally
-			RuntimeFlags::SetVar("veri_replace_const_exprs", 1);
-#endif
-#ifdef VERIFIC_VHDL_SUPPORT
-			RuntimeFlags::SetVar("vhdl_extract_dualport_rams", 0);
-			// RuntimeFlags::SetVar("vhdl_extract_multiport_rams", 1); // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("vhdl_allow_any_ram_in_loop", 1);  // SILIMATE: control this externally
-			RuntimeFlags::SetVar("vhdl_replace_const_exprs", 1);
-
-			RuntimeFlags::SetVar("vhdl_support_variable_slice", 1);
-			RuntimeFlags::SetVar("vhdl_ignore_assertion_statements", 0);
-
-			// RuntimeFlags::SetVar("vhdl_preserve_assignments", 1); // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("vhdl_preserve_comments", 1);    // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("vhdl_preserve_drivers", 1);     // SILIMATE: control this externally
-#endif
-#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
-			// RuntimeFlags::SetVar("veri_preserve_assignments", 1); // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("veri_preserve_comments", 1);    // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("veri_preserve_drivers", 1);     // SILIMATE: control this externally
-
-			// Workaround for VIPER #13851
-			RuntimeFlags::SetVar("veri_create_name_for_unnamed_gen_block", 1);
-
-			// WARNING: instantiating unknown module 'XYZ' (VERI-1063)
-			Message::SetMessageType("VERI-1063", VERIFIC_ERROR);
-
-			// Downgrade warnings about things that are normal
-			// VERIFIC-WARNING [VERI-1209] foo.sv:98: expression size 7 truncated to fit in target size 6
-			Message::SetMessageType("VERI-1209", VERIFIC_INFO);
-			// VERIFIC-WARNING [VERI-1142] foo.sv:55: system task 'display' is ignored for synthesis
-			Message::SetMessageType("VERI-1142", VERIFIC_INFO);
-			// VERIFIC-WARNING [VERI-2418] foo.svh:503: parameter 'all_cfgs_gp' declared inside package 'bp_common_pkg' shall be treated as localparam
-			Message::SetMessageType("VERI-2418", VERIFIC_INFO);
-
-			// https://github.com/YosysHQ/yosys/issues/1055
-			RuntimeFlags::SetVar("veri_elaborate_top_level_modules_having_interface_ports", 1) ;
-#endif
-			RuntimeFlags::SetVar("verific_produce_verbose_syntax_error_message", 1);
-
-/* SILIMATE: do not warn about initial value preservation
-#ifndef DB_PRESERVE_INITIAL_VALUE
-#  warning Verific was built without DB_PRESERVE_INITIAL_VALUE.
-#endif
-*/
-
-			set_verific_global_flags = false;
-		}
+		verific_setup();
 
 		verific_verbose = 0;
 		verific_sva_fsm_limit = 16;

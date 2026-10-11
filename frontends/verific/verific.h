@@ -34,6 +34,7 @@ extern bool verific_no_split_array_ports; // SILIMATE: keep multi-dimensional ar
 
 extern bool verific_import_pending;
 extern std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top = std::string());
+extern void verific_setup(); // SILIMATE: the verific pass's global flags and message routing
 
 extern pool<int> verific_sva_prims;
 
