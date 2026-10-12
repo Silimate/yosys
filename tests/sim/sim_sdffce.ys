@@ -4,3 +4,4 @@ opt_dff
 stat
 select -assert-count 1 t:$sdffce
 sim -clock clk -r tb_sdffce.fst -scope tb_sdffce.uut -sim-cmp sdffce
+sim -fast -clock clk -r tb_sdffce.fst -scope tb_sdffce.uut -sim-cmp sdffce
