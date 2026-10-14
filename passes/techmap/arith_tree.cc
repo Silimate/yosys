@@ -334,13 +334,15 @@ struct ArithTreeWorker {
 		return GetSize(link->getPort(ID::Y)) > std::max(wa, wb);
 	}
 
-	// Whether `parent`'s `port` holds `sig` at `offset` with only copies of its MSB
-	// above it, through the parent's result width, and none of its bits below
+	// Whether `parent` reads `sig` only at `offset` in `port` and as copies of its MSB
+	// above it, through the parent's result width
 	bool sign_extends(Cell *parent, IdString port, int offset, const SigSpec &sig)
 	{
 		SigSpec p = sigmap(parent->getPort(port));
+		SigSpec other = sigmap(parent->getPort(port == ID::A ? ID::B : ID::A));
 		int top = offset + GetSize(sig);
-		if (GetSize(p) < GetSize(parent->getPort(ID::Y)) || !p.extract(0, offset).extract(sig).empty())
+		if (GetSize(p) < GetSize(parent->getPort(ID::Y)) || !p.extract(0, offset).extract(sig).empty() ||
+		    !other.extract(sig).empty())
 			return false;
 		return p.extract_end(top) == SigSpec(sig[GetSize(sig) - 1], GetSize(p) - top);
 	}
@@ -372,13 +374,15 @@ struct ArithTreeWorker {
 	// constant zeros above it, which is the one partial coverage a reading based at
 	// the result LSB still gets right: those zeros contribute nothing, so the link
 	// keeps weight 1 and hides no operand.
-	bool covers_port_low(Cell *parent, const SigSpec &sig)
+	bool covers_port_low(Cell *parent, const SigSpec &sig, IdString &port)
 	{
 		for (auto name : {ID::A, ID::B}) {
 			SigSpec p = sigmap(parent->getPort(name));
 			if (GetSize(p) >= GetSize(sig) && p.extract(0, GetSize(sig)) == sig &&
-			    p.extract_end(GetSize(sig)).is_fully_zero())
+			    p.extract_end(GetSize(sig)).is_fully_zero()) {
+				port = name;
 				return true;
+			}
 		}
 		return false;
 	}
@@ -411,7 +415,6 @@ struct ArithTreeWorker {
 		// is refused: reading such a port as a value based at the result LSB both
 		// misplaces the link's own operands and drops the bits beside it.
 		IdString port;
-		bool sext = false;
 		if (opt.bit_offsets) {
 			offset = link_offset(cell, consumer, port);
 			if (offset < 0)
@@ -422,18 +425,23 @@ struct ArithTreeWorker {
 			if (GetSize(sigmap(consumer->getPort(port))) != GetSize(sig) &&
 			    consumer->getParam(port_signed).as_bool())
 				return nullptr;
-			// The link's bits elsewhere in the port drop out with it, which only MSB
-			// copies sign-extending a difference that is exact read as signed survive
-			SigSpec rest = sigmap(consumer->getPort(port));
-			rest.remove(offset, GetSize(sig));
-			if (!rest.extract(sig).empty()) {
-				if (!opt.sext_links || !sign_extends(consumer, port, offset, sig) || !link_exact_signed(cell))
-					return nullptr;
-				sext = true;
-				sext_linked.insert(cell);
-			}
-		} else if (!covers_port_low(consumer, sig)) {
+		} else if (!covers_port_low(consumer, sig, port)) {
 			return nullptr;
+		}
+
+		// The link's bits anywhere else in the consumer drop out with it, which only MSB
+		// copies sign-extending a difference that is exact read as signed survive
+		SigSpec rest = sigmap(consumer->getPort(port == ID::A ? ID::B : ID::A));
+		SigSpec own = sigmap(consumer->getPort(port));
+		own.remove(offset, GetSize(sig));
+		rest.append(own);
+		bool sext = false;
+		if (!rest.extract(sig).empty()) {
+			if (!opt.sext_links || !opt.bit_offsets || !sign_extends(consumer, port, offset, sig) ||
+			    !link_exact_signed(cell))
+				return nullptr;
+			sext = true;
+			sext_linked.insert(cell);
 		}
 
 		// A link whose field stops below its consumer's MSB discards a carry the wider

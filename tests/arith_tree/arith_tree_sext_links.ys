@@ -84,6 +84,34 @@ select -assert-count 0 t:$fa
 select -assert-count 2 t:$add
 design -reset
 
+# Near-miss: the other port reads a bit of the link, which would drop out with it
+read_verilog <<EOT
+module sext_other_port(input [7:0] a, b, input [18:0] c, output [19:0] y);
+	wire [8:0] t = a - b;
+	assign y = {{11{t[8]}}, t} + {c, t[0]};
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets -sext-links
+design -load postopt
+select -assert-count 0 t:$fa
+design -reset
+
+# The same drop without the flag: a zero-extended sum read again by the other port
+read_verilog <<EOT
+module sum_other_port(input [7:0] a, b, input [18:0] c, output [19:0] y);
+	wire [8:0] t = a + b;
+	assign y = t + {c, t[0]};
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets
+design -load postopt
+select -assert-count 0 t:$fa
+design -reset
+
 # Near-miss: the copies stop below the consumer's result, which zero-extends past them
 read_verilog <<EOT
 module sext_partial(input [7:0] a, b, input [19:0] c, output [19:0] y);
