@@ -1,0 +1,127 @@
+# wreduce narrows an unsigned a - b to one bit over its operands and copies that
+# MSB into the bits above, so the outer add reads a sign-extended link
+read_verilog <<EOT
+module sub_add(input [7:0] a, b, input [19:0] c, output [19:0] y);
+	assign y = a - b + c;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+wreduce
+opt_clean
+select -assert-count 1 t:$sub r:Y_WIDTH=9 %i
+logger -expect log "Chained 1 sign-extended difference" 1
+equiv_opt -assert arith_tree -bit-offsets -sext-links
+logger -check-expected
+design -load postopt
+select -assert-min 1 t:$fa
+select -assert-count 1 t:$add t:$sub %u
+design -reset
+
+# Same shape without the flag: the narrow difference stays its own adder
+read_verilog <<EOT
+module sub_add_off(input [7:0] a, b, input [19:0] c, output [19:0] y);
+	assign y = a - b + c;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+wreduce
+opt_clean
+equiv_opt -assert arith_tree -bit-offsets
+design -load postopt
+select -assert-count 0 t:$fa
+select -assert-count 2 t:$add t:$sub %u
+design -reset
+
+# The link may sit above its consumer's LSB and be subtracted itself
+read_verilog <<EOT
+module sext_offset_sub(input [7:0] a, b, input [3:0] lo, input [19:0] c, output [19:0] y);
+	wire [8:0] t = a - b;
+	assign y = c - {{7{t[8]}}, t, lo};
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets -sext-links
+design -load postopt
+select -assert-min 1 t:$fa
+select -assert-count 1 t:$add t:$sub %u
+design -reset
+
+# Near-miss: a difference with no spare bit wraps, so its MSB is not a sign
+read_verilog <<EOT
+module sext_wrapping_sub(input [7:0] a, b, input [19:0] c, output [19:0] y);
+	wire [7:0] t = a - b;
+	assign y = {{12{t[7]}}, t} + c;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets -sext-links
+design -load postopt
+select -assert-count 0 t:$fa
+select -assert-count 2 t:$add t:$sub %u
+design -reset
+
+# Near-miss: an unsigned sum is never negative, so copying its MSB is not exact.
+# The copies drop out with the link, so even plain -bit-offsets must refuse it.
+read_verilog <<EOT
+module sext_sum(input [7:0] a, b, input [19:0] c, output [19:0] y);
+	wire [8:0] t = a + b;
+	assign y = {{11{t[8]}}, t} + c;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets
+design -load postopt
+select -assert-count 0 t:$fa
+design -load preopt
+equiv_opt -assert arith_tree -bit-offsets -sext-links
+design -load postopt
+select -assert-count 0 t:$fa
+select -assert-count 2 t:$add
+design -reset
+
+# Near-miss: the other port reads a bit of the link, which would drop out with it
+read_verilog <<EOT
+module sext_other_port(input [7:0] a, b, input [18:0] c, output [19:0] y);
+	wire [8:0] t = a - b;
+	assign y = {{11{t[8]}}, t} + {c, t[0]};
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets -sext-links
+design -load postopt
+select -assert-count 0 t:$fa
+design -reset
+
+# The same drop without the flag: a zero-extended sum read again by the other port
+read_verilog <<EOT
+module sum_other_port(input [7:0] a, b, input [18:0] c, output [19:0] y);
+	wire [8:0] t = a + b;
+	assign y = t + {c, t[0]};
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets
+design -load postopt
+select -assert-count 0 t:$fa
+design -reset
+
+# Near-miss: the copies stop below the consumer's result, which zero-extends past them
+read_verilog <<EOT
+module sext_partial(input [7:0] a, b, input [19:0] c, output [19:0] y);
+	wire [8:0] t = a - b;
+	assign y = {4'd0, {7{t[8]}}, t} + c;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets -sext-links
+design -load postopt
+select -assert-count 0 t:$fa
+select -assert-count 2 t:$add t:$sub %u

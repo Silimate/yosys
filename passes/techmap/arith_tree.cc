@@ -30,6 +30,8 @@ struct ArithTreeOptions {
 	// Place links and leaf operands at the column they enter the sum at, rather
 	// than requiring every one of them to start at the result's LSB
 	bool bit_offsets = false;
+	// Chain a difference whose consumer sign-extends it by copying its MSB
+	bool sext_links = false;
 };
 
 // Widen each adder back over the low bits opt_expr stripped from it, so the adder feeding it has one reader
@@ -98,6 +100,7 @@ struct ArithTreeWorker {
 	pool<Cell *> addsub;
 	pool<Cell *> alu;
 	pool<Cell *> macc;
+	pool<Cell *> sext_linked;
 
 	struct Operand {
 		SigSpec sig;
@@ -318,6 +321,32 @@ struct ArithTreeWorker {
 		return GetSize(link->getPort(ID::Y)) < need;
 	}
 
+	// An unsigned difference with a bit to spare for the borrow is exact read as
+	// signed, since a - b lies strictly between -2**wb and 2**wa. wreduce narrows
+	// an unsigned $sub to exactly this width and copies the MSB into the bits above.
+	bool link_exact_signed(Cell *link)
+	{
+		if (!(link->type == ID($sub) || (is_alu(link) && is_sub(link))))
+			return false;
+		if (link->getParam(ID::A_SIGNED).as_bool() || link->getParam(ID::B_SIGNED).as_bool())
+			return false;
+		int wa = GetSize(link->getPort(ID::A)), wb = GetSize(link->getPort(ID::B));
+		return GetSize(link->getPort(ID::Y)) > std::max(wa, wb);
+	}
+
+	// Whether `parent` reads `sig` only at `offset` in `port` and as copies of its MSB
+	// above it, through the parent's result width
+	bool sign_extends(Cell *parent, IdString port, int offset, const SigSpec &sig)
+	{
+		SigSpec p = sigmap(parent->getPort(port));
+		SigSpec other = sigmap(parent->getPort(port == ID::A ? ID::B : ID::A));
+		int top = offset + GetSize(sig);
+		if (GetSize(p) < GetSize(parent->getPort(ID::Y)) || !p.extract(0, offset).extract(sig).empty() ||
+		    !other.extract(sig).empty())
+			return false;
+		return p.extract_end(top) == SigSpec(sig[GetSize(sig) - 1], GetSize(p) - top);
+	}
+
 	// Bit position inside a `parent` port at which `child`'s whole Y appears, with
 	// `port` receiving that port's name. -1 when the Y is not exactly one ascending
 	// run in exactly one port, since then it has no single scale factor. The offset
@@ -345,13 +374,15 @@ struct ArithTreeWorker {
 	// constant zeros above it, which is the one partial coverage a reading based at
 	// the result LSB still gets right: those zeros contribute nothing, so the link
 	// keeps weight 1 and hides no operand.
-	bool covers_port_low(Cell *parent, const SigSpec &sig)
+	bool covers_port_low(Cell *parent, const SigSpec &sig, IdString &port)
 	{
 		for (auto name : {ID::A, ID::B}) {
 			SigSpec p = sigmap(parent->getPort(name));
 			if (GetSize(p) >= GetSize(sig) && p.extract(0, GetSize(sig)) == sig &&
-			    p.extract_end(GetSize(sig)).is_fully_zero())
+			    p.extract_end(GetSize(sig)).is_fully_zero()) {
+				port = name;
 				return true;
+			}
 		}
 		return false;
 	}
@@ -394,8 +425,23 @@ struct ArithTreeWorker {
 			if (GetSize(sigmap(consumer->getPort(port))) != GetSize(sig) &&
 			    consumer->getParam(port_signed).as_bool())
 				return nullptr;
-		} else if (!covers_port_low(consumer, sig)) {
+		} else if (!covers_port_low(consumer, sig, port)) {
 			return nullptr;
+		}
+
+		// The link's bits anywhere else in the consumer drop out with it, which only MSB
+		// copies sign-extending a difference that is exact read as signed survive
+		SigSpec rest = sigmap(consumer->getPort(port == ID::A ? ID::B : ID::A));
+		SigSpec own = sigmap(consumer->getPort(port));
+		own.remove(offset, GetSize(sig));
+		rest.append(own);
+		bool sext = false;
+		if (!rest.extract(sig).empty()) {
+			if (!opt.sext_links || !opt.bit_offsets || !sign_extends(consumer, port, offset, sig) ||
+			    !link_exact_signed(cell))
+				return nullptr;
+			sext = true;
+			sext_linked.insert(cell);
 		}
 
 		// A link whose field stops below its consumer's MSB discards a carry the wider
@@ -403,7 +449,7 @@ struct ArithTreeWorker {
 		// only when parent <= offset + link. Flatten it anyway when the link cannot
 		// reach that carry, but only if the consumer zero-extends it: a sign-extended
 		// narrow link means something different from the full-width sum that replaces it.
-		if (offset + GetSize(sig) < GetSize(consumer->getPort(ID::Y))) {
+		if (!sext && offset + GetSize(sig) < GetSize(consumer->getPort(ID::Y))) {
 			bool consumer_extends_unsigned = !consumer->getParam(ID::A_SIGNED).as_bool() &&
 			                                 !consumer->getParam(ID::B_SIGNED).as_bool();
 			if (!consumer_extends_unsigned || link_may_overflow(cell))
@@ -771,6 +817,12 @@ struct ArithTreeWorker {
 					weighted++;
 			if (weighted)
 				log("Reduced %d weighted operand(s) into the tree at %s.\n", weighted, log_id(root));
+			int sext = 0;
+			for (auto c : chain)
+				if (sext_linked.count(c))
+					sext++;
+			if (sext)
+				log("Chained %d sign-extended difference(s) into the tree at %s.\n", sext, log_id(root));
 
 			for (auto c : chain)
 				to_remove.insert(c);
@@ -863,6 +915,13 @@ struct ArithTreePass : public Pass {
 		log("        a chain and keeps its own carry-propagate adder. Off by default\n");
 		log("        because it admits chains across links the plain reading refuses.\n");
 		log("\n");
+		log("    -sext-links\n");
+		log("        With -bit-offsets, also chain an unsigned difference that its\n");
+		log("        consumer sign-extends by copying its MSB, which is how wreduce\n");
+		log("        leaves a - b narrowed under a wider sum. Such a link is exact read\n");
+		log("        as signed when its result is wider than both operands, so a - b + c\n");
+		log("        reduces as one tree instead of two carry-propagate adders.\n");
+		log("\n");
 		log("    -min-width <n>\n");
 		log("        Skip chains and $macc cells whose result is narrower than <n>\n");
 		log("        bits (default 0, i.e. no limit). A compressor level costs about\n");
@@ -912,6 +971,10 @@ struct ArithTreePass : public Pass {
 			}
 			if (arg == "-bit-offsets") {
 				opt.bit_offsets = true;
+				continue;
+			}
+			if (arg == "-sext-links") {
+				opt.sext_links = true;
 				continue;
 			}
 			if (arg == "-min-width" && argidx + 1 < args.size()) {
