@@ -175,6 +175,7 @@ struct SubmodWorker
 			new_wire->port_input = new_wire_port_input;
 			new_wire->port_output = new_wire_port_output;
 			new_wire->start_offset = wire->start_offset;
+			new_wire->upto = wire->upto;
 			new_wire->attributes = wire->attributes;
 			if (!flags.is_int_driven.is_fully_zero()) {
 				new_wire->attributes.erase(ID::init);
