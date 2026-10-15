@@ -237,8 +237,10 @@ struct SetundefPass : public Pass {
 		if (init_mode && (worker.next_bit_mode == MODE_ANYSEQ || worker.next_bit_mode == MODE_ANYCONST))
 			log_cmd_error("The options -init and -anyseq / -anyconst are exclusive.\n");
 
-		// Built once: its setup walks every module in the design
-		CellTypes ct(design);
+		// Set up once, and only for -undriven: its setup walks every module in the design
+		CellTypes ct;
+		if (undriven_mode)
+			ct.setup(design);
 
 		for (auto module : design->selected_modules())
 		{
