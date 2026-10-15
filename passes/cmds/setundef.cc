@@ -237,6 +237,9 @@ struct SetundefPass : public Pass {
 		if (init_mode && (worker.next_bit_mode == MODE_ANYSEQ || worker.next_bit_mode == MODE_ANYCONST))
 			log_cmd_error("The options -init and -anyseq / -anyconst are exclusive.\n");
 
+		// Built once: its setup walks every module in the design
+		CellTypes ct(design);
+
 		for (auto module : design->selected_modules())
 		{
 			if (params_mode)
@@ -302,7 +305,6 @@ struct SetundefPass : public Pass {
 						if (it->port_input)
 							undriven_signals.del(sigmap(it));
 
-					CellTypes ct(design);
 					for (auto &it : module->cells_)
 					for (auto &conn : it.second->connections())
 						if (!ct.cell_known(it.second->type) || ct.cell_output(it.second->type, conn.first))
@@ -337,7 +339,6 @@ struct SetundefPass : public Pass {
 						if (wire->port_input)
 							undriven_signals.del(sigmap(wire));
 
-					CellTypes ct(design);
 					for (auto &it : module->cells_)
 					for (auto &conn : it.second->connections())
 						if (!ct.cell_known(it.second->type) || ct.cell_output(it.second->type, conn.first))
