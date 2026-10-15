@@ -95,6 +95,7 @@ struct ArithTreeWorker {
 	dict<SigBit, int> fanout;
 	dict<SigBit, Cell *> bit_driver;
 	dict<SigBit, int> arrival_cache;
+	dict<Cell *, uint64_t> bound_cache;
 	pool<Cell *> arrival_visiting;
 
 	pool<Cell *> addsub;
@@ -300,10 +301,78 @@ struct ArithTreeWorker {
 		return true;
 	}
 
+	// Bits an unsigned read of `sig` can set, below its constant-zero top
+	int value_width(const SigSpec &sig)
+	{
+		int w = GetSize(sig);
+		while (w > 0 && sig[w - 1] == State::S0)
+			w--;
+		return w;
+	}
+
+	// The unsigned sum, product or mux whose low result bits `sig` reads below its
+	// constant-zero top, or nullptr
+	Cell *bound_driver(const SigSpec &sig_in)
+	{
+		SigSpec sig = sigmap(sig_in);
+		int w = value_width(sig);
+		auto d = w ? bit_driver.find(sig[0]) : bit_driver.end();
+		if (d == bit_driver.end() || !(d->second->type.in(ID($add), ID($mul), ID($mux)) || (is_alu(d->second) && is_add(d->second))))
+			return nullptr;
+		SigSpec y = sigmap(d->second->getPort(ID::Y));
+		return GetSize(y) >= w && y.extract(0, w) == sig.extract(0, w) ? d->second : nullptr;
+	}
+
+	// Largest value an unsigned read of `sig` takes. A low slice of an unsigned sum or
+	// product is bounded by that cell's operands, which can be tighter than its width:
+	// three terms of 29, 28 and 27 bits fit in 30. UINT64_MAX when nothing below 64
+	// bits is known.
+	uint64_t value_bound(const SigSpec &sig)
+	{
+		int w = value_width(sigmap(sig));
+		uint64_t full = w >= 64 ? UINT64_MAX : (uint64_t(1) << w) - 1;
+		Cell *d = bound_driver(sig);
+		auto it = d ? bound_cache.find(d) : bound_cache.end();
+		return it == bound_cache.end() ? full : std::min(full, it->second);
+	}
+
+	// Largest value an unsigned sum, product or mux computes before its Y truncates it.
+	// Its drivers are bounded first off an explicit stack: an add or mux chain would
+	// otherwise recurse once per link and overflow the native one. A driver still
+	// open closes a combinational loop, so it reads at its width.
+	uint64_t cell_bound(Cell *top)
+	{
+		std::vector<Cell *> todo = {top};
+		pool<Cell *> open;
+		while (!todo.empty()) {
+			Cell *cell = todo.back();
+			if (bound_cache.count(cell)) {
+				todo.pop_back();
+				continue;
+			}
+			if (open.insert(cell).second) {
+				for (auto port : {ID::A, ID::B})
+					if (Cell *d = bound_driver(cell->getPort(port)); d && !bound_cache.count(d) && !open.count(d))
+						todo.push_back(d);
+				continue;
+			}
+			todo.pop_back();
+			uint64_t a = value_bound(cell->getPort(ID::A)), b = value_bound(cell->getPort(ID::B)), r = std::max(a, b);
+			if (cell->type != ID($mux)) {
+				bool ovf = cell->type == ID($mul) ? __builtin_mul_overflow(a, b, &r) : __builtin_add_overflow(a, b, &r);
+				if (ovf || cell->getParam(ID::A_SIGNED).as_bool() || cell->getParam(ID::B_SIGNED).as_bool())
+					r = UINT64_MAX;
+			}
+			bound_cache[cell] = r;
+		}
+		return bound_cache.at(top);
+	}
+
 	// A link truncates its result at its own Y width, so flattening it into a wider
 	// consumer is only sound when that truncation provably never fires. This is the
 	// same question macc_may_overflow() answers for the structurally identical $macc
-	// merge in alumacc, and it is answered the same way: from operand widths alone.
+	// merge in alumacc, answered from operand widths and, failing that, from the
+	// operands' own bounds.
 	bool link_may_overflow(Cell *link)
 	{
 		// Only unsigned addition has a bound this simple. Subtraction borrows below
@@ -318,7 +387,18 @@ struct ArithTreeWorker {
 		// (2**wa - 1) + (2**wb - 1) < 2**(max(wa, wb) + 1).
 		int wa = GetSize(link->getPort(ID::A)), wb = GetSize(link->getPort(ID::B));
 		int need = wb ? std::max(wa, wb) + 1 : wa;
-		return GetSize(link->getPort(ID::Y)) < need;
+		int yw = GetSize(link->getPort(ID::Y));
+		return yw < need && !fits_below(link, yw);
+	}
+
+	// Whether an unsigned add's result provably stays under 2**w, leaving its bits
+	// from w up always zero
+	bool fits_below(Cell *link, int w)
+	{
+		if (!(link->type == ID($add) || (is_alu(link) && is_add(link))))
+			return false;
+		uint64_t b = cell_bound(link);
+		return b != UINT64_MAX && (w >= 64 || (b >> w) == 0);
 	}
 
 	// An unsigned difference with a bit to spare for the borrow is exact read as
@@ -347,14 +427,13 @@ struct ArithTreeWorker {
 		return p.extract_end(top) == SigSpec(sig[GetSize(sig) - 1], GetSize(p) - top);
 	}
 
-	// Bit position inside a `parent` port at which `child`'s whole Y appears, with
-	// `port` receiving that port's name. -1 when the Y is not exactly one ascending
-	// run in exactly one port, since then it has no single scale factor. The offset
-	// is what makes a partial link exact: the child's sum enters the parent scaled
-	// by 2**offset, so every operand of the child does too.
-	int link_offset(Cell *child, Cell *parent, IdString &port)
+	// Bit position inside a `parent` port at which a child's live result bits `y`
+	// appear, with `port` receiving that port's name. -1 when they are not exactly one
+	// ascending run in exactly one port, since then they have no single scale factor.
+	// The offset is what makes a partial link exact: the child's sum enters the parent
+	// scaled by 2**offset, so every operand of the child does too.
+	int link_offset(const SigSpec &y, Cell *parent, IdString &port)
 	{
-		SigSpec y = sigmap(child->getPort(ID::Y));
 		int n = GetSize(y), offset = -1;
 		for (auto name : {ID::A, ID::B}) {
 			SigSpec p = sigmap(parent->getPort(name));
@@ -389,7 +468,13 @@ struct ArithTreeWorker {
 
 	Cell *sole_chainable_consumer(Cell *cell, const pool<Cell *> &candidates, int &offset)
 	{
+		// Top bits a link's bound proves zero may go unread: opt_signif narrows the
+		// consumer past them before wreduce trims them, and dropping zeros loses nothing
 		SigSpec sig = sigmap(cell->getPort(ID::Y));
+		int live = GetSize(sig);
+		while (live > 1 && !fanout.count(sig[live - 1]) && fits_below(cell, live - 1))
+			live--;
+		sig = sig.extract(0, live);
 		offset = 0;
 		Cell *consumer = nullptr;
 		for (auto bit : sig) {
@@ -416,7 +501,7 @@ struct ArithTreeWorker {
 		// misplaces the link's own operands and drops the bits beside it.
 		IdString port;
 		if (opt.bit_offsets) {
-			offset = link_offset(cell, consumer, port);
+			offset = link_offset(sig, consumer, port);
 			if (offset < 0)
 				return nullptr;
 			// A signed port extends from its own MSB, not from any run inside it, so

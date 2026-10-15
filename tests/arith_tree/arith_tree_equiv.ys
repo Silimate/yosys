@@ -234,3 +234,69 @@ equiv_opt -assert arith_tree
 design -load postopt
 select -assert-min 1 t:$fa
 design -reset
+
+# A link narrower than its width rule asks for can still never truncate when its
+# operands' own bounds say so: s holds at most 254, so s + c fits in 8 bits for a
+# one-bit c, and the whole sum folds into one tree.
+read_verilog <<EOT
+module equiv_bounded_link(
+	input [6:0] a, b,
+	input c,
+	input [9:0] d,
+	output [9:0] y
+);
+	wire [7:0] s = a + b;
+	wire [7:0] t = s + c;
+	assign y = t + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-min 1 t:$fa
+select -assert-count 1 t:$add
+design -reset
+
+# The same link left a bit wider with only its low 8 bits read, which is how
+# opt_signif leaves it: the unread top bit is always zero, so it drops nothing.
+read_verilog <<EOT
+module equiv_bounded_link_unread_top(
+	input [6:0] a, b,
+	input c,
+	input [9:0] d,
+	output [9:0] y
+);
+	wire [7:0] s = a + b;
+	wire [8:0] t = s + c;
+	assign y = t[7:0] + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-min 1 t:$fa
+select -assert-count 1 t:$add
+design -reset
+
+# With a two-bit c the link can reach 257, so its truncation is observable and it
+# must stay out of the tree.
+read_verilog <<EOT
+module equiv_bounded_link_overflow(
+	input [6:0] a, b,
+	input [1:0] c,
+	input [9:0] d,
+	output [9:0] y
+);
+	wire [7:0] s = a + b;
+	wire [7:0] t = s + c;
+	assign y = t + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-count 2 t:$add
+design -reset
