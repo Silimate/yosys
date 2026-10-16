@@ -222,35 +222,74 @@ struct ArithTreeWorker {
 		return StaticCellTypes::Compat::mem_ff(cell->type) || cell->type.in(ID($anyseq), ID($anyconst));
 	}
 
-	// Arrival of `bit` in gate delays, memoised across the whole module
+	// Arrival of `bit` in gate delays, memoised across the whole module. The walk
+	// is post-order over driver cells on an explicit stack, as a long combinational
+	// chain would overflow the native one.
 	int arrival(SigBit bit)
 	{
-		bit = sigmap(bit);
-		auto cached = arrival_cache.find(bit);
-		if (cached != arrival_cache.end())
-			return cached->second;
+		// A cell being walked, its inputs, and the latest arrival among those seen so far
+		struct Frame {
+			Cell *cell;
+			SigSpec inputs;
+			int next = 0, in = 0;
+		};
+		std::vector<Frame> stack;
 
-		auto driven = bit_driver.find(bit);
-		if (!bit.is_wire() || driven == bit_driver.end() || is_start(driven->second))
-			return arrival_cache[bit] = 0;
+		// Settle `b` into `out` from the memo or as a start point, or push its driver
+		int out = 0;
+		auto visit = [&](SigBit b) {
+			b = sigmap(b);
+			auto cached = arrival_cache.find(b);
+			if (cached != arrival_cache.end()) {
+				out = cached->second;
+				return false;
+			}
 
-		// A bit already on the stack is part of a combinational loop, which has no
-		// arrival to speak of; treat it as a start point rather than recursing
-		Cell *cell = driven->second;
-		if (!arrival_visiting.insert(cell).second)
-			return 0;
+			auto driven = bit_driver.find(b);
+			if (!b.is_wire() || driven == bit_driver.end() || is_start(driven->second)) {
+				out = arrival_cache[b] = 0;
+				return false;
+			}
 
-		int in = 0;
-		for (auto &[name, sig] : cell->connections())
-			if (cell->input(name))
-				in = std::max(in, arrival(sig));
-		arrival_visiting.erase(cell);
+			// A bit already on the stack is part of a combinational loop, which has no
+			// arrival to speak of; treat it as a start point rather than walking it again
+			Cell *cell = driven->second;
+			if (!arrival_visiting.insert(cell).second) {
+				out = 0;
+				return false;
+			}
 
-		int out = in + cell_levels(cell);
-		for (auto &[name, sig] : cell->connections())
-			if (cell->output(name))
-				for (auto b : sigmap(sig))
-					arrival_cache[b] = out;
+			SigSpec inputs;
+			for (auto &[name, sig] : cell->connections())
+				if (cell->input(name))
+					inputs.append(sig);
+			stack.push_back({cell, sigmap(inputs)});
+			return true;
+		};
+
+		visit(bit);
+		while (!stack.empty()) {
+			Frame &top = stack.back();
+			if (top.next < GetSize(top.inputs)) {
+				// Descend into the next input's driver unless that input is settled; a
+				// push may reallocate the stack, so `top` is not used after one
+				if (visit(top.inputs[top.next++]))
+					continue;
+			} else {
+				// With every input in, the cell's outputs arrive its own depth later
+				out = top.in + cell_levels(top.cell);
+				arrival_visiting.erase(top.cell);
+				for (auto &[name, sig] : top.cell->connections())
+					if (top.cell->output(name))
+						for (auto b : sigmap(sig))
+							arrival_cache[b] = out;
+				stack.pop_back();
+				if (stack.empty())
+					break;
+			}
+			// Fold the settled arrival into the cell waiting on it
+			stack.back().in = std::max(stack.back().in, out);
+		}
 		return out;
 	}
 
