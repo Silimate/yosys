@@ -300,3 +300,85 @@ equiv_opt -assert arith_tree
 design -load postopt
 select -assert-count 2 t:$add
 design -reset
+
+# A product bounds its link the same way: a 4x4 product is at most 225, so adding a
+# 3-bit c stays under 2**8 and the link folds.
+read_verilog <<EOT
+module equiv_bounded_mul_link(
+	input [3:0] a, b,
+	input [2:0] c,
+	input [9:0] d,
+	output [9:0] y
+);
+	wire [7:0] p = a * b;
+	wire [7:0] t = p + c;
+	assign y = t + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-min 1 t:$fa
+select -assert-count 1 t:$add
+design -reset
+
+# A 5-bit c lets the link reach 256, so it keeps its truncation.
+read_verilog <<EOT
+module equiv_bounded_mul_link_overflow(
+	input [3:0] a, b,
+	input [4:0] c,
+	input [9:0] d,
+	output [9:0] y
+);
+	wire [7:0] p = a * b;
+	wire [7:0] t = p + c;
+	assign y = t + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-count 2 t:$add
+design -reset
+
+# A mux is bounded by its wider arm: at most 254 here, so the link folds.
+read_verilog <<EOT
+module equiv_bounded_mux_link(
+	input [6:0] a, b,
+	input s, c,
+	input [9:0] d,
+	output [9:0] y
+);
+	wire [7:0] m = s ? a + b : {1'b0, a};
+	wire [7:0] t = m + c;
+	assign y = t + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-min 1 t:$fa
+select -assert-count 2 t:$add
+design -reset
+
+# Operands too wide for a 64-bit bound prove nothing: a wrapped bound would claim
+# the 70-bit link fits, but a + b can carry out of it.
+read_verilog <<EOT
+module equiv_bound_saturates(
+	input [69:0] a, b,
+	input [71:0] d,
+	output [71:0] y
+);
+	wire [69:0] t = a + b;
+	assign y = t + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree
+design -load postopt
+select -assert-count 2 t:$add
+design -reset
