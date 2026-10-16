@@ -51,6 +51,87 @@ struct OptBalanceTreeWorker {
 	// Width the sliced-add cluster currently being extracted truncates to
 	int sliced_head_width = 0;
 
+	// SILIMATE: opt_signif narrows the reader of an unsigned sum to the bits the sum
+	// can reach, so link exactness is judged from operand bounds as arith_tree does,
+	// not from widths alone. Rebuilt per cell type, since balancing removes cells.
+	dict<SigBit, Cell*> bit_driver;
+	dict<Cell*, uint64_t> bounds;
+
+	// Bits an unsigned read of `sig` can set, below its constant-zero top
+	int value_width(const SigSpec &sig)
+	{
+		int w = GetSize(sig);
+		while (w > 0 && sig[w - 1] == State::S0)
+			w--;
+		return w;
+	}
+
+	// The $add, $mul or $mux whose low result bits `sig` reads below its
+	// constant-zero top, or nullptr
+	Cell *bound_driver(const SigSpec &sig_in)
+	{
+		SigSpec sig = sigmap(sig_in);
+		int w = value_width(sig);
+		auto d = w ? bit_driver.find(sig[0]) : bit_driver.end();
+		if (d == bit_driver.end() || !d->second->type.in(ID($add), ID($mul), ID($mux)))
+			return nullptr;
+		SigSpec y = sigmap(d->second->getPort(ID::Y));
+		return GetSize(y) >= w && y.extract(0, w) == sig.extract(0, w) ? d->second : nullptr;
+	}
+
+	// Largest value an unsigned read of `sig` takes, UINT64_MAX when nothing below
+	// 64 bits is known
+	uint64_t value_bound(const SigSpec &sig)
+	{
+		int w = value_width(sigmap(sig));
+		uint64_t full = w >= 64 ? UINT64_MAX : (uint64_t(1) << w) - 1;
+		Cell *d = bound_driver(sig);
+		auto it = d ? bounds.find(d) : bounds.end();
+		return it == bounds.end() ? full : std::min(full, it->second);
+	}
+
+	// Largest value an unsigned $add, $mul or $mux computes before its Y truncates
+	// it. Its drivers are bounded first off an explicit stack: an add chain would
+	// otherwise recurse once per link and overflow the native one. A driver still
+	// open closes a combinational loop, so it reads at its width.
+	uint64_t cell_bound(Cell *top)
+	{
+		std::vector<Cell*> todo = {top};
+		pool<Cell*> open;
+		while (!todo.empty()) {
+			Cell *cell = todo.back();
+			if (bounds.count(cell)) {
+				todo.pop_back();
+				continue;
+			}
+			if (open.insert(cell).second) {
+				for (auto port : {ID::A, ID::B})
+					if (Cell *d = bound_driver(cell->getPort(port)); d && !bounds.count(d) && !open.count(d))
+						todo.push_back(d);
+				continue;
+			}
+			todo.pop_back();
+			uint64_t a = value_bound(cell->getPort(ID::A)), b = value_bound(cell->getPort(ID::B)), r = std::max(a, b);
+			if (cell->type != ID($mux)) {
+				bool ovf = cell->type == ID($mul) ? __builtin_mul_overflow(a, b, &r) : __builtin_add_overflow(a, b, &r);
+				if (ovf || cell->getParam(ID::A_SIGNED).as_bool() || cell->getParam(ID::B_SIGNED).as_bool())
+					r = UINT64_MAX;
+			}
+			bounds[cell] = r;
+		}
+		return bounds.at(top);
+	}
+
+	// Whether an unsigned $add or $mul provably stays under 2**w, leaving its
+	// result bits from w up always zero
+	bool fits_below(Cell *cell, int w)
+	{
+		if (!cell->type.in(ID($add), ID($mul)))
+			return false;
+		uint64_t b = cell_bound(cell);
+		return b != UINT64_MAX && (w >= 64 || (b >> w) == 0);
+	}
+
 	// Check if cell is of the right type and has matching input/output widths
 	// Only allow cells with "natural" output widths (no truncation) to prevent
 	// equivalence issues when rebalancing (see YosysHQ/yosys#5605)
@@ -79,7 +160,8 @@ struct OptBalanceTreeWorker {
 
 		// Only allow cells where Y_WIDTH >= natural width (no truncation)
 		// This prevents rebalancing chains where truncation semantics matter
-		return y_width >= natural_width;
+		// SILIMATE: or where the operands' bounds prove the result never truncates
+		return y_width >= natural_width || fits_below(cell, y_width);
 	}
 
 	bool is_unsigned_add(Cell *cell)
@@ -92,7 +174,11 @@ struct OptBalanceTreeWorker {
 	// SILIMATE: is_right_type() admits an $add that discards its own carry out, but a
 	// tree rebuilt from that cell's operands computes the carry back. The restored bit
 	// only stays invisible where something downstream discards it again, so every
-	// carry-dropping link needs the callers below to prove that.
+	// carry-dropping link needs the callers below to prove that. Judged by widths
+	// even where a bound proves no carry is lost: Verific imports an adder's carry-in
+	// as a narrow add of one bit, and merging through those full-adder steps
+	// rebuilds a popcount as a deeper binary tree. The bounds above read a dropped
+	// carry at its width, which is only sound because this guard stays width-based.
 	bool drops_carry(Cell *cell)
 	{
 		if (!cell || cell->type != ID($add))
@@ -126,10 +212,24 @@ struct OptBalanceTreeWorker {
 		return shifted;
 	}
 
+	// SILIMATE: the driver whose whole value an unsigned port reads through the low
+	// bits of its result, the bits above being provably zero. opt_signif narrows a
+	// sum's reader to the bits the sum can reach, which leaves exactly this.
+	Cell *slice_driver(Cell *cell, IdString port)
+	{
+		if (!cell->type.in(ID($add), ID($mul)) || cell->getParam(port == ID::A ? ID::A_SIGNED : ID::B_SIGNED).as_bool())
+			return nullptr;
+		SigSpec sig = sigmap(cell->getPort(port));
+		Cell *drv = bound_driver(sig);
+		return drv && fits_below(drv, value_width(sig)) ? drv : nullptr;
+	}
+
 	// Get the driver of a cell input port if it continues the chain, else nullptr
 	Cell *chain_driver(Cell *cell, IdString port, IdString cell_type) {
 		auto sig = sigmap(cell->getPort(port));
 		Cell *drv = sig_to_driver[sig];
+		if (!drv)
+			drv = slice_driver(cell, port);  // SILIMATE
 		if (!drv || !is_right_type(drv, cell_type))
 			return nullptr;
 		// SILIMATE: the rebuilt tree keeps only the head cell's truncation, so a
@@ -386,6 +486,8 @@ struct OptBalanceTreeWorker {
 		for (auto cell_type : cell_types) {
 			// Index all of the nets in the module
 			sig_to_driver.clear();
+			bit_driver.clear();
+			bounds.clear();
 			dict<SigSpec, pool<Cell*>> sig_to_sink;
 			SlicedAddContext sliced_add_ctx;
 			for (auto cell : module->selected_cells())
@@ -396,6 +498,7 @@ struct OptBalanceTreeWorker {
 					if (cell->output(conn.first)) {
 						sig_to_driver[sig] = cell;
 						for (int i = 0; i < GetSize(sig); i++) {
+							bit_driver[sig[i]] = cell;
 							sliced_add_ctx.bit_to_driver[sig[i]] = cell;
 							sliced_add_ctx.bit_to_driver_index[sig[i]] = i;
 						}
@@ -411,6 +514,14 @@ struct OptBalanceTreeWorker {
 					}
 				}
 			}
+
+			// SILIMATE: a slice reader continues the chain as a whole reader does, so
+			// the search for chain ends below follows it too
+			for (auto cell : module->selected_cells())
+				if (cell->type == cell_type)
+					for (IdString port : {ID::A, ID::B})
+						if (Cell *drv = slice_driver(cell, port))
+							sig_to_sink[sigmap(drv->getPort(ID::Y))].insert(cell);
 
 			// Need to check if any wires connect to module ports
 			input_port_sigs.clear();
