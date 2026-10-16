@@ -5,4 +5,4 @@ sys.path.append("..")
 
 import gen_tests_makefile
 
-gen_tests_makefile.generate(["--yosys-scripts"])
+gen_tests_makefile.generate(["--yosys-scripts", "--tcl-scripts"])
