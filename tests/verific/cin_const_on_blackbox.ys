@@ -1,0 +1,39 @@
+# A constant net that also reaches a port of an unknown module (VERI-1063 downgraded,
+# so the module is a black box with no port directions) gets that port as a driver too,
+# and Net::IsGnd()/IsPwr() then fail on it. Comparators and right shifts whose carry-in
+# is such a net must still import, as the operation the carry-in selects.
+verific -set-warning VERI-1063
+verific -sv <<EOT
+module top(input [3:0] a, input [3:0] b, input [7:0] c, input [2:0] s,
+           output lt, output le, output gt, output ge, output [7:0] sr);
+  assign lt = a < b;
+  assign le = a <= b;
+  assign gt = a > b;
+  assign ge = a >= b;
+  assign sr = c >> s;
+  undefined_mod u0(.p(1'b0));
+  undefined_mod u1(.p(1'b1));
+endmodule
+EOT
+verific -import top
+select -assert-count 2 top/t:undefined_mod
+delete top/t:undefined_mod
+
+prep -flatten -top top
+design -stash gold
+read_verilog -sv <<EOT
+module ref(input [3:0] a, input [3:0] b, input [7:0] c, input [2:0] s,
+           output lt, output le, output gt, output ge, output [7:0] sr);
+  assign lt = a < b;
+  assign le = a <= b;
+  assign gt = a > b;
+  assign ge = a >= b;
+  assign sr = c >> s;
+endmodule
+EOT
+prep -flatten -top ref
+design -stash gate
+design -copy-from gold -as gold top
+design -copy-from gate -as gate ref
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -prove-asserts miter
