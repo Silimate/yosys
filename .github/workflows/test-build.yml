@@ -92,11 +92,13 @@ jobs:
           restore-keys: |
             test-build-${{ matrix.os }}
 
+      # SILIMATE: key on the attempt too, or a rerun's build hits attempt 1's key, is never
+      # saved, and the test jobs test attempt 1's binary
       - name: Cache Build Directory
         uses: actions/cache@v6
         with:
           path: build
-          key: ${{ runner.os }}-build-${{ github.run_id }}
+          key: ${{ runner.os }}-build-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Build
         shell: bash
@@ -136,10 +138,12 @@ jobs:
           get-iverilog: true
 
       - name: Restore Build Directory from Cache
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: build
-          key: ${{ runner.os }}-build-${{ github.run_id }}
+          key: ${{ runner.os }}-build-${{ github.run_id }}-${{ github.run_attempt }}
+          # newest earlier attempt, for reruns of failed jobs only
+          restore-keys: ${{ runner.os }}-build-${{ github.run_id }}-
           fail-on-cache-miss: true
 
       - name: Log yosys-config output
@@ -188,10 +192,12 @@ jobs:
           runs-on: ${{ matrix.os }}
 
       - name: Restore Build Directory from Cache
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: build
-          key: ${{ runner.os }}-build-${{ github.run_id }}
+          key: ${{ runner.os }}-build-${{ github.run_id }}-${{ github.run_attempt }}
+          # newest earlier attempt, for reruns of failed jobs only
+          restore-keys: ${{ runner.os }}-build-${{ github.run_id }}-
           fail-on-cache-miss: true
 
       - name: test_cell
@@ -227,10 +233,12 @@ jobs:
           get-docs-deps: true
 
       - name: Restore Build Directory from Cache
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: build
-          key: ${{ runner.os }}-build-${{ github.run_id }}
+          key: ${{ runner.os }}-build-${{ github.run_id }}-${{ github.run_attempt }}
+          # newest earlier attempt, for reruns of failed jobs only
+          restore-keys: ${{ runner.os }}-build-${{ github.run_id }}-
           fail-on-cache-miss: true
 
       - name: Log yosys-config output
