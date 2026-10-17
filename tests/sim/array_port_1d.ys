@@ -14,5 +14,5 @@ sim -r array_port_1d_bits.vcd -scope tb.dut -sim-cmp -q
 # Flattened into one vector (`coeffs [8:0]`)
 sim -r array_port_1d_vector.vcd -scope tb.dut -sim-cmp -q
 
-# Same binding on the multi-root -instance path Preqorsor's parallel replay uses
+# Same binding on the multi-root -instance path a downstream parallel replay uses
 sim -r array_port_1d_bits.vcd -instance array_port_1d:tb.dut -sim-cmp -q

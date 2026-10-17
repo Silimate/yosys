@@ -245,7 +245,7 @@ void msg_func(msg_type_t msg_type, const char *message_id, linefile_type linefil
 #endif
 
 	// SILIMATE: keep the "VERIFIC-WARNING [VERI-2580] file:line: msg" line and its routing
-	// (errors logged as warnings, on stdout) that preqorsor's logger parses, and report the
+	// (errors logged as warnings, on stdout) that the downstream logger parses, and report the
 	// first error itself rather than "Design elaboration failed; see full log for details"
 	string located = linefile ? stringf("%s:%d: ", LineFile::GetFileName(linefile), LineFile::GetLineNo(linefile)) : "";
 	located += body;
