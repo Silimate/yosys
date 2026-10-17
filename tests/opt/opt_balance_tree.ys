@@ -1710,3 +1710,148 @@ select t:$add -assert-count 2
 
 design -reset
 log -pop
+
+
+# Test 41
+log -header "Reader of a sum's provably-zero-topped low slice joins the chain"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module top (
+  input  wire [7:0]  a, b, c, d,
+  output wire [10:0] y
+);
+  wire [8:0]  s0;
+  wire [10:0] s1;
+
+  // s1 never exceeds 3 * 255, so its bit 10 is always 0 and add2 reads all of
+  // s1 through s1[9:0], as opt_signif leaves a narrowed reader
+  \$add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(9), .A_SIGNED(0), .B_SIGNED(0))
+    add0 (.A(a), .B(b), .Y(s0));
+  \$add #(.A_WIDTH(9), .B_WIDTH(8), .Y_WIDTH(11), .A_SIGNED(0), .B_SIGNED(0))
+    add1 (.A(s0), .B(c), .Y(s1));
+  \$add #(.A_WIDTH(10), .B_WIDTH(8), .Y_WIDTH(11), .A_SIGNED(0), .B_SIGNED(0))
+    add2 (.A(s1[9:0]), .B(d), .Y(y));
+endmodule
+EOF
+check -assert
+
+design -save preopt
+equiv_opt -assert opt_balance_tree
+design -load preopt
+opt_balance_tree
+
+# Balanced to depth 2: (a + b) + (c + d)
+select t:$add -assert-count 3
+select i:a %co2 t:$add %i -set a_cell
+select i:b %co2 t:$add %i -set b_cell
+select i:c %co2 t:$add %i -set c_cell
+select i:d %co2 t:$add %i -set d_cell
+select @a_cell @b_cell %i -assert-count 1
+select @c_cell @d_cell %i -assert-count 1
+
+design -reset
+log -pop
+
+
+# Test 42
+log -header "Reader of a sum's low slice is not merged when the top bit can be set"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module top (
+  input  wire [8:0]  a, b, c,
+  input  wire [7:0]  d,
+  output wire [10:0] y
+);
+  wire [9:0]  s0;
+  wire [10:0] s1;
+
+  // s1 reaches 3 * 511, so add2 really drops s1's bit 10
+  \$add #(.A_WIDTH(9), .B_WIDTH(9), .Y_WIDTH(10), .A_SIGNED(0), .B_SIGNED(0))
+    add0 (.A(a), .B(b), .Y(s0));
+  \$add #(.A_WIDTH(10), .B_WIDTH(9), .Y_WIDTH(11), .A_SIGNED(0), .B_SIGNED(0))
+    add1 (.A(s0), .B(c), .Y(s1));
+  \$add #(.A_WIDTH(10), .B_WIDTH(8), .Y_WIDTH(11), .A_SIGNED(0), .B_SIGNED(0))
+    add2 (.A(s1[9:0]), .B(d), .Y(y));
+endmodule
+EOF
+check -assert
+
+design -save preopt
+equiv_opt -assert opt_balance_tree
+design -load preopt
+opt_balance_tree
+
+# add2 still adds d to the truncated s1 on its own
+select i:c %co2 t:$add %i -set c_cell
+select i:d %co2 t:$add %i -set d_cell
+select @c_cell @d_cell %i -assert-count 0
+
+design -reset
+log -pop
+
+
+# Test 43
+log -header "Zero-extended read of an ADD fed by a dropped carry is not merged"
+log -push
+design -reset
+read_verilog -icells <<EOF
+module top (
+  input  wire [7:0] a, b, c,
+  output wire [8:0] y
+);
+  wire [7:0] t, u;
+
+  // t drops its carry, and u = t + 0 fits its 8 bits only while t does. A tree
+  // computes t's carry back, so add2's zero-extended read of u is not all of a
+  // value that tree would compute, and u must not join add2's chain.
+  \$add #(.A_WIDTH(8), .B_WIDTH(8), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    add0 (.A(a), .B(b), .Y(t));
+  \$add #(.A_WIDTH(8), .B_WIDTH(1), .Y_WIDTH(8), .A_SIGNED(0), .B_SIGNED(0))
+    add1 (.A(t), .B(1'b0), .Y(u));
+  \$add #(.A_WIDTH(9), .B_WIDTH(8), .Y_WIDTH(9), .A_SIGNED(0), .B_SIGNED(0))
+    add2 (.A({1'b0, u}), .B(c), .Y(y));
+endmodule
+EOF
+check -assert
+
+equiv_opt -assert opt_balance_tree
+
+design -reset
+log -pop
+
+
+# Test 44
+log -header "Narrow MUL whose operands cannot overflow it is balanced"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input  wire [1:0] a, b, c, d,
+  output wire [7:0] y
+);
+  // Each 8-bit product is narrower than its operand widths add up to, but
+  // a * b * c * d never exceeds 3**4
+  assign y = a * b * c * d;
+endmodule
+EOF
+check -assert
+proc
+
+design -save preopt
+equiv_opt -assert opt_balance_tree
+design -load preopt
+opt_balance_tree
+
+# Balanced to depth 2: (a * b) * (c * d)
+select t:$mul -assert-count 3
+select i:a %co2 t:$mul %i -set a_cell
+select i:b %co2 t:$mul %i -set b_cell
+select i:c %co2 t:$mul %i -set c_cell
+select i:d %co2 t:$mul %i -set d_cell
+select @a_cell @b_cell %i -assert-count 1
+select @c_cell @d_cell %i -assert-count 1
+
+design -reset
+log -pop
