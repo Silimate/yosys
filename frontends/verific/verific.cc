@@ -1162,8 +1162,14 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 			cell = module->addShr(inst_name, IN1, IN2, OUT, false);
 		else if (net_cin == net_a_msb)
 			cell = module->addSshr(inst_name, IN1, IN2, OUT, true);
-		else
-			log_error("%sCan't import Verific OPER_SHIFT_RIGHT instance %s: carry_in is neither 0 nor msb of left input\n", announce_src_location(inst), inst->Name());
+		else {
+			// SILIMATE: carry_in fills the vacated bits, so shift {carry_in, A} arithmetically.
+			// It need not be a constant net: a constant that also reaches a port of an unknown
+			// (black-boxed) module has that port as its first driver, and IsGnd() fails.
+			RTLIL::SigSpec a = IN1;
+			a.append(netToSigBit(net_cin));
+			cell = module->addSshr(inst_name, a, IN2, OUT, true);
+		}
 		import_attributes(cell->attributes, inst);
 		return true;
 	}
@@ -1216,8 +1222,15 @@ bool VerificImporter::import_netlist_instance_cells(Instance *inst, RTLIL::IdStr
 			cell = module->addLt(inst_name, IN1, IN2, net_map_at(inst->GetOutput()), SIGNED);
 		else if (net_cin->IsPwr())
 			cell = module->addLe(inst_name, IN1, IN2, net_map_at(inst->GetOutput()), SIGNED);
-		else
-			log_error("%sCan't import Verific OPER_LESSTHAN instance %s: carry_in is neither 0 nor 1\n", announce_src_location(inst), inst->Name());
+		else {
+			// SILIMATE: carry_in selects a <= b over a < b. It need not be a constant net; see
+			// OPER_SHIFT_RIGHT.
+			RTLIL::SigSpec lt = module->addWire(new_verific_id_suffix(inst_name, "lt"));
+			RTLIL::SigSpec le = module->addWire(new_verific_id_suffix(inst_name, "le"));
+			import_attributes(module->addLt(new_verific_id_suffix(inst_name, "lt"), IN1, IN2, lt, SIGNED)->attributes, inst);
+			import_attributes(module->addLe(new_verific_id_suffix(inst_name, "le"), IN1, IN2, le, SIGNED)->attributes, inst);
+			cell = module->addMux(inst_name, lt, le, netToSigBit(net_cin), net_map_at(inst->GetOutput()));
+		}
 		import_attributes(cell->attributes, inst);
 		return true;
 	}
