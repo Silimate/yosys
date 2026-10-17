@@ -153,6 +153,12 @@ jobs:
       - name: Build Verific
         run: cd verific/tclmain && make -j$procs
 
+      - name: Install Python packages for the tests
+        shell: bash
+        run: |
+          # silimate-passes' tests/sista/mock_sista.py needs flatbuffers
+          python3 -m pip install --user --break-system-packages flatbuffers==25.12.19
+
       - name: Run tests
         shell: bash
         run: |
