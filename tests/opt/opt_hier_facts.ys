@@ -1,0 +1,27 @@
+# opt_hier appends each fact it pushes into a module's body to the opt_hier.facts
+# scratchpad, so a caller can tell what that netlist now assumes about its instances.
+read_verilog <<EOT
+module child(input a, input [1:0] b, input c, input d, output x, output y);
+	assign x = a & b[1] & c & d;
+	assign y = b[0];
+endmodule
+module top(input i, input j, output o);
+	child u(.a(1'b1), .b({j, 1'b0}), .c(i), .d(i), .x(o));
+endmodule
+EOT
+hierarchy -top top
+
+logger -expect log "child unused .y 0" 1
+logger -expect log "child const .a 0 1" 1
+logger -expect log "child const .b 0 0" 1
+logger -expect log "child tie .[cd] 0 .[cd] 0" 1
+opt_hier
+scratchpad -get opt_hier.facts
+logger -check-expected
+
+# A call that pushes nothing new records nothing; unsetting starts a fresh record.
+opt_hier
+scratchpad -unset opt_hier.facts
+opt_hier
+scratchpad -assert-unset opt_hier.facts
+
