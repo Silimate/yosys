@@ -11,6 +11,9 @@ endmodule
 EOT
 hierarchy -top top
 
+# Appended after what the scratchpad already holds
+scratchpad -set opt_hier.facts earlier_record
+logger -expect log "earlier_record" 1
 logger -expect log "child unused .y 0" 1
 logger -expect log "child const .a 0 1" 1
 logger -expect log "child const .b 0 0" 1

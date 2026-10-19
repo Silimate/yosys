@@ -427,10 +427,8 @@ struct UsageData {
 		for (auto bit : applied_ties2)
 			facts += stringf("%s tie %s %d %s %d\n", module->name.c_str(), bit.wire->name.c_str(),
 					bit.offset, ties.at(bit).wire->name.c_str(), ties.at(bit).offset);
-		if (!facts.empty()) {
-			Design *design = module->design;
-			design->scratchpad_set_string("opt_hier.facts", design->scratchpad_get_string("opt_hier.facts") + facts);
-		}
+		if (!facts.empty())
+			module->design->scratchpad["opt_hier.facts"] += facts;
 		return did_something;
 	}
 };
