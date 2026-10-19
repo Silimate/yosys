@@ -179,7 +179,7 @@ std::vector<DepthSig> generate_partial_products(Module *module, SigSpec a, SigSp
 	return products;
 }
 
-std::pair<SigSpec, SigSpec> reduce_scheduled(Module *module, std::vector<DepthSig> operands, int width, Strategy strategy, IdString cell_name, int *out_compressor_count, int *out_final_depth) {
+std::pair<SigSpec, SigSpec> reduce_scheduled(Module *module, std::vector<DepthSig> operands, int width, Strategy strategy, IdString cell_name, int *out_compressor_count, int *out_final_depth, bool cell_fa) {
 	int levels = 0;
 	int fa_count = 0;
 	int c42_count = 0;
@@ -248,11 +248,11 @@ std::pair<SigSpec, SigSpec> reduce_scheduled(Module *module, std::vector<DepthSi
 
 				auto [sum, carry] = emit_compressor_42(module, a.sig, b.sig, c.sig, d.sig, width, cell_name);
 				// Two chained full adders: the first's carry is the second's C
-				int inner = fa_out_depth(a.depth, b.depth, c.depth);
-				int out = fa_out_depth(inner, d.depth, inner);
+				auto [inner_sum, inner_carry] = fa_depths(a.depth, b.depth, c.depth, cell_fa);
+				auto [sum_depth, carry_depth] = fa_depths(inner_sum, d.depth, inner_carry, cell_fa);
 
-				compressed.push_back({sum, out});
-				compressed.push_back({carry, out});
+				compressed.push_back({sum, sum_depth});
+				compressed.push_back({carry, carry_depth});
 
 				fa_count += 2;
 				c42_count += 1;
@@ -263,10 +263,10 @@ std::pair<SigSpec, SigSpec> reduce_scheduled(Module *module, std::vector<DepthSi
 				DepthSig c = ready[i + 2];
 
 				auto [sum, carry] = emit_compressor_32(module, a.sig, b.sig, c.sig, width, cell_name);
-				int out = fa_out_depth(a.depth, b.depth, c.depth);
+				auto [sum_depth, carry_depth] = fa_depths(a.depth, b.depth, c.depth, cell_fa);
 
-				compressed.push_back({sum, out});
-				compressed.push_back({carry, out});
+				compressed.push_back({sum, sum_depth});
+				compressed.push_back({carry, carry_depth});
 
 				fa_count += 1;
 				i += 3;
