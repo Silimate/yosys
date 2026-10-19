@@ -123,6 +123,9 @@ logger -expect log "final depth 11" 1
 arith_tree -strategy fa -final ripple
 logger -check-expected
 
+# A 4:2's second adder takes the first's sum on A and the carry from the column below on C
 design -load gold
+logger -expect log "3 levels, 5 3:2 compressors \(1 as 4:2\), final depth 6" 1
 equiv_opt -assert arith_tree -strategy 42 -final ripple -cell-fa
+logger -check-expected
 design -reset
