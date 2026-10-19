@@ -97,3 +97,32 @@ design -load postopt
 select -assert-count 2 t:$fa
 select -assert-count 1 t:$mul %co* t:$fa %i
 design -reset
+
+# -cell-fa schedules at a library full adder's depths, where the carry is the
+# early output: of seven equal operands, the two first-level carries compress
+# with the seventh while their sums are in flight, and each late sum takes C.
+# The gate model charges both outputs the later carry and buries a sum on B.
+read_verilog <<EOT
+module seven_equal(
+	input [3:0] a, b, c, d, e, f, g,
+	output [6:0] y
+);
+	assign y = a + b + c + d + e + f + g;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+design -save gold
+
+logger -expect log "4 levels, 5 3:2 compressors \(0 as 4:2\), final depth 5" 1
+equiv_opt -assert arith_tree -strategy fa -final ripple -cell-fa
+logger -check-expected
+
+design -load gold
+logger -expect log "final depth 11" 1
+arith_tree -strategy fa -final ripple
+logger -check-expected
+
+design -load gold
+equiv_opt -assert arith_tree -strategy 42 -final ripple -cell-fa
+design -reset

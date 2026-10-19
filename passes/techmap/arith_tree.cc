@@ -32,6 +32,8 @@ struct ArithTreeOptions {
 	bool bit_offsets = false;
 	// Chain a difference whose consumer sign-extends it by copying its MSB
 	bool sext_links = false;
+	// Schedule at a library full adder's depths (see CompressorTree::fa_depths)
+	bool cell_fa = false;
 };
 
 // Widen each adder back over the low bits opt_expr stripped from it, so the adder feeding it has one reader
@@ -837,7 +839,7 @@ struct ArithTreeWorker {
 					continue;
 				}
 
-				auto [pa, pb] = CompressorTree::reduce_scheduled(module, pps, body, opt.strategy, cell->name); // SILIMATE: Improve the naming
+				auto [pa, pb] = CompressorTree::reduce_scheduled(module, pps, body, opt.strategy, cell->name, nullptr, nullptr, opt.cell_fa); // SILIMATE: Improve the naming
 				SigSpec p = module->addWire(NEW_ID2_SUFFIX("prod"), body); // SILIMATE: Improve the naming
 				module->addAdd(NEW_ID2_SUFFIX("add"), pa, pb, p, false); // SILIMATE: Improve the naming
 				SigSpec np = module->addWire(NEW_ID2_SUFFIX("nprod"), body); // SILIMATE: Improve the naming
@@ -895,7 +897,7 @@ struct ArithTreeWorker {
 		int width = GetSize(result_y);
 		auto pool = build_operand_pool(cell, operands, width, neg_offsets);
 		int final_depth = 0;
-		auto [a, b] = CompressorTree::reduce_scheduled(module, std::move(pool), width, opt.strategy, cell->name, nullptr, &final_depth); // SILIMATE: Improve the naming
+		auto [a, b] = CompressorTree::reduce_scheduled(module, std::move(pool), width, opt.strategy, cell->name, nullptr, &final_depth, opt.cell_fa); // SILIMATE: Improve the naming
 		auto final_choice = CompressorTree::pick_final_adder(width, final_depth, opt.final_mode);
 		CompressorTree::emit_final_adder(module, a, b, result_y, final_choice, cell->name); // SILIMATE: Improve the naming
 	}
@@ -1046,6 +1048,13 @@ struct ArithTreePass : public Pass {
 		log("        as signed when its result is wider than both operands, so a - b + c\n");
 		log("        reduces as one tree instead of two carry-propagate adders.\n");
 		log("\n");
+		log("    -cell-fa\n");
+		log("        Schedule the tree at the depths of a cell library's full adder,\n");
+		log("        whose carry is one gate from any input and whose sum is two gates\n");
+		log("        from A or B and one from C, instead of the gate network $fa lowers\n");
+		log("        to, whose carry is the later output. Early carries then compress\n");
+		log("        again while their sums are still in flight, and late sums take C.\n");
+		log("\n");
 		log("    -min-width <n>\n");
 		log("        Skip chains and $macc cells whose result is narrower than <n>\n");
 		log("        bits (default 0, i.e. no limit). A compressor level costs about\n");
@@ -1099,6 +1108,10 @@ struct ArithTreePass : public Pass {
 			}
 			if (arg == "-sext-links") {
 				opt.sext_links = true;
+				continue;
+			}
+			if (arg == "-cell-fa") {
+				opt.cell_fa = true;
 				continue;
 			}
 			if (arg == "-min-width" && argidx + 1 < args.size()) {
