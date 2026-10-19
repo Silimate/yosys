@@ -360,6 +360,9 @@ struct UsageData {
 			did_something = true;
 			module->connect(chunk, SigSpec(RTLIL::Sx, chunk.size()));
 		}
+		std::string facts;
+		for (auto bit : disconnect_outputs)
+			facts += stringf("%s unused %s %d\n", module->name.c_str(), bit.wire->name.c_str(), bit.offset);
 
 		// Connect constant inputs
 		SigPool applied_constants;
@@ -379,6 +382,9 @@ struct UsageData {
 			log("Substituting constant %s for input terminal '%s' in module '%s'\n",
 				log_signal(const_), log_signal(chunk), module);
 		}
+		for (auto bit : applied_constants2)
+			facts += stringf("%s const %s %d %s\n", module->name.c_str(), bit.wire->name.c_str(),
+					bit.offset, Const(constant_inputs.at(bit).data).as_string().c_str());
 		// A substitution is a change even when nothing else folds because of it: in a
 		// module that only hands the input on to a child, it is the step that brings the
 		// constant one boundary closer to its reader, and a caller looping to a fixpoint
@@ -416,6 +422,13 @@ struct UsageData {
 					applied_ties.size(), module);
 			did_something = true;
 		}
+		SigSpec applied_ties2 = applied_ties.export_all();
+		applied_ties2.sort_and_unify();
+		for (auto bit : applied_ties2)
+			facts += stringf("%s tie %s %d %s %d\n", module->name.c_str(), bit.wire->name.c_str(),
+					bit.offset, ties.at(bit).wire->name.c_str(), ties.at(bit).offset);
+		if (!facts.empty())
+			module->design->scratchpad["opt_hier.facts"] += facts;
 		return did_something;
 	}
 };
@@ -524,6 +537,14 @@ struct OptHierPass : Pass {
 		log("The number of rounds that changed something is left in the scratchpad as\n");
 		log("opt_hier.rounds, and opt_hier.saturated is set when the last round found\n");
 		log("nothing left to change.\n");
+		log("\n");
+		log("Each fact pushed into a module's body is appended to the scratchpad string\n");
+		log("opt_hier.facts, one per line, so a caller can tell what a module's netlist\n");
+		log("now assumes about its instances (unset it to start a fresh record):\n");
+		log("\n");
+		log("    <module> unused <output> <bit>              no instance reads the bit\n");
+		log("    <module> const <input> <bit> <value>        every instance drives <value>\n");
+		log("    <module> tie <input> <bit> <input2> <bit2>  every instance drives both alike\n");
 		log("\n");
 		log("Note this pass changes port semantics on modules which are not the top.\n");
 		log("\n");
