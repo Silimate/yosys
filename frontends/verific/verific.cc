@@ -3653,7 +3653,8 @@ static void verific_selective_split_portbuses(Netlist *top, bool split_structs, 
 		it.first->Add(it.second);
 }
 
-std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
+// SILIMATE: verific_import's elaboration and import, without its verific_cleanup() and its exit on a Verific error
+std::string verific_import_netlists(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
 {
 	verific_sva_fsm_limit = 16;
 
@@ -3682,7 +3683,7 @@ std::string verific_import(Design *design, const std::map<std::string,std::strin
 #endif
 
 	if (!verific_error_msg.empty())
-		log_error("%s\n", verific_error_msg);
+		return top;
 
 	// SILIMATE: the legacy -no_split_complex_ports flag forces both classes flat; the finer-grained
 	// -no_split_struct_ports / -no_split_array_ports flags gate each class independently.
@@ -3714,7 +3715,12 @@ std::string verific_import(Design *design, const std::map<std::string,std::strin
 		}
 		nl_todo.erase(it);
 	}
+	return top;
+}
 
+std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
+{
+	top = verific_import_netlists(design, parameters, top);
 	verific_cleanup();
 	if (!verific_error_msg.empty())
 		log_error("%s\n", verific_error_msg);
