@@ -1,4 +1,4 @@
-# reg_rename against Xcelium-shaped dumps of reg_rename_genblk.sv, elaborated the way Preqorsor
+# reg_rename against Xcelium-shaped dumps of reg_rename_genblk.sv, elaborated the way the downstream flow
 # does for such dumps (block separator ".", for-generate blocks named "%s[%s]").
 #
 #   gen_dp[g].u_cal  registers in the named generate-if block hw_gen; the dump opens

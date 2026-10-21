@@ -20,6 +20,7 @@
 #include "kernel/yosys.h"
 #include "kernel/ff.h"
 #include "kernel/sigtools.h"
+#include "passes/silimate/ff_slice_name.h" // SILIMATE
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -148,19 +149,6 @@ struct SplitcellsWorker
 			if (GetSize(outsig) <= 1) return 0;
 			int width = GetSize(outsig);
 
-			// Compute user-facing bit index from the wire connected to Q
-			SigSpec raw_q = cell->getPort(ID::Q);
-			auto user_index = [&](int idx) -> int {
-				if (idx < GetSize(raw_q) && raw_q[idx].is_wire()) {
-					Wire *w = raw_q[idx].wire;
-					if (w->upto)
-						return w->start_offset + w->width - 1 - raw_q[idx].offset;
-					else
-						return w->start_offset + raw_q[idx].offset;
-				}
-				return idx;
-			};
-
 			std::vector<int> slices;
 			slices.push_back(0);
 
@@ -182,57 +170,9 @@ struct SplitcellsWorker
 			{
 				int slice_msb = slices[i]-1;
 				int slice_lsb = slices[i-1];
-				int name_lsb = user_index(slice_lsb);
-				int name_msb = user_index(slice_msb);
-				if (name_lsb > name_msb) std::swap(name_lsb, name_msb);
-				std::string base_name = cell->name.str();
-				IdString slice_name;
-				if (blast) {
-					// Strip existing '[' or '.' from cell name
-					size_t bracket_pos = base_name.find_first_of("[.");
-					bool strip_reg = false;
-					std::string dim_index;
-					if (bracket_pos != std::string::npos) {
-
-						// Check if we will strip off _reg suffix from base name
-						size_t reg_pos = base_name.rfind("_reg");
-						if (reg_pos != std::string::npos && reg_pos > bracket_pos) { // <base>[word]_reg
-							dim_index = base_name.substr(bracket_pos, reg_pos - bracket_pos);
-							base_name = base_name.substr(0, reg_pos);
-							strip_reg = true;
-						} else { // <base>_reg[word] / <base>_reg.attr, or <base>[word] with no _reg
-							dim_index = base_name.substr(bracket_pos);
-						}
-						base_name = base_name.substr(0, bracket_pos);
-					}
-
-					// Prefer dimensional index from the cell name; fall back to Q port wire name index otherwise
-					bool q_is_wire = slice_lsb < GetSize(raw_q) && raw_q[slice_lsb].is_wire();
-					if (dim_index.empty() && q_is_wire) {
-						std::string wire_name = raw_q[slice_lsb].wire->name.str();
-						size_t wb = wire_name.find_first_of("[.");
-						if (wb != std::string::npos)
-							dim_index = wire_name.substr(wb);
-					}
-
-					int bit_offset = q_is_wire ? user_index(slice_lsb) : name_lsb;
-					std::string wire_indices;
-					if (!dim_index.empty()) {
-						// Concatenate struct attribute or wire index (ex: \Memory[0] -> [0]) to the bit offset
-						wire_indices = dim_index + (strip_reg ? "_reg" : "") + stringf(
-							"%c%d%c", format[0], bit_offset, format[1]);
-					} else {
-						// no '[' or '.' on cell or Q, warn as this may cause problems in reg annotation
-						wire_indices = stringf("%c%d%c", format[0],
-							q_is_wire ? slice_lsb + user_index(0) : name_lsb, format[1]);
-					}
-					// Construct uniquified name by concatenating the base name with the wire indices
-					slice_name = module->uniquify(base_name + wire_indices);
-				} else {
-					slice_name = module->uniquify(base_name + (name_msb == name_lsb ?
-						stringf("%c%d%c", format[0], name_lsb, format[1]) :
-						stringf("%c%d%c%d%c", format[0], name_msb, format[2], name_lsb, format[1])));
-				}
+				// SILIMATE: named from the Q wire's bit numbering, see ff_slice_name
+				IdString slice_name = module->uniquify(ff_slice_name(cell->name.str(),
+						cell->getPort(ID::Q), slice_lsb, slice_msb, format, blast));
 
 				Cell *slice = module->addCell(slice_name, cell);
 

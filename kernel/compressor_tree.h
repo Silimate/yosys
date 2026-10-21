@@ -67,6 +67,21 @@ inline int fa_out_depth(int da, int db, int dc)
 	return std::max(std::max(da, db) + 3, dc + 2);
 }
 
+/**
+ * fa_depths() - Gate delays to an $fa's sum and carry from its input depths
+ * @cell: Price a cell library's full adder, whose carry is one majority gate from any
+ *        input and so arrives before the sum from A or B; otherwise fa_out_depth.
+ *
+ * Return: {sum, carry}
+ */
+inline std::pair<int, int> fa_depths(int da, int db, int dc, bool cell)
+{
+	if (cell)
+		return {std::max(std::max(da, db) + 2, dc + 1), std::max({da, db, dc}) + 1};
+	int out = fa_out_depth(da, db, dc);
+	return {out, out};
+}
+
 enum class FinalAdder {
 	DEFAULT,         // emit $add and let downstream techmap pick
 	RIPPLE,          // emit $add with explicit narrow hint
@@ -108,10 +123,11 @@ std::vector<DepthSig> generate_partial_products(Module *module, SigSpec a, SigSp
  * @cell_name: Originating cell, used to name the emitted logic
  * @out_compressor_count: Optional pointer to return the number of 3:2 compressors emitted (a 4:2 counts as two)
  * @out_final_depth: Optional pointer to return the final depth of the scheduled tree
+ * @cell_fa: Schedule at a library full adder's depths (see fa_depths)
  *
  * Return: The final two reduced operands, that are to be fed into an adder
  */
-std::pair<SigSpec, SigSpec> reduce_scheduled(Module *module, std::vector<DepthSig> operands, int width, Strategy strategy, IdString cell_name, int *out_compressor_count = nullptr, int *out_final_depth = nullptr);
+std::pair<SigSpec, SigSpec> reduce_scheduled(Module *module, std::vector<DepthSig> operands, int width, Strategy strategy, IdString cell_name, int *out_compressor_count = nullptr, int *out_final_depth = nullptr, bool cell_fa = false);
 
 /**
  * emit_kogge_stone() - Emit a Kogge-Stone parallel-prefix adder
