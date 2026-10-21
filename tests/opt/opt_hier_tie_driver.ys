@@ -1,0 +1,41 @@
+# A cell drives o1 and o2/o3 are assigned from it. With -tie_driver the parent joins
+# all three nets onto o1's; without it only o2 and o3 are joined. The design must stay
+# equivalent to its flattened self either way.
+read_verilog <<EOT
+module leaf(input a, output o1, output o2, output o3);
+	assign o1 = ~a;
+	assign o2 = o1;
+	assign o3 = o1;
+endmodule
+module top(input a, output [2:0] y);
+	wire n1, n2, n3;
+	leaf u(.a(a), .o1(n1), .o2(n2), .o3(n3));
+	assign y = {~n3, ~n2, ~n1};
+endmodule
+EOT
+hierarchy -top top
+proc
+opt_clean
+design -save start
+flatten
+design -save gold
+
+design -load start
+opt_hier
+opt_clean -purge
+select -assert-count 2 top/t:$not %ci1:+[A] top/t:$not %d
+
+design -load start
+opt_hier -tie_driver
+opt_clean -purge
+select -assert-count 1 top/t:$not %ci1:+[A] top/t:$not %d
+flatten
+design -save gate
+
+design -reset
+design -copy-from gold -as gold A:top
+design -copy-from gate -as gate A:top
+rename -hide
+equiv_make gold gate equiv
+equiv_induct -ignore-unknown-cells equiv
+equiv_status -assert equiv

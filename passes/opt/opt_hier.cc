@@ -40,7 +40,7 @@ struct ModuleIndex {
 	dict<SigBit, SigBit> constant_outputs;
 	std::vector<SigSpec> tie_together_outputs;
 
-	ModuleIndex(Module *module)
+	ModuleIndex(Module *module, bool tie_driver)
 		: module(module), sigmap(module)
 	{
 		if (module->get_blackbox_attribute()) {
@@ -82,6 +82,9 @@ struct ModuleIndex {
 						constant_outputs[pair.first[i]] = pair.second[i];
 					} else {
 						classes[pair.second[i]].append(pair.first[i]);
+						// The bit the others are assigned from can be an output port too
+						if (tie_driver && pair.second[i].wire->port_output && !pair.second[i].wire->port_input)
+							classes[pair.second[i]].append(pair.second[i]);
 					}
 				}
 			}
@@ -436,12 +439,12 @@ struct UsageData {
 // Carry unused signals, constants and tie-togethers across one module boundary, and
 // return the modules that were rewritten. Every module is indexed as it stands when
 // the round starts, so a fact pushed into a module only moves on in the next round.
-static pool<Module *> run_round(RTLIL::Design *d)
+static pool<Module *> run_round(RTLIL::Design *d, bool tie_driver)
 {
 	dict<IdString, ModuleIndex> indices;
 	for (auto module : d->modules()) {
 		log_debug("Building index for %s\n", module);
-		indices.emplace(module->name, ModuleIndex(module));
+		indices.emplace(module->name, ModuleIndex(module, tie_driver));
 	}
 
 	dict<IdString, UsageData> usage_datas;
@@ -534,6 +537,12 @@ struct OptHierPass : Pass {
 		log("        the rest to the next, so -max_iter bounds the total. Solver effort is\n");
 		log("        capped by opt_dff's scratchpad options (see 'help opt_dff').\n");
 		log("\n");
+		log("    -tie_driver\n");
+		log("        when output ports are assigned from another output port, tie that\n");
+		log("        port together with them as well. Without it, a module whose cell\n");
+		log("        drives one output port that others are assigned from leaves the\n");
+		log("        driven port's net apart from theirs in the parent.\n");
+		log("\n");
 		log("The number of rounds that changed something is left in the scratchpad as\n");
 		log("opt_hier.rounds, and opt_hier.saturated is set when the last round found\n");
 		log("nothing left to change.\n");
@@ -554,7 +563,7 @@ struct OptHierPass : Pass {
 		log_header(d, "Executing OPT_HIER pass.\n");
 
 		int max_iter = 1;
-		bool full = false, purge = false, sat = false;
+		bool full = false, purge = false, sat = false, tie_driver = false;
 		constexpr int max_sat_folds = 16;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -582,6 +591,10 @@ struct OptHierPass : Pass {
 				sat = true;
 				continue;
 			}
+			if (args[argidx] == "-tie_driver") {
+				tie_driver = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, d);
@@ -594,7 +607,7 @@ struct OptHierPass : Pass {
 		// modules whose fold loop hit its cap with work left, owed another round's cleanup
 		pool<Module *> unfinished;
 		while (true) {
-			pool<Module *> changed = run_round(d);
+			pool<Module *> changed = run_round(d, tie_driver);
 			changed.insert(unfinished.begin(), unfinished.end());
 			unfinished.clear();
 			if (changed.empty()) {
