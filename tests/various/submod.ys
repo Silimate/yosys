@@ -122,3 +122,33 @@ endmodule
 EOT
 
 check -assert
+
+
+design -reset
+read_verilog <<EOT
+module top(input [0:1] a, output [0:1] b);
+(* submod="bar" *) sub s1(a, b);
+endmodule
+
+module sub(input [0:1] a, output [0:1] b);
+assign b = ~a;
+endmodule
+EOT
+
+hierarchy -top top
+proc
+design -save gold
+
+submod
+check -assert
+logger -expect log "wire width 2 upto input 1 \\a" 1
+logger -expect log "wire width 2 upto output 2 \\b" 1
+dump top_bar
+logger -check-expected
+design -stash gate
+
+design -import gold -as gold
+design -import gate -as gate
+
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -show-ports miter

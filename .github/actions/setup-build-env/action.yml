@@ -56,6 +56,9 @@ runs:
       if: runner.os == 'macOS'
       shell: bash
       run: |
+        # SILIMATE: runner images carry different Homebrew snapshots and never auto-update, so
+        # refresh first; otherwise test jobs can get a newer tcl-tk than the build linked against
+        brew update
         brew install bison flex gawk libffi git pkg-config python3 bash googletest tcl-tk llvm
 
     - name: Linux runtime environment

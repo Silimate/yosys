@@ -30,6 +30,10 @@ struct ArithTreeOptions {
 	// Place links and leaf operands at the column they enter the sum at, rather
 	// than requiring every one of them to start at the result's LSB
 	bool bit_offsets = false;
+	// Chain a difference whose consumer sign-extends it by copying its MSB
+	bool sext_links = false;
+	// Schedule at a library full adder's depths (see CompressorTree::fa_depths)
+	bool cell_fa = false;
 };
 
 // Widen each adder back over the low bits opt_expr stripped from it, so the adder feeding it has one reader
@@ -93,11 +97,13 @@ struct ArithTreeWorker {
 	dict<SigBit, int> fanout;
 	dict<SigBit, Cell *> bit_driver;
 	dict<SigBit, int> arrival_cache;
+	dict<Cell *, uint64_t> bound_cache;
 	pool<Cell *> arrival_visiting;
 
 	pool<Cell *> addsub;
 	pool<Cell *> alu;
 	pool<Cell *> macc;
+	pool<Cell *> sext_linked;
 
 	struct Operand {
 		SigSpec sig;
@@ -219,35 +225,74 @@ struct ArithTreeWorker {
 		return StaticCellTypes::Compat::mem_ff(cell->type) || cell->type.in(ID($anyseq), ID($anyconst));
 	}
 
-	// Arrival of `bit` in gate delays, memoised across the whole module
+	// Arrival of `bit` in gate delays, memoised across the whole module. The walk
+	// is post-order over driver cells on an explicit stack, as a long combinational
+	// chain would overflow the native one.
 	int arrival(SigBit bit)
 	{
-		bit = sigmap(bit);
-		auto cached = arrival_cache.find(bit);
-		if (cached != arrival_cache.end())
-			return cached->second;
+		// A cell being walked, its inputs, and the latest arrival among those seen so far
+		struct Frame {
+			Cell *cell;
+			SigSpec inputs;
+			int next = 0, in = 0;
+		};
+		std::vector<Frame> stack;
 
-		auto driven = bit_driver.find(bit);
-		if (!bit.is_wire() || driven == bit_driver.end() || is_start(driven->second))
-			return arrival_cache[bit] = 0;
+		// Settle `b` into `out` from the memo or as a start point, or push its driver
+		int out = 0;
+		auto visit = [&](SigBit b) {
+			b = sigmap(b);
+			auto cached = arrival_cache.find(b);
+			if (cached != arrival_cache.end()) {
+				out = cached->second;
+				return false;
+			}
 
-		// A bit already on the stack is part of a combinational loop, which has no
-		// arrival to speak of; treat it as a start point rather than recursing
-		Cell *cell = driven->second;
-		if (!arrival_visiting.insert(cell).second)
-			return 0;
+			auto driven = bit_driver.find(b);
+			if (!b.is_wire() || driven == bit_driver.end() || is_start(driven->second)) {
+				out = arrival_cache[b] = 0;
+				return false;
+			}
 
-		int in = 0;
-		for (auto &[name, sig] : cell->connections())
-			if (cell->input(name))
-				in = std::max(in, arrival(sig));
-		arrival_visiting.erase(cell);
+			// A bit already on the stack is part of a combinational loop, which has no
+			// arrival to speak of; treat it as a start point rather than walking it again
+			Cell *cell = driven->second;
+			if (!arrival_visiting.insert(cell).second) {
+				out = 0;
+				return false;
+			}
 
-		int out = in + cell_levels(cell);
-		for (auto &[name, sig] : cell->connections())
-			if (cell->output(name))
-				for (auto b : sigmap(sig))
-					arrival_cache[b] = out;
+			SigSpec inputs;
+			for (auto &[name, sig] : cell->connections())
+				if (cell->input(name))
+					inputs.append(sig);
+			stack.push_back({cell, sigmap(inputs)});
+			return true;
+		};
+
+		visit(bit);
+		while (!stack.empty()) {
+			Frame &top = stack.back();
+			if (top.next < GetSize(top.inputs)) {
+				// Descend into the next input's driver unless that input is settled; a
+				// push may reallocate the stack, so `top` is not used after one
+				if (visit(top.inputs[top.next++]))
+					continue;
+			} else {
+				// With every input in, the cell's outputs arrive its own depth later
+				out = top.in + cell_levels(top.cell);
+				arrival_visiting.erase(top.cell);
+				for (auto &[name, sig] : top.cell->connections())
+					if (top.cell->output(name))
+						for (auto b : sigmap(sig))
+							arrival_cache[b] = out;
+				stack.pop_back();
+				if (stack.empty())
+					break;
+			}
+			// Fold the settled arrival into the cell waiting on it
+			stack.back().in = std::max(stack.back().in, out);
+		}
 		return out;
 	}
 
@@ -297,10 +342,78 @@ struct ArithTreeWorker {
 		return true;
 	}
 
+	// Bits an unsigned read of `sig` can set, below its constant-zero top
+	int value_width(const SigSpec &sig)
+	{
+		int w = GetSize(sig);
+		while (w > 0 && sig[w - 1] == State::S0)
+			w--;
+		return w;
+	}
+
+	// The unsigned sum, product or mux whose low result bits `sig` reads below its
+	// constant-zero top, or nullptr
+	Cell *bound_driver(const SigSpec &sig_in)
+	{
+		SigSpec sig = sigmap(sig_in);
+		int w = value_width(sig);
+		auto d = w ? bit_driver.find(sig[0]) : bit_driver.end();
+		if (d == bit_driver.end() || !(d->second->type.in(ID($add), ID($mul), ID($mux)) || (is_alu(d->second) && is_add(d->second))))
+			return nullptr;
+		SigSpec y = sigmap(d->second->getPort(ID::Y));
+		return GetSize(y) >= w && y.extract(0, w) == sig.extract(0, w) ? d->second : nullptr;
+	}
+
+	// Largest value an unsigned read of `sig` takes. A low slice of an unsigned sum or
+	// product is bounded by that cell's operands, which can be tighter than its width:
+	// three terms of 29, 28 and 27 bits fit in 30. UINT64_MAX when nothing below 64
+	// bits is known.
+	uint64_t value_bound(const SigSpec &sig)
+	{
+		int w = value_width(sigmap(sig));
+		uint64_t full = w >= 64 ? UINT64_MAX : (uint64_t(1) << w) - 1;
+		Cell *d = bound_driver(sig);
+		auto it = d ? bound_cache.find(d) : bound_cache.end();
+		return it == bound_cache.end() ? full : std::min(full, it->second);
+	}
+
+	// Largest value an unsigned sum, product or mux computes before its Y truncates it.
+	// Its drivers are bounded first off an explicit stack: an add or mux chain would
+	// otherwise recurse once per link and overflow the native one. A driver still
+	// open closes a combinational loop, so it reads at its width.
+	uint64_t cell_bound(Cell *top)
+	{
+		std::vector<Cell *> todo = {top};
+		pool<Cell *> open;
+		while (!todo.empty()) {
+			Cell *cell = todo.back();
+			if (bound_cache.count(cell)) {
+				todo.pop_back();
+				continue;
+			}
+			if (open.insert(cell).second) {
+				for (auto port : {ID::A, ID::B})
+					if (Cell *d = bound_driver(cell->getPort(port)); d && !bound_cache.count(d) && !open.count(d))
+						todo.push_back(d);
+				continue;
+			}
+			todo.pop_back();
+			uint64_t a = value_bound(cell->getPort(ID::A)), b = value_bound(cell->getPort(ID::B)), r = std::max(a, b);
+			if (cell->type != ID($mux)) {
+				bool ovf = cell->type == ID($mul) ? __builtin_mul_overflow(a, b, &r) : __builtin_add_overflow(a, b, &r);
+				if (ovf || cell->getParam(ID::A_SIGNED).as_bool() || cell->getParam(ID::B_SIGNED).as_bool())
+					r = UINT64_MAX;
+			}
+			bound_cache[cell] = r;
+		}
+		return bound_cache.at(top);
+	}
+
 	// A link truncates its result at its own Y width, so flattening it into a wider
 	// consumer is only sound when that truncation provably never fires. This is the
 	// same question macc_may_overflow() answers for the structurally identical $macc
-	// merge in alumacc, and it is answered the same way: from operand widths alone.
+	// merge in alumacc, answered from operand widths and, failing that, from the
+	// operands' own bounds.
 	bool link_may_overflow(Cell *link)
 	{
 		// Only unsigned addition has a bound this simple. Subtraction borrows below
@@ -315,17 +428,53 @@ struct ArithTreeWorker {
 		// (2**wa - 1) + (2**wb - 1) < 2**(max(wa, wb) + 1).
 		int wa = GetSize(link->getPort(ID::A)), wb = GetSize(link->getPort(ID::B));
 		int need = wb ? std::max(wa, wb) + 1 : wa;
-		return GetSize(link->getPort(ID::Y)) < need;
+		int yw = GetSize(link->getPort(ID::Y));
+		return yw < need && !fits_below(link, yw);
 	}
 
-	// Bit position inside a `parent` port at which `child`'s whole Y appears, with
-	// `port` receiving that port's name. -1 when the Y is not exactly one ascending
-	// run in exactly one port, since then it has no single scale factor. The offset
-	// is what makes a partial link exact: the child's sum enters the parent scaled
-	// by 2**offset, so every operand of the child does too.
-	int link_offset(Cell *child, Cell *parent, IdString &port)
+	// Whether an unsigned add's result provably stays under 2**w, leaving its bits
+	// from w up always zero
+	bool fits_below(Cell *link, int w)
 	{
-		SigSpec y = sigmap(child->getPort(ID::Y));
+		if (!(link->type == ID($add) || (is_alu(link) && is_add(link))))
+			return false;
+		uint64_t b = cell_bound(link);
+		return b != UINT64_MAX && (w >= 64 || (b >> w) == 0);
+	}
+
+	// An unsigned difference with a bit to spare for the borrow is exact read as
+	// signed, since a - b lies strictly between -2**wb and 2**wa. wreduce narrows
+	// an unsigned $sub to exactly this width and copies the MSB into the bits above.
+	bool link_exact_signed(Cell *link)
+	{
+		if (!(link->type == ID($sub) || (is_alu(link) && is_sub(link))))
+			return false;
+		if (link->getParam(ID::A_SIGNED).as_bool() || link->getParam(ID::B_SIGNED).as_bool())
+			return false;
+		int wa = GetSize(link->getPort(ID::A)), wb = GetSize(link->getPort(ID::B));
+		return GetSize(link->getPort(ID::Y)) > std::max(wa, wb);
+	}
+
+	// Whether `parent` reads `sig` only at `offset` in `port` and as copies of its MSB
+	// above it, through the parent's result width
+	bool sign_extends(Cell *parent, IdString port, int offset, const SigSpec &sig)
+	{
+		SigSpec p = sigmap(parent->getPort(port));
+		SigSpec other = sigmap(parent->getPort(port == ID::A ? ID::B : ID::A));
+		int top = offset + GetSize(sig);
+		if (GetSize(p) < GetSize(parent->getPort(ID::Y)) || !p.extract(0, offset).extract(sig).empty() ||
+		    !other.extract(sig).empty())
+			return false;
+		return p.extract_end(top) == SigSpec(sig[GetSize(sig) - 1], GetSize(p) - top);
+	}
+
+	// Bit position inside a `parent` port at which a child's live result bits `y`
+	// appear, with `port` receiving that port's name. -1 when they are not exactly one
+	// ascending run in exactly one port, since then they have no single scale factor.
+	// The offset is what makes a partial link exact: the child's sum enters the parent
+	// scaled by 2**offset, so every operand of the child does too.
+	int link_offset(const SigSpec &y, Cell *parent, IdString &port)
+	{
 		int n = GetSize(y), offset = -1;
 		for (auto name : {ID::A, ID::B}) {
 			SigSpec p = sigmap(parent->getPort(name));
@@ -345,20 +494,28 @@ struct ArithTreeWorker {
 	// constant zeros above it, which is the one partial coverage a reading based at
 	// the result LSB still gets right: those zeros contribute nothing, so the link
 	// keeps weight 1 and hides no operand.
-	bool covers_port_low(Cell *parent, const SigSpec &sig)
+	bool covers_port_low(Cell *parent, const SigSpec &sig, IdString &port)
 	{
 		for (auto name : {ID::A, ID::B}) {
 			SigSpec p = sigmap(parent->getPort(name));
 			if (GetSize(p) >= GetSize(sig) && p.extract(0, GetSize(sig)) == sig &&
-			    p.extract_end(GetSize(sig)).is_fully_zero())
+			    p.extract_end(GetSize(sig)).is_fully_zero()) {
+				port = name;
 				return true;
+			}
 		}
 		return false;
 	}
 
 	Cell *sole_chainable_consumer(Cell *cell, const pool<Cell *> &candidates, int &offset)
 	{
+		// Top bits a link's bound proves zero may go unread: opt_signif narrows the
+		// consumer past them before wreduce trims them, and dropping zeros loses nothing
 		SigSpec sig = sigmap(cell->getPort(ID::Y));
+		int live = GetSize(sig);
+		while (live > 1 && !fanout.count(sig[live - 1]) && fits_below(cell, live - 1))
+			live--;
+		sig = sig.extract(0, live);
 		offset = 0;
 		Cell *consumer = nullptr;
 		for (auto bit : sig) {
@@ -385,7 +542,7 @@ struct ArithTreeWorker {
 		// misplaces the link's own operands and drops the bits beside it.
 		IdString port;
 		if (opt.bit_offsets) {
-			offset = link_offset(cell, consumer, port);
+			offset = link_offset(sig, consumer, port);
 			if (offset < 0)
 				return nullptr;
 			// A signed port extends from its own MSB, not from any run inside it, so
@@ -394,8 +551,23 @@ struct ArithTreeWorker {
 			if (GetSize(sigmap(consumer->getPort(port))) != GetSize(sig) &&
 			    consumer->getParam(port_signed).as_bool())
 				return nullptr;
-		} else if (!covers_port_low(consumer, sig)) {
+		} else if (!covers_port_low(consumer, sig, port)) {
 			return nullptr;
+		}
+
+		// The link's bits anywhere else in the consumer drop out with it, which only MSB
+		// copies sign-extending a difference that is exact read as signed survive
+		SigSpec rest = sigmap(consumer->getPort(port == ID::A ? ID::B : ID::A));
+		SigSpec own = sigmap(consumer->getPort(port));
+		own.remove(offset, GetSize(sig));
+		rest.append(own);
+		bool sext = false;
+		if (!rest.extract(sig).empty()) {
+			if (!opt.sext_links || !opt.bit_offsets || !sign_extends(consumer, port, offset, sig) ||
+			    !link_exact_signed(cell))
+				return nullptr;
+			sext = true;
+			sext_linked.insert(cell);
 		}
 
 		// A link whose field stops below its consumer's MSB discards a carry the wider
@@ -403,7 +575,7 @@ struct ArithTreeWorker {
 		// only when parent <= offset + link. Flatten it anyway when the link cannot
 		// reach that carry, but only if the consumer zero-extends it: a sign-extended
 		// narrow link means something different from the full-width sum that replaces it.
-		if (offset + GetSize(sig) < GetSize(consumer->getPort(ID::Y))) {
+		if (!sext && offset + GetSize(sig) < GetSize(consumer->getPort(ID::Y))) {
 			bool consumer_extends_unsigned = !consumer->getParam(ID::A_SIGNED).as_bool() &&
 			                                 !consumer->getParam(ID::B_SIGNED).as_bool();
 			if (!consumer_extends_unsigned || link_may_overflow(cell))
@@ -667,7 +839,7 @@ struct ArithTreeWorker {
 					continue;
 				}
 
-				auto [pa, pb] = CompressorTree::reduce_scheduled(module, pps, body, opt.strategy, cell->name); // SILIMATE: Improve the naming
+				auto [pa, pb] = CompressorTree::reduce_scheduled(module, pps, body, opt.strategy, cell->name, nullptr, nullptr, opt.cell_fa); // SILIMATE: Improve the naming
 				SigSpec p = module->addWire(NEW_ID2_SUFFIX("prod"), body); // SILIMATE: Improve the naming
 				module->addAdd(NEW_ID2_SUFFIX("add"), pa, pb, p, false); // SILIMATE: Improve the naming
 				SigSpec np = module->addWire(NEW_ID2_SUFFIX("nprod"), body); // SILIMATE: Improve the naming
@@ -725,7 +897,7 @@ struct ArithTreeWorker {
 		int width = GetSize(result_y);
 		auto pool = build_operand_pool(cell, operands, width, neg_offsets);
 		int final_depth = 0;
-		auto [a, b] = CompressorTree::reduce_scheduled(module, std::move(pool), width, opt.strategy, cell->name, nullptr, &final_depth); // SILIMATE: Improve the naming
+		auto [a, b] = CompressorTree::reduce_scheduled(module, std::move(pool), width, opt.strategy, cell->name, nullptr, &final_depth, opt.cell_fa); // SILIMATE: Improve the naming
 		auto final_choice = CompressorTree::pick_final_adder(width, final_depth, opt.final_mode);
 		CompressorTree::emit_final_adder(module, a, b, result_y, final_choice, cell->name); // SILIMATE: Improve the naming
 	}
@@ -771,6 +943,12 @@ struct ArithTreeWorker {
 					weighted++;
 			if (weighted)
 				log("Reduced %d weighted operand(s) into the tree at %s.\n", weighted, log_id(root));
+			int sext = 0;
+			for (auto c : chain)
+				if (sext_linked.count(c))
+					sext++;
+			if (sext)
+				log("Chained %d sign-extended difference(s) into the tree at %s.\n", sext, log_id(root));
 
 			for (auto c : chain)
 				to_remove.insert(c);
@@ -863,6 +1041,20 @@ struct ArithTreePass : public Pass {
 		log("        a chain and keeps its own carry-propagate adder. Off by default\n");
 		log("        because it admits chains across links the plain reading refuses.\n");
 		log("\n");
+		log("    -sext-links\n");
+		log("        With -bit-offsets, also chain an unsigned difference that its\n");
+		log("        consumer sign-extends by copying its MSB, which is how wreduce\n");
+		log("        leaves a - b narrowed under a wider sum. Such a link is exact read\n");
+		log("        as signed when its result is wider than both operands, so a - b + c\n");
+		log("        reduces as one tree instead of two carry-propagate adders.\n");
+		log("\n");
+		log("    -cell-fa\n");
+		log("        Schedule the tree at the depths of a cell library's full adder,\n");
+		log("        whose carry is one gate from any input and whose sum is two gates\n");
+		log("        from A or B and one from C, instead of the gate network $fa lowers\n");
+		log("        to, whose carry is the later output. Early carries then compress\n");
+		log("        again while their sums are still in flight, and late sums take C.\n");
+		log("\n");
 		log("    -min-width <n>\n");
 		log("        Skip chains and $macc cells whose result is narrower than <n>\n");
 		log("        bits (default 0, i.e. no limit). A compressor level costs about\n");
@@ -912,6 +1104,14 @@ struct ArithTreePass : public Pass {
 			}
 			if (arg == "-bit-offsets") {
 				opt.bit_offsets = true;
+				continue;
+			}
+			if (arg == "-sext-links") {
+				opt.sext_links = true;
+				continue;
+			}
+			if (arg == "-cell-fa") {
+				opt.cell_fa = true;
 				continue;
 			}
 			if (arg == "-min-width" && argidx + 1 < args.size()) {

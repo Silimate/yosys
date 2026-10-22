@@ -175,6 +175,7 @@ struct SubmodWorker
 			new_wire->port_input = new_wire_port_input;
 			new_wire->port_output = new_wire_port_output;
 			new_wire->start_offset = wire->start_offset;
+			new_wire->upto = wire->upto;
 			new_wire->attributes = wire->attributes;
 			if (!flags.is_int_driven.is_fully_zero()) {
 				new_wire->attributes.erase(ID::init);
@@ -261,13 +262,6 @@ struct SubmodWorker
 			return;
 		}
 
-		ct.setup_internals();
-		ct.setup_internals_anyinit();
-		ct.setup_internals_mem();
-		ct.setup_stdcells();
-		ct.setup_stdcells_mem();
-		ct.setup_design(design);
-
 		for (auto port : module->ports) {
 			auto wire = module->wire(port);
 			if (wire->port_output)
@@ -314,6 +308,17 @@ struct SubmodWorker
 			if (submodules.size() == 0)
 				log("Nothing selected -> do nothing.\n");
 		}
+
+		// Set up only when there is work: setup_design walks every module in the design
+		if (submodules.empty())
+			return;
+
+		ct.setup_internals();
+		ct.setup_internals_anyinit();
+		ct.setup_internals_mem();
+		ct.setup_stdcells();
+		ct.setup_stdcells_mem();
+		ct.setup_design(design);
 
 		for (auto &it : submodules)
 			handle_submodule(it.second);
