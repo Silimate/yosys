@@ -193,6 +193,24 @@ TEST_F(VerificImportTest, RouteAllRefsDrivesEveryInstance)
 	}
 }
 
+TEST_F(VerificImportTest, ExtNetsRouteInEveryInstanceOfASharedModule)
+{
+	Design design;
+	analyze(design, "module child(input a, output y); assign y = mid.r & a; endmodule\n"
+			"module mid(input x, a, output y); wire r = ~x; child c(a, y); endmodule\n"
+			"module top(input x1, x2, a, output y1, y2); mid m1(x1, a, y1); mid m2(x2, a, y2); endmodule\n");
+	verific_import(&design, {}, "top");
+	// opt_clean, for the buffers VerificExtNets inserts
+	Pass::call(&design, "flatten; opt_clean");
+	Module *top = design.module(RTLIL::escape_id("top"));
+	ConstEval ce(top);
+	for (auto [name, value] : {std::pair{"x1", 0}, {"x2", 1}, {"a", 1}})
+		ce.set(top->wire(RTLIL::escape_id(name)), Const(value, 1));
+	SigSpec y = {top->wire(ID(y2)), top->wire(ID(y1))};
+	ASSERT_TRUE(ce.eval(y));
+	EXPECT_EQ(y.as_const(), Const(0b01, 2));
+}
+
 YOSYS_NAMESPACE_END
 
 #endif

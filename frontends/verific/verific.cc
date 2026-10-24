@@ -2982,6 +2982,7 @@ struct VerificExtNets
 {
 	int portname_cnt = 0;
 	bool route_all_refs = false; // SILIMATE: VerificImportOptions::route_all_refs
+	pool<Netlist*> visited; // SILIMATE
 
 	// a map from Net to the same Net one level up in the design hierarchy
 	std::map<Net*, Net*> net_level_up_drive_up;
@@ -3137,6 +3138,11 @@ struct VerificExtNets
 
 	void run(Netlist *nl)
 	{
+		// SILIMATE: the first visit fixes nl and everything below it, so a visit through another
+		// instance path would find nothing to do
+		if (!visited.insert(nl).second)
+			return;
+
 		MapIter mi, mi2;
 		Instance *inst;
 		PortRef *pr;
