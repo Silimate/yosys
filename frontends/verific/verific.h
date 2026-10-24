@@ -44,6 +44,13 @@ struct VerificImportOptions {
 	// implies throw_errors: a module whose import fails is left as a black box with its ports, its
 	// error is appended here, and the import goes on with the next module
 	std::vector<VerificImportError> *errors = nullptr;
+	// import an unsupported primitive, such as a switch-level tran or nmos, as an opaque $verific$
+	// cell, as the verific pass's -k does, instead of failing
+	bool blackbox_prims = false;
+	// VerificExtNets also routes the hierarchical references it would cut: those from a module
+	// instantiated more than once, through every instance, and those where a port is the
+	// referenced net itself
+	bool route_all_refs = false;
 };
 
 // SILIMATE: an importer error under VerificImportOptions::throw_errors. The module it interrupted is
@@ -127,6 +134,7 @@ public:
 
 	bool mode_gates, mode_keep, mode_nosva, mode_sva_continue, mode_names, mode_verific;
 	bool mode_autocover, mode_fullinit;
+	bool mode_blackbox_prims = false; // SILIMATE: VerificImportOptions::blackbox_prims
 
 	dict<RTLIL::IdString, int> uniquify_cache;
 
