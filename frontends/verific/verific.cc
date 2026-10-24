@@ -3673,7 +3673,7 @@ static void verific_selective_split_portbuses(Netlist *top, bool split_structs, 
 }
 
 // SILIMATE: verific_import() but for the final verific_cleanup()
-static std::string elaborate_and_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
+static std::string elaborate_and_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top, const VerificImportOptions &options)
 {
 	verific_sva_fsm_limit = 16;
 
@@ -3684,7 +3684,14 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 		verific_params.Insert(i.first.c_str(), i.second.c_str());
 
 	std::set<std::string> top_mod_names;
-	if (top.empty()) {
+	if (!options.netlists.empty()) {
+		verific_error_msg.clear(); // elaboration errors were the caller's
+		for (auto nl : options.netlists) {
+			nl->AddAtt(new Att(" \\top", NULL)); // as import_tops() marks its tops
+			nl_todo.emplace(nl->CellBaseName(), nl);
+			top_mod_names.insert(nl->CellBaseName());
+		}
+	} else if (top.empty()) {
 		import_all("work", &nl_todo, &verific_params, false, "");
 	} else {
 		std::vector<std::string> tops;
@@ -3728,16 +3735,23 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 		}
 
 		if (nl_done.count(it->first) == 0) {
-			VerificImporter importer(false, false, false, false, false, false, false, false);
+			VerificImporter importer(false, false, options.nosva, false, false, false, false, false);
 			nl_done[it->first] = it->second;
 			// SILIMATE: an error leaves no partly imported module behind
 			try {
 				importer.import_netlist(design, nl, nl_todo, top_mod_names.count(nl->CellBaseName()));
 			} catch (VerificImportError &e) {
-				if (importer.module)
-					design->remove(importer.module);
 				e.module = nl->CellBaseName();
-				throw;
+				if (!options.errors) {
+					if (importer.module)
+						design->remove(importer.module);
+					throw;
+				}
+				if (importer.module) {
+					importer.module->makeblackbox();
+					importer.module->fixup_ports();
+				}
+				options.errors->push_back(e);
 			}
 		}
 		nl_todo.erase(it);
@@ -3751,12 +3765,13 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 // SILIMATE: with throw_errors, an error leaves Verific as a return would
 std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top, const VerificImportOptions &options)
 {
-	verific_import_throw = options.throw_errors;
+	bool throwing = options.throw_errors || options.errors;
+	verific_import_throw = throwing;
 	try {
-		top = elaborate_and_import(design, parameters, top);
+		top = elaborate_and_import(design, parameters, top, options);
 	} catch (...) {
 		verific_import_throw = false;
-		if (options.throw_errors) {
+		if (throwing) {
 			verific_error_msg.clear();
 			if (!options.keep_state)
 				verific_cleanup();
