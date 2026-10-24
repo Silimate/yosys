@@ -2552,7 +2552,7 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 
 		if (inst->IsPrimitive())
 		{
-			if (!mode_keep)
+			if (!mode_keep && !mode_blackbox_prims)
 				log_error("%sUnsupported Verific primitive %s of type %s\n", announce_src_location(inst), inst->Name(), inst->View()->Owner()->Name());
 
 			if (!verific_sva_prims.count(inst->Type()))
@@ -2578,7 +2578,7 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 		RTLIL::Cell *cell = module->addCell(inst_name, inst_type);
 		import_attributes(cell->attributes, inst);
 
-		if (inst->IsPrimitive() && mode_keep)
+		if (inst->IsPrimitive() && (mode_keep || mode_blackbox_prims))
 			cell->attributes[ID::keep] = 1;
 
 		dict<IdString, vector<SigBit>> cell_port_conns;
@@ -2981,6 +2981,7 @@ Cell *VerificClocking::addAldff(IdString name, RTLIL::SigSpec sig_aload, RTLIL::
 struct VerificExtNets
 {
 	int portname_cnt = 0;
+	bool route_all_refs = false; // SILIMATE: VerificImportOptions::route_all_refs
 	pool<Netlist*> visited; // SILIMATE
 
 	// a map from Net to the same Net one level up in the design hierarchy
@@ -3057,15 +3058,15 @@ struct VerificExtNets
 	// Handles the case where a net belongs to an external package or global scope
 	// (i.e., there is no common ancestor in the design hierarchy). Creates a fresh
 	// local net in `nl` and disconnects it from the original package/global net.
-	// For input ports the new net will be undriven; for output ports, writes will
-	// not be propagated back to the package/global object.
-	Net *localize_external_package_net(Netlist *nl, Net *net, Port *port)
+	// For reads the new net will be undriven; writes will not be propagated back
+	// to the package/global object.
+	Net *localize_external_package_net(Netlist *nl, Net *net, Port *port, bool reads)
 	{
 		string name = stringf("___extnets_%d", portname_cnt++);
 		Net *new_net = new Net(name.c_str());
 		nl->Add(new_net);
 
-		if (port->IsInput())
+		if (reads)
 			log_warning("Localizing external package/global net reference '%s.%s' on %s.%s; "
 					"reads from the package/global object will return an undriven (floating) value.\n",
 					get_full_netlist_name(net->Owner()).c_str(), net->Name(),
@@ -3079,10 +3080,66 @@ struct VerificExtNets
 		return new_net;
 	}
 
+	// SILIMATE: whether every instance path up from nl passes through ancestor
+	bool all_paths_reach(Netlist *nl, Netlist *ancestor, dict<Netlist*, bool> &memo)
+	{
+		if (nl == ancestor)
+			return true;
+		if (nl->NumOfRefs() == 0)
+			return false;
+		auto it = memo.find(nl);
+		if (it != memo.end())
+			return it->second;
+		bool reach = true;
+		SetIter si;
+		Instance *inst;
+		FOREACH_SET_ITEM(nl->GetReferences(), si, &inst)
+			reach = reach && all_paths_reach(inst->Owner(), ancestor, memo);
+		return memo[nl] = reach;
+	}
+
+	// SILIMATE: a new net in nl carrying ca_net, through a port added on every instance path from
+	// ca_net's netlist down to nl
+	std::map<std::tuple<Net*, Netlist*, bool>, Net*> routed_down;
+	Net *route_down(Net *ca_net, Netlist *nl, bool drive_up)
+	{
+		if (nl == ca_net->Owner())
+			return ca_net;
+		Net *&net = routed_down[{ca_net, nl, drive_up}];
+		if (net == nullptr) {
+			string name = stringf("___extnets_%d", portname_cnt++);
+			Port *port = new Port(name.c_str(), drive_up ? DIR_OUT : DIR_IN);
+			nl->Add(port);
+			net = new Net(name.c_str());
+			nl->Add(net);
+			net->Connect(port);
+			SetIter si;
+			Instance *inst;
+			FOREACH_SET_ITEM(nl->GetReferences(), si, &inst)
+				inst->Connect(port, route_down(ca_net, inst->Owner(), drive_up));
+		}
+		return net;
+	}
+
+	// SILIMATE: route a reference from nl to net through every instance path, for when nl or one
+	// of its parents is instantiated more than once; null if no netlist above net's is on them all
+	Net *route_all_paths(Netlist *nl, Net *net, bool reads)
+	{
+		Netlist *ca_nl = net->Owner();
+		while (true) {
+			dict<Netlist*, bool> memo;
+			if (all_paths_reach(nl, ca_nl, memo))
+				return route_down(route_up(net, reads, ca_nl), nl, !reads);
+			if (ca_nl->NumOfRefs() != 1)
+				return nullptr;
+			ca_nl = ((Instance*)ca_nl->GetReferences()->GetLast())->Owner();
+		}
+	}
+
 	void run(Netlist *nl)
 	{
-		// SILIMATE: the first visit fixes every external reference held by an instance in nl or
-		// below it, so a visit through another instance path would find nothing to do
+		// SILIMATE: the first visit fixes nl and everything below it, so a visit through another
+		// instance path would find nothing to do
 		if (!visited.insert(nl).second)
 			return;
 
@@ -3094,6 +3151,23 @@ struct VerificExtNets
 
 		FOREACH_INSTANCE_OF_NETLIST(nl, mi, inst)
 			run(inst->View());
+
+		// SILIMATE: a port that is the referenced net itself
+		if (route_all_refs) {
+			Port *port;
+			vector<Port*> ext_ports;
+			FOREACH_PORT_OF_NETLIST(nl, mi, port)
+				if (port->GetNet() && port->GetNet()->IsExternalTo(nl))
+					ext_ports.push_back(port);
+			for (auto port : ext_ports) {
+				Net *net = port->GetNet();
+				Net *new_net = route_all_paths(nl, net, !port->IsInput());
+				if (new_net == nullptr)
+					new_net = localize_external_package_net(nl, net, port, !port->IsInput());
+				net->Disconnect(port);
+				new_net->Connect(port);
+			}
+		}
 
 		FOREACH_INSTANCE_OF_NETLIST(nl, mi, inst)
 		FOREACH_PORTREF_OF_INST(inst, mi2, pr)
@@ -3115,9 +3189,15 @@ struct VerificExtNets
 			Netlist *ca_nl = find_common_ancestor(nl, ext_nl);
 
 			if (ca_nl == nullptr) {
-				Net *new_net = localize_external_package_net(nl, net, port);
-				if (verific_verbose)
-					log(" localized external package/global net: %s\n", new_net->Name());
+				Net *new_net = route_all_refs ? route_all_paths(nl, net, !port->IsOutput()) : nullptr;
+				if (new_net != nullptr) {
+					if (verific_verbose)
+						log(" routed through every instance path: %s\n", new_net->Name());
+				} else {
+					new_net = localize_external_package_net(nl, net, port, port->IsInput());
+					if (verific_verbose)
+						log(" localized external package/global net: %s\n", new_net->Name());
+				}
 				todo_connect.push_back(tuple<Instance*, Port*, Net*>(inst, port, new_net));
 				continue;
 			}
@@ -3679,7 +3759,7 @@ static void verific_selective_split_portbuses(Netlist *top, bool split_structs, 
 }
 
 // SILIMATE: verific_import() but for the final verific_cleanup()
-static std::string elaborate_and_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
+static std::string elaborate_and_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top, const VerificImportOptions &options)
 {
 	verific_sva_fsm_limit = 16;
 
@@ -3690,7 +3770,14 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 		verific_params.Insert(i.first.c_str(), i.second.c_str());
 
 	std::set<std::string> top_mod_names;
-	if (top.empty()) {
+	if (!options.netlists.empty()) {
+		verific_error_msg.clear(); // elaboration errors were the caller's
+		for (auto nl : options.netlists) {
+			nl->AddAtt(new Att(" \\top", NULL)); // as import_tops() marks its tops
+			nl_todo.emplace(nl->CellBaseName(), nl);
+			top_mod_names.insert(nl->CellBaseName());
+		}
+	} else if (top.empty()) {
 		import_all("work", &nl_todo, &verific_params, false, "");
 	} else {
 		std::vector<std::string> tops;
@@ -3718,6 +3805,7 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 		verific_selective_split_portbuses(nl.second, !no_split_struct, !no_split_array);
 
 	VerificExtNets worker;
+	worker.route_all_refs = options.route_all_refs;
 	for (auto nl : nl_todo)
 		worker.run(nl.second);
 
@@ -3734,16 +3822,24 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 		}
 
 		if (nl_done.count(it->first) == 0) {
-			VerificImporter importer(false, false, false, false, false, false, false, false);
+			VerificImporter importer(false, false, options.nosva, false, false, false, false, false);
+			importer.mode_blackbox_prims = options.blackbox_prims;
 			nl_done[it->first] = it->second;
 			// SILIMATE: an error leaves no partly imported module behind
 			try {
 				importer.import_netlist(design, nl, nl_todo, top_mod_names.count(nl->CellBaseName()));
 			} catch (VerificImportError &e) {
-				if (importer.module)
-					design->remove(importer.module);
 				e.module = nl->CellBaseName();
-				throw;
+				if (!options.errors) {
+					if (importer.module)
+						design->remove(importer.module);
+					throw;
+				}
+				if (importer.module) {
+					importer.module->makeblackbox();
+					importer.module->fixup_ports();
+				}
+				options.errors->push_back(e);
 			}
 		}
 		nl_todo.erase(it);
@@ -3757,12 +3853,13 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 // SILIMATE: with throw_errors, an error leaves Verific as a return would
 std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top, const VerificImportOptions &options)
 {
-	verific_import_throw = options.throw_errors;
+	bool throwing = options.throw_errors || options.errors;
+	verific_import_throw = throwing;
 	try {
-		top = elaborate_and_import(design, parameters, top);
+		top = elaborate_and_import(design, parameters, top, options);
 	} catch (...) {
 		verific_import_throw = false;
-		if (options.throw_errors) {
+		if (throwing) {
 			verific_error_msg.clear();
 			if (!options.keep_state)
 				verific_cleanup();

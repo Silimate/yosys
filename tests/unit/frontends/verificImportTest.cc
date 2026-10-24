@@ -75,6 +75,124 @@ TEST_F(VerificImportTest, ThrowErrorsResetsVerificUnlessKeepState)
 	EXPECT_EQ(veri_file::GetModule("top"), nullptr);
 }
 
+TEST_F(VerificImportTest, NosvaDropsAssertions)
+{
+	Design with, without;
+	analyze(with, "module top(input clk, a); assert property (@(posedge clk) a); endmodule\n");
+	verific_import(&with, {}, "top", {.keep_state = true});
+	verific_import(&without, {}, "top", {.nosva = true});
+	auto asserts = [](Design &d) {
+		int n = 0;
+		for (auto cell : d.module(RTLIL::escape_id("top"))->cells())
+			n += cell->type == ID($assert);
+		return n;
+	};
+	EXPECT_EQ(asserts(with), 1);
+	EXPECT_EQ(asserts(without), 0);
+}
+
+TEST_F(VerificImportTest, NetlistsImportTheCallersElaboration)
+{
+	Design design;
+	analyze(design, "module sub #(parameter W = 1) (input [W-1:0] a, output [W-1:0] y);\n"
+			"  assign y = a & {W{top.en}};\n"
+			"endmodule\n"
+			"module top #(parameter W = 1) (input en, input [W-1:0] a, output [W-1:0] y);\n"
+			"  sub #(W) u(a, y);\n"
+			"endmodule\n");
+	Map params(STRING_HASH);
+	params.Insert("W", "4");
+	ASSERT_TRUE(veri_file::Elaborate("top", "work", &params));
+	verific_import(&design, {}, "", {.throw_errors = true, .netlists = {Netlist::PresentDesign()}});
+	ASSERT_EQ(GetSize(design.modules()), 2);
+	EXPECT_EQ(design.module(RTLIL::escape_id("top"))->wire(RTLIL::escape_id("a"))->width, 4);
+	Module *sub = design.module(RTLIL::escape_id("sub(W=4)"));
+	ASSERT_NE(sub, nullptr);
+	// VerificExtNets gave sub ports for top.en
+	EXPECT_GT(GetSize(sub->ports), 2);
+}
+
+TEST_F(VerificImportTest, ErrorsLeaveTheFailingModuleAsABlackBox)
+{
+	Design design;
+	analyze(design, "module bad(inout a, b); tran t(a, b); endmodule\n"
+			"module good(input a, output y); assign y = a; endmodule\n"
+			"module top(inout a, b, output y); bad u(a, b); good g(a, y); endmodule\n");
+	std::vector<VerificImportError> errors;
+	verific_import(&design, {}, "top", {.errors = &errors});
+	ASSERT_EQ(GetSize(errors), 1);
+	EXPECT_EQ(errors[0].module, "bad");
+	EXPECT_THAT(errors[0].what(), testing::HasSubstr("Unsupported Verific primitive"));
+	Module *bad = design.module(RTLIL::escape_id("bad"));
+	ASSERT_NE(bad, nullptr);
+	EXPECT_TRUE(bad->get_blackbox_attribute());
+	EXPECT_EQ(GetSize(bad->ports), 2);
+	EXPECT_EQ(bad->cells().size(), 0u);
+	// the import went on after bad
+	EXPECT_NE(design.module(RTLIL::escape_id("good")), nullptr);
+}
+
+TEST_F(VerificImportTest, BlackboxPrimsKeepSwitchPrimitives)
+{
+	Design design;
+	analyze(design, "module top(inout a, b, input g, gn, output y, z);\n"
+			"  tran(a, b); rtran(a, b); tranif0(a, b, g); tranif1(a, b, g); rtranif0(a, b, g); rtranif1(a, b, g);\n"
+			"  nmos(y, a, g); pmos(y, a, g); rnmos(y, a, g); rpmos(y, a, g); cmos(y, a, g, gn); rcmos(y, a, g, gn);\n"
+			"  assign z = g & gn;\n"
+			"endmodule\n");
+	verific_import(&design, {}, "top", {.throw_errors = true, .blackbox_prims = true});
+	int prims = 0, ands = 0;
+	for (auto cell : design.module(RTLIL::escape_id("top"))->cells()) {
+		ands += cell->type == ID($and);
+		if (!cell->type.begins_with("$verific$"))
+			continue;
+		prims++;
+		EXPECT_TRUE(cell->get_bool_attribute(ID::keep));
+		ASSERT_NE(design.module(cell->type), nullptr);
+		EXPECT_TRUE(design.module(cell->type)->get_blackbox_attribute());
+	}
+	EXPECT_EQ(prims, 12);
+	EXPECT_EQ(ands, 1);
+}
+
+TEST_F(VerificImportTest, RouteAllRefsDrivesEveryInstance)
+{
+	Design design;
+	analyze(design, "module leaf(input d); wire s = ~d; endmodule\n"
+			"module mid(input d); leaf l(d); endmodule\n"
+			"module child(input a, output y, z, w);\n"
+			"  assign y = top.x; // a port that is the referenced net\n"
+			"  assign z = top.x & a;\n"
+			"  assign w = top.m1.l.s;\n"
+			"endmodule\n"
+			"module wrap(input a, output y, z, w); child c(a, y, z, w); endmodule\n"
+			"module top(input x, a, b, d, e, output y1, z1, w1, y2, z2, w2);\n"
+			"  mid m1(d);\n"
+			"  mid m2(e);\n"
+			"  wrap u1(a, y1, z1, w1);\n"
+			"  wrap u2(b, y2, z2, w2);\n"
+			"endmodule\n");
+	verific_import(&design, {}, "top", {.throw_errors = true, .route_all_refs = true});
+	Pass::call(&design, "flatten");
+	Module *top = design.module(RTLIL::escape_id("top"));
+	for (int x = 0; x < 2; x++)
+	for (int d = 0; d < 2; d++) {
+		ConstEval ce(top);
+		for (auto [name, value] : {std::pair{"x", x}, {"a", 1}, {"b", 0}, {"d", d}, {"e", 0}})
+			ce.set(top->wire(RTLIL::escape_id(name)), Const(value, 1));
+		auto eval = [&](const char *name) {
+			SigSpec sig = top->wire(RTLIL::escape_id(name));
+			return ce.eval(sig) ? sig.as_int() : -1; // -1: undriven
+		};
+		EXPECT_EQ(eval("y1"), x);
+		EXPECT_EQ(eval("y2"), x);
+		EXPECT_EQ(eval("z1"), x);
+		EXPECT_EQ(eval("z2"), 0);
+		EXPECT_EQ(eval("w1"), !d);
+		EXPECT_EQ(eval("w2"), !d);
+	}
+}
+
 TEST_F(VerificImportTest, ExtNetsRouteInEveryInstanceOfASharedModule)
 {
 	Design design;
