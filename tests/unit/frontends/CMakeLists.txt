@@ -3,5 +3,7 @@ if (YOSYS_ENABLE_VERIFIC AND "systemverilog" IN_LIST YOSYS_VERIFIC_FEATURES)
 		verificImportTest.cc
 		COMPONENTS
 			read_verific
+			flatten
+			opt_clean
 	)
 endif()

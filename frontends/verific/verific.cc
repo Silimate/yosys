@@ -2981,6 +2981,7 @@ Cell *VerificClocking::addAldff(IdString name, RTLIL::SigSpec sig_aload, RTLIL::
 struct VerificExtNets
 {
 	int portname_cnt = 0;
+	pool<Netlist*> visited; // SILIMATE
 
 	// a map from Net to the same Net one level up in the design hierarchy
 	std::map<Net*, Net*> net_level_up_drive_up;
@@ -3080,6 +3081,11 @@ struct VerificExtNets
 
 	void run(Netlist *nl)
 	{
+		// SILIMATE: the first visit fixes every external reference held by an instance in nl or
+		// below it, so a visit through another instance path would find nothing to do
+		if (!visited.insert(nl).second)
+			return;
+
 		MapIter mi, mi2;
 		Instance *inst;
 		PortRef *pr;
