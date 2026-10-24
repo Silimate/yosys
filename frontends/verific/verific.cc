@@ -113,6 +113,11 @@ using namespace Verific;
 #ifdef YOSYS_ENABLE_VERIFIC
 YOSYS_NAMESPACE_BEGIN
 
+// SILIMATE: the importer's errors throw under verific_import()'s throw_errors (verific.h), up to
+// the #undef after verific_import()
+#define log_error verific_import_error
+#define log_cmd_error verific_import_cmd_error
+
 int verific_verbose;
 bool verific_import_pending;
 string verific_error_msg;
@@ -121,6 +126,7 @@ bool verific_opt; // SILIMATE: enable Verific optimizations
 bool verific_no_split_complex_ports; // SILIMATE: disable splitting of all complex ports (structs + arrays)
 bool verific_no_split_struct_ports; // SILIMATE: keep struct/record ports flat
 bool verific_no_split_array_ports; // SILIMATE: keep multi-dimensional array ports flat
+bool verific_import_throw; // SILIMATE
 
 #ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
 vector<string> verific_incdirs, verific_libdirs, verific_libexts;
@@ -3666,7 +3672,8 @@ static void verific_selective_split_portbuses(Netlist *top, bool split_structs, 
 		it.first->Add(it.second);
 }
 
-std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
+// SILIMATE: verific_import() but for the final verific_cleanup()
+static std::string elaborate_and_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
 {
 	verific_sva_fsm_limit = 16;
 
@@ -3723,16 +3730,49 @@ std::string verific_import(Design *design, const std::map<std::string,std::strin
 		if (nl_done.count(it->first) == 0) {
 			VerificImporter importer(false, false, false, false, false, false, false, false);
 			nl_done[it->first] = it->second;
-			importer.import_netlist(design, nl, nl_todo, top_mod_names.count(nl->CellBaseName()));
+			// SILIMATE: an error leaves no partly imported module behind
+			try {
+				importer.import_netlist(design, nl, nl_todo, top_mod_names.count(nl->CellBaseName()));
+			} catch (VerificImportError &e) {
+				if (importer.module)
+					design->remove(importer.module);
+				e.module = nl->CellBaseName();
+				throw;
+			}
 		}
 		nl_todo.erase(it);
 	}
 
-	verific_cleanup();
 	if (!verific_error_msg.empty())
 		log_error("%s\n", verific_error_msg);
 	return top;
 }
+
+// SILIMATE: with throw_errors, an error leaves Verific as a return would
+std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top, const VerificImportOptions &options)
+{
+	verific_import_throw = options.throw_errors;
+	try {
+		top = elaborate_and_import(design, parameters, top);
+	} catch (...) {
+		verific_import_throw = false;
+		if (options.throw_errors) {
+			verific_error_msg.clear();
+			if (!options.keep_state)
+				verific_cleanup();
+		}
+		throw;
+	}
+	verific_import_throw = false;
+	if (options.keep_state)
+		verific_import_pending = false; // so hierarchy doesn't import again
+	else
+		verific_cleanup();
+	return top;
+}
+
+#undef log_error
+#undef log_cmd_error
 
 YOSYS_NAMESPACE_END
 #endif /* YOSYS_ENABLE_VERIFIC */

@@ -32,9 +32,41 @@ extern bool verific_no_split_complex_ports; // SILIMATE: disable splitting of al
 extern bool verific_no_split_struct_ports; // SILIMATE: keep struct/record ports flat
 extern bool verific_no_split_array_ports; // SILIMATE: keep multi-dimensional array ports flat
 
+// SILIMATE: options for direct callers of verific_import(); the defaults are the verific pass's
+struct VerificImportOptions {
+	bool keep_state = false; // skip the final verific_cleanup(), leaving Verific's state to the caller
+	bool throw_errors = false; // an importer error throws VerificImportError instead of ending the process
+};
+
+// SILIMATE: an importer error under VerificImportOptions::throw_errors. The module it interrupted is
+// removed from the design first, and Verific is reset unless keep_state is set.
+struct VerificImportError : std::runtime_error {
+	std::string module; // the HDL name of the module being imported, empty if none
+	VerificImportError(const std::string &msg) : std::runtime_error(msg.substr(0, msg.find_last_not_of('\n') + 1)) { }
+};
+
 extern bool verific_import_pending;
-extern std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top = std::string());
+extern std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top = std::string(), const VerificImportOptions &options = {});
 extern void verific_setup(); // SILIMATE: the verific pass's global flags and message routing
+extern void verific_cleanup(); // SILIMATE: the reset verific_import() ends with, for keep_state callers
+
+// SILIMATE: verific.cc and verificsva.cc route the importer's log_error() and log_cmd_error() here,
+// which throw instead while verific_import() runs with throw_errors
+extern bool verific_import_throw;
+template <typename... Args>
+[[noreturn]] void verific_import_error(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	if (verific_import_throw)
+		throw VerificImportError(fmt.format(args...));
+	log_error(fmt, args...);
+}
+template <typename... Args>
+[[noreturn]] void verific_import_cmd_error(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	if (verific_import_throw)
+		throw VerificImportError(fmt.format(args...));
+	log_cmd_error(fmt, args...);
+}
 
 extern pool<int> verific_sva_prims;
 
@@ -77,7 +109,7 @@ struct VerificImporter
 private:
 	void recurse_mem_dimensions(RTLIL::Module *module, RTLIL::Memory *memory, Verific::Net *net, const char *&ascii_initdata, int max_bits_in_addr, const RTLIL::SigSpec &prefix, Verific::TypeRange *typeRange = nullptr);
 public:
-	RTLIL::Module *module;
+	RTLIL::Module *module = nullptr; // SILIMATE: verific_import() removes it on an error
 	Verific::Netlist *netlist;
 
 	std::map<Verific::Net*, RTLIL::SigBit> net_map;

@@ -80,6 +80,9 @@ USING_YOSYS_NAMESPACE
 using namespace Verific;
 #endif
 
+// SILIMATE: the importer's errors throw under verific_import()'s throw_errors (verific.h)
+#define log_error verific_import_error
+
 #ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
 PRIVATE_NAMESPACE_BEGIN
 
