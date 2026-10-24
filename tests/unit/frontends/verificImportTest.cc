@@ -36,6 +36,7 @@ TEST_F(VerificImportTest, KeepStateAllowsAnotherImport)
 	analyze(first, "module top(input a, output y); assign y = ~a; endmodule\n");
 	verific_import(&first, {}, "top", {.keep_state = true});
 	EXPECT_NE(first.module(RTLIL::escape_id("top")), nullptr);
+	EXPECT_FALSE(verific_import_pending);
 	ASSERT_NE(veri_file::GetModule("top"), nullptr);
 	verific_import(&second, {}, "top");
 	EXPECT_NE(second.module(RTLIL::escape_id("top")), nullptr);

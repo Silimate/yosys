@@ -3764,7 +3764,9 @@ std::string verific_import(Design *design, const std::map<std::string,std::strin
 		throw;
 	}
 	verific_import_throw = false;
-	if (!options.keep_state)
+	if (options.keep_state)
+		verific_import_pending = false; // so hierarchy doesn't import again
+	else
 		verific_cleanup();
 	return top;
 }
