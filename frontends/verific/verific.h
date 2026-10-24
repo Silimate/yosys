@@ -32,14 +32,23 @@ extern bool verific_no_split_complex_ports; // SILIMATE: disable splitting of al
 extern bool verific_no_split_struct_ports; // SILIMATE: keep struct/record ports flat
 extern bool verific_no_split_array_ports; // SILIMATE: keep multi-dimensional array ports flat
 
+struct VerificImportError;
+
 // SILIMATE: options for direct callers of verific_import(); the defaults are the verific pass's
 struct VerificImportOptions {
 	bool keep_state = false; // skip the final verific_cleanup(), leaving Verific's state to the caller
 	bool throw_errors = false; // an importer error throws VerificImportError instead of ending the process
+	bool nosva = false; // ignore SVA properties, as the verific pass's -nosva does
+	// import these elaborated top netlists and what they instantiate, instead of elaborating
+	std::vector<Verific::Netlist*> netlists;
+	// implies throw_errors: a module whose import fails is left as a black box with its ports, its
+	// error is appended here, and the import goes on with the next module
+	std::vector<VerificImportError> *errors = nullptr;
 };
 
 // SILIMATE: an importer error under VerificImportOptions::throw_errors. The module it interrupted is
-// removed from the design first, and Verific is reset unless keep_state is set.
+// removed from the design first (made a black box under errors), and Verific is reset unless
+// keep_state is set.
 struct VerificImportError : std::runtime_error {
 	std::string module; // the HDL name of the module being imported, empty if none
 	VerificImportError(const std::string &msg) : std::runtime_error(msg.substr(0, msg.find_last_not_of('\n') + 1)) { }
