@@ -725,7 +725,8 @@ struct ArithTreeWorker {
 	}
 
 	std::vector<Operand> extract_chain_operands(const pool<Cell *> &chain, Cell *root, const dict<Cell *, Cell *> &parent_of,
-						    const dict<Cell *, int> &link_off, std::vector<int> &neg_offsets)
+						    const dict<Cell *, int> &link_off, std::vector<int> &neg_offsets,
+						    pool<Cell *> &chain_fused)
 	{
 		pool<SigBit> chain_bits = internal_bits(chain);
 		int width = GetSize(root->getPort(ID::Y));
@@ -848,7 +849,7 @@ struct ArithTreeWorker {
 			if (GetSize(a) > GetSize(b))
 				std::swap(a, b);
 			operands.push_back({a, false, false, b, false, ps[0].column});
-			fused.insert(mul);
+			chain_fused.insert(mul);
 			for (auto bit : sigmap(mul->getPort(ID::Y)))
 				taken.insert(bit);
 		}
@@ -990,25 +991,30 @@ struct ArithTreeWorker {
 		// one row: a hand-split multiply's tiles otherwise each take a row of their
 		// own, which the tree pays for in levels the full product would not need
 		std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) { return a.depth != b.depth ? a.depth < b.depth : a.lo < b.lo; });
-		std::vector<std::pair<std::vector<SigBit>, int>> lines;
+		// Rows come in arrival order, so a line's first row is its earliest
+		struct Line {
+			std::vector<SigBit> bits;
+			int first, last;
+		};
+		std::vector<Line> lines;
 		for (auto &r : rows) {
-			auto fits = [&](std::pair<std::vector<SigBit>, int> &line) {
-				if (r.depth - line.second >= CompressorTree::FA_GATE_DEPTH)
+			auto fits = [&](const Line &line) {
+				if (r.depth - line.first >= CompressorTree::FA_GATE_DEPTH)
 					return false;
 				for (int i = 0; i < GetSize(r.bits); i++)
-					if (line.first[r.lo + i] != State::S0)
+					if (line.bits[r.lo + i] != State::S0)
 						return false;
 				return true;
 			};
 			auto line = std::find_if(lines.begin(), lines.end(), fits);
 			if (line == lines.end())
-				line = lines.insert(lines.end(), {std::vector<SigBit>(width, State::S0), r.depth});
+				line = lines.insert(lines.end(), {std::vector<SigBit>(width, State::S0), r.depth, r.depth});
 			for (int i = 0; i < GetSize(r.bits); i++)
-				line->first[r.lo + i] = r.bits[i];
-			line->second = std::max(line->second, r.depth);
+				line->bits[r.lo + i] = r.bits[i];
+			line->last = r.depth;
 		}
-		for (auto &[bits, depth] : lines)
-			pool.push_back({SigSpec(bits), depth});
+		for (auto &line : lines)
+			pool.push_back({SigSpec(line.bits), line.last});
 
 		if (!neg_offsets.empty())
 			pool.push_back({neg_correction(neg_offsets, width), 0});
@@ -1090,9 +1096,11 @@ struct ArithTreeWorker {
 			if (chain.size() < 2)
 				continue;
 
+			// Products taken as rows are only gone once the tree replacing them is built
 			std::vector<int> neg_offsets;
-			auto operands = extract_chain_operands(chain, root, parent_of, link_off, neg_offsets);
-			if (operands.size() < 3)
+			pool<Cell *> chain_fused;
+			auto operands = extract_chain_operands(chain, root, parent_of, link_off, neg_offsets, chain_fused);
+			if (operands.size() < 3 && chain_fused.empty())
 				continue;
 
 			// Only -bit-offsets can put an operand above the result LSB, so this
@@ -1114,6 +1122,8 @@ struct ArithTreeWorker {
 				to_remove.insert(c);
 
 			emit_tree(root, operands, root->getPort(ID::Y), neg_offsets);
+			for (auto mul : chain_fused)
+				fused.insert(mul);
 		}
 
 		if (!fused.empty())

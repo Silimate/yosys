@@ -125,3 +125,24 @@ equiv_opt -assert arith_tree -fma-chains
 design -load postopt
 select -assert-count 2 t:$mul
 design -reset
+
+# A product read in two slices can leave the chain with fewer than three operands
+# once the slices merge back into it; the chain is still rebuilt around the rows,
+# and the product only goes once that tree exists
+read_verilog <<EOT
+module two_slices(
+	input [3:0] a, b,
+	input [7:0] c,
+	output [7:0] y
+);
+	wire [7:0] m = a * b;
+	wire [7:0] t = m[3:0] + c;
+	assign y = t + {m[7:4], 4'b0};
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets -fma-chains
+design -load postopt
+select -assert-count 0 t:$mul
+design -reset
