@@ -1,0 +1,48 @@
+# A prefix final adder over sign- or zero-extended operands is built only as wide as their sum
+# (2w-1 XORs for a w-bit sum) and its MSB extended, instead of over every output bit
+
+read_verilog <<EOT
+module prefix_signed(
+	input signed [3:0] a, b, c,
+	output signed [15:0] y
+);
+	assign y = a + b + c;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix
+design -load postopt
+select -assert-count 11 t:$_XOR_
+design -reset
+
+read_verilog <<EOT
+module prefix_unsigned(
+	input [3:0] a, b, c,
+	output [15:0] y
+);
+	assign y = a + b + c;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix
+design -load postopt
+select -assert-count 13 t:$_XOR_
+design -reset
+
+read_verilog <<EOT
+module prefix_mixed(
+	input signed [3:0] a,
+	input [5:0] b, c,
+	output signed [15:0] y
+);
+	assign y = a + $signed({1'b0, b}) + $signed({1'b0, c});
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix
+design -load postopt
+select -assert-count 17 t:$_XOR_
+design -reset

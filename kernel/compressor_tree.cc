@@ -316,6 +316,22 @@ void emit_kogge_stone(Module *module, SigSpec a, SigSpec b, SigSpec y, IdString 
 	if (width == 0)
 		return;
 
+	// SILIMATE: operands sign-extended from bits ka-1 and kb-1 sum to a max(ka, kb) + 1 bit signed
+	// value, so build the prefix tree only that wide and extend its MSB
+	auto sext_width = [](const SigSpec &s) {
+		int k = GetSize(s);
+		while (k > 1 && s[k - 2] == s[k - 1])
+			k--;
+		return k;
+	};
+	int sum_width = std::max(sext_width(a), sext_width(b)) + 1;
+	if (sum_width < width) {
+		emit_kogge_stone(module, a.extract(0, sum_width), b.extract(0, sum_width), y.extract(0, sum_width), cell_name);
+		for (int i = sum_width; i < width; i++)
+			module->connect(y[i], y[sum_width - 1]);
+		return;
+	}
+
 	if (width == 1) {
 		module->addXorGate(NEW_ID3_SUFFIX("ks_sum"), a[0], b[0], y[0]); // SILIMATE: Improve the naming
 		return;
