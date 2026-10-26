@@ -1,0 +1,9 @@
+# -gate_delays rejects a delay that is not a number
+read_verilog <<EOT
+module top(input a, b, s, output y);
+  assign y = s ? a : b;
+endmodule
+EOT
+techmap
+logger -expect error "Invalid -gate_delays entry 'MUX.S=slow'" 1
+abc -g cmos -gate_delays MUX.S=slow
