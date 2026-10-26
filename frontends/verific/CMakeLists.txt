@@ -47,6 +47,14 @@ elseif (NOT TARGET verific)
 	endif()
 endif()
 
+# silimate: installed for code that calls the importer directly
+if (YOSYS_ENABLE_VERIFIC)
+	list(APPEND verific_data_files
+		include/frontends/verific/verific.h verific.h
+		include/frontends/verific/rtl_bind.h rtl_bind.h
+	)
+endif()
+
 yosys_frontend(verific
 	verific.cc
 	verific.h
