@@ -1,0 +1,127 @@
+# -fma-chains expands a product an add chain is the only reader of into that
+# chain's tree, as FMA fusion does for a $macc. Without the option the product
+# stays a leaf.
+read_verilog <<EOT
+module mac_chain(
+	input [3:0] a, b,
+	input [7:0] c, d,
+	output [7:0] y
+);
+	assign y = a * b + c + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+design -save gold
+arith_tree
+select -assert-count 1 t:$mul
+design -load gold
+equiv_opt -assert arith_tree -fma-chains
+design -load postopt
+select -assert-count 0 t:$mul
+select -assert-count 1 t:$add
+design -reset
+
+# A hand-split multiply: each tile enters at its own column and the rows of tiles
+# sharing no column pack into one, so the tree reduces the full product's rows.
+read_verilog <<EOT
+module split_mul(
+	input [7:0] a,
+	input [5:0] b,
+	output [13:0] y
+);
+	wire [7:0] ll = a[3:0] * b[2:0];
+	wire [7:0] hl = a[7:4] * b[2:0];
+	wire [7:0] lh = a[3:0] * b[5:3];
+	wire [7:0] hh = a[7:4] * b[5:3];
+	assign y = (hh << 7) + (lh << 3) + (hl << 4) + ll;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -bit-offsets -fma-chains
+design -load postopt
+select -assert-count 0 t:$mul
+select -assert-count 1 t:$add
+design -reset
+
+# A product something else reads, or a signed one, stays a leaf
+read_verilog <<EOT
+module shared_product(
+	input [3:0] a, b,
+	input signed [3:0] e, f,
+	input [7:0] c, d,
+	output [7:0] y, z,
+	output p
+);
+	wire [7:0] m = a * b;
+	wire signed [7:0] n = e * f;
+	assign y = m + c + d;
+	assign p = m[3];
+	assign z = n + c + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -fma-chains
+design -load postopt
+select -assert-count 2 t:$mul
+design -reset
+
+# So does one truncated below the sum: the chain sees its wrapped value
+read_verilog <<EOT
+module truncated_product(
+	input [3:0] a, b,
+	input [9:0] c, d,
+	output [9:0] y
+);
+	wire [5:0] m = a * b;
+	assign y = m + c + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -fma-chains
+design -load postopt
+select -assert-count 1 t:$mul
+design -reset
+
+# Truncation at or above the sum's top is harmless, as the sum drops those bits too
+read_verilog <<EOT
+module truncated_above(
+	input [3:0] a, b,
+	input [5:0] c, d,
+	output [5:0] y
+);
+	wire [5:0] m = a * b;
+	assign y = m + c + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -fma-chains
+design -load postopt
+select -assert-count 0 t:$mul
+design -reset
+
+# Expanding a product only shortens the sum if it arrives after everything else
+# the sum adds. Here a product the chain cannot take, as something else reads it,
+# arrives as late, so the fusable one stays a leaf too.
+read_verilog <<EOT
+module late_sibling(
+	input [3:0] a, b, e, f,
+	input [7:0] c,
+	output [7:0] y,
+	output p
+);
+	wire [7:0] m = e * f;
+	assign y = a * b + m + c;
+	assign p = m[3];
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -fma-chains
+design -load postopt
+select -assert-count 2 t:$mul
+design -reset

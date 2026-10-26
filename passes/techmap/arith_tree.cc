@@ -34,6 +34,8 @@ struct ArithTreeOptions {
 	bool sext_links = false;
 	// Schedule at a library full adder's depths (see CompressorTree::fa_depths)
 	bool cell_fa = false;
+	// Expand a product a chain is the only reader of into the chain's own tree
+	bool fma_chains = false;
 };
 
 // Widen each adder back over the low bits opt_expr stripped from it, so the adder feeding it has one reader
@@ -104,6 +106,7 @@ struct ArithTreeWorker {
 	pool<Cell *> alu;
 	pool<Cell *> macc;
 	pool<Cell *> sext_linked;
+	pool<Cell *> fused;
 
 	struct Operand {
 		SigSpec sig;
@@ -692,10 +695,51 @@ struct ArithTreeWorker {
 		}
 	}
 
+	// A run of a product's result bits read at `column`, the column of result bit 0
+	struct Piece {
+		int bit, len, column;
+	};
+
+	// Whether `pieces` read every bit `mul` can set exactly once each, at one column,
+	// with nothing else reading the product, so the chain's tree can take it as rows.
+	// The bits read must hold the whole product unless the rest lands at or above
+	// the top of the `width`-bit sum.
+	bool fusable(Cell *mul, std::vector<Piece> &pieces, const dict<SigBit, int> &reads, int width)
+	{
+		std::sort(pieces.begin(), pieces.end(), [](const Piece &a, const Piece &b) { return a.bit < b.bit; });
+		int w = 0;
+		for (auto &p : pieces) {
+			if (p.bit != w || p.column != pieces[0].column)
+				return false;
+			w += p.len;
+		}
+		SigSpec y = sigmap(mul->getPort(ID::Y));
+		for (int i = 0; i < GetSize(y); i++)
+			if (fanout.count(y[i]) && fanout.at(y[i]) != (i < w ? 1 : 0))
+				return false;
+		for (int i = 0; i < w; i++)
+			if (reads.at(y[i], 0) != 1)
+				return false;
+		uint64_t b = cell_bound(mul);
+		return pieces[0].column + w >= width || (b != UINT64_MAX && (w >= 64 || (b >> w) == 0));
+	}
+
 	std::vector<Operand> extract_chain_operands(const pool<Cell *> &chain, Cell *root, const dict<Cell *, Cell *> &parent_of,
 						    const dict<Cell *, int> &link_off, std::vector<int> &neg_offsets)
 	{
 		pool<SigBit> chain_bits = internal_bits(chain);
+		int width = GetSize(root->getPort(ID::Y));
+		// -fma-chains: unsigned product bits the chain reads, by product; the operands
+		// holding them, split once it is known which products fuse; and how often each
+		// bit is read, which a product taken as rows has to be read exactly once
+		dict<Cell *, std::vector<Piece>> pieces;
+		std::vector<int> held;
+		dict<SigBit, int> reads;
+		if (opt.fma_chains)
+			for (auto cell : chain)
+				for (auto name : {ID::A, ID::B})
+					for (auto bit : sigmap(cell->getPort(name)))
+						reads[bit]++;
 		dict<Cell *, bool> negated;
 		dict<Cell *, int> offset_of;
 		propagate_chain_state(chain, root, parent_of, link_off, negated, offset_of);
@@ -720,6 +764,32 @@ struct ArithTreeWorker {
 					while (opt.bit_offsets && GetSize(sig) > 1 && sig[0] == State::S0) {
 						sig.remove(0, 1);
 						offset++;
+					}
+					// Note where the unsigned product bits in a run land
+					if (opt.fma_chains && !neg && !is_signed) {
+						bool any = false;
+						for (int i = 0; i < GetSize(sig);) {
+							auto d = sig[i].wire ? bit_driver.find(sig[i]) : bit_driver.end();
+							Cell *mul = d != bit_driver.end() && d->second->type == ID($mul) &&
+									!d->second->getParam(ID::A_SIGNED).as_bool() &&
+									!d->second->getParam(ID::B_SIGNED).as_bool() ? d->second : nullptr;
+							if (!mul) {
+								i++;
+								continue;
+							}
+							SigSpec y = sigmap(mul->getPort(ID::Y));
+							int k = 0;
+							while (y[k] != sig[i])
+								k++;
+							int j = i + 1;
+							while (j < GetSize(sig) && k + j - i < GetSize(y) && sig[j] == y[k + j - i])
+								j++;
+							pieces[mul].push_back({k, j - i, offset + i - k});
+							i = j;
+							any = true;
+						}
+						if (any)
+							held.push_back(GetSize(operands));
 					}
 					operands.push_back({sig, is_signed, neg, SigSpec(), false, offset});
 					if (neg)
@@ -751,6 +821,55 @@ struct ArithTreeWorker {
 					i = j;
 				}
 			}
+		}
+
+		// A product read whole enters as its partial-product rows, on the narrower
+		// factor's bits, and leaves the runs it was read in; a run otherwise stays whole.
+		// That only shortens the sum for a product arriving after everything else it
+		// adds: otherwise the later operand still sets the depth and the rows cost area.
+		pool<SigBit> taken;
+		for (auto &[mul, ps] : pieces)
+			if (fusable(mul, ps, reads, width))
+				for (auto bit : sigmap(mul->getPort(ID::Y)))
+					taken.insert(bit);
+		int rest = 0;
+		for (auto &op : operands) {
+			SigSpec bits;
+			for (auto bit : sigmap(op.sig))
+				if (!taken.count(bit))
+					bits.append(bit);
+			rest = std::max(rest, arrival(bits));
+		}
+		taken.clear();
+		for (auto &[mul, ps] : pieces) {
+			if (!fusable(mul, ps, reads, width) || arrival(mul->getPort(ID::Y)) <= rest)
+				continue;
+			SigSpec a = sigmap(mul->getPort(ID::A)), b = sigmap(mul->getPort(ID::B));
+			if (GetSize(a) > GetSize(b))
+				std::swap(a, b);
+			operands.push_back({a, false, false, b, false, ps[0].column});
+			fused.insert(mul);
+			for (auto bit : sigmap(mul->getPort(ID::Y)))
+				taken.insert(bit);
+		}
+		for (int h = GetSize(held) - 1; h >= 0; h--) {
+			Operand op = operands[held[h]];
+			if (!overlaps(op.sig, taken))
+				continue;
+			// The bits between fused products sum to the same at their own columns
+			std::vector<Operand> rest;
+			for (int i = 0; i < GetSize(op.sig);) {
+				int j = i;
+				while (j < GetSize(op.sig) && !taken.count(op.sig[j]))
+					j++;
+				if (j > i)
+					rest.push_back({op.sig.extract(i, j - i), false, false, SigSpec(), false, op.offset + i});
+				while (j < GetSize(op.sig) && taken.count(op.sig[j]))
+					j++;
+				i = j;
+			}
+			operands.erase(operands.begin() + held[h]);
+			operands.insert(operands.begin() + held[h], rest.begin(), rest.end());
 		}
 		return operands;
 	}
@@ -811,6 +930,14 @@ struct ArithTreeWorker {
 		// Expand operands into a flat list of signals for reduction
 		std::vector<CompressorTree::DepthSig> pool;
 		pool.reserve(operands.size() * 2);
+		// -fma-chains: unsigned product rows as the columns they cover, packed below
+		struct Row {
+			int lo;
+			SigSpec bits;
+			int depth;
+		};
+		std::vector<Row> rows;
+		IdString cell_name = cell->name;
 
 		for (auto &op : operands) {
 			// Columns the operand can still reach; one based at or above the result
@@ -831,6 +958,15 @@ struct ArithTreeWorker {
 			} else {
 				// Multiplicative operand: every row is one AND past both factors
 				int depth = std::max(arrival(op.sig), arrival(op.factor_b)) + 1;
+				if (opt.fma_chains && !op.is_signed && !op.factor_b_signed && !op.negate) {
+					for (int i = 0; i < GetSize(op.sig) && i < body; i++) {
+						int len = std::min(GetSize(op.factor_b), body - i);
+						SigSpec bits = module->addWire(NEW_ID3_SUFFIX("pp"), len);
+						module->addAnd(NEW_ID3_SUFFIX("pp_and"), op.factor_b.extract(0, len), SigSpec(op.sig[i], len), bits);
+						rows.push_back({op.offset + i, bits, depth});
+					}
+					continue;
+				}
 				auto pps = CompressorTree::generate_partial_products(module, op.sig, op.factor_b, op.is_signed, op.factor_b_signed, body, cell->name); // SILIMATE: Improve the naming
 
 				if (!op.negate) {
@@ -849,6 +985,30 @@ struct ArithTreeWorker {
 				neg_offsets.push_back(op.offset);
 			}
 		}
+
+		// Rows that share no column and arrive within a compressor of each other are
+		// one row: a hand-split multiply's tiles otherwise each take a row of their
+		// own, which the tree pays for in levels the full product would not need
+		std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) { return a.depth != b.depth ? a.depth < b.depth : a.lo < b.lo; });
+		std::vector<std::pair<std::vector<SigBit>, int>> lines;
+		for (auto &r : rows) {
+			auto fits = [&](std::pair<std::vector<SigBit>, int> &line) {
+				if (r.depth - line.second >= CompressorTree::FA_GATE_DEPTH)
+					return false;
+				for (int i = 0; i < GetSize(r.bits); i++)
+					if (line.first[r.lo + i] != State::S0)
+						return false;
+				return true;
+			};
+			auto line = std::find_if(lines.begin(), lines.end(), fits);
+			if (line == lines.end())
+				line = lines.insert(lines.end(), {std::vector<SigBit>(width, State::S0), r.depth});
+			for (int i = 0; i < GetSize(r.bits); i++)
+				line->first[r.lo + i] = r.bits[i];
+			line->second = std::max(line->second, r.depth);
+		}
+		for (auto &[bits, depth] : lines)
+			pool.push_back({SigSpec(bits), depth});
 
 		if (!neg_offsets.empty())
 			pool.push_back({neg_correction(neg_offsets, width), 0});
@@ -956,6 +1116,10 @@ struct ArithTreeWorker {
 			emit_tree(root, operands, root->getPort(ID::Y), neg_offsets);
 		}
 
+		if (!fused.empty())
+			log("Expanded %d product(s) into the trees of the chains reading them.\n", GetSize(fused));
+		for (auto cell : fused)
+			to_remove.insert(cell);
 		for (auto cell : to_remove)
 			module->remove(cell);
 	}
@@ -1022,6 +1186,12 @@ struct ArithTreePass : public Pass {
 		log("\n");
 		log("    -no-fma\n");
 		log("        Disable fused multiply-add expansion in $macc cells\n");
+		log("\n");
+		log("    -fma-chains\n");
+		log("        Also expand an unsigned $mul whose only reader is an add chain into\n");
+		log("        partial products in that chain's tree, as FMA fusion does for $macc.\n");
+		log("        The product then crosses one tree and one final adder instead of\n");
+		log("        its own and the chain's.\n");
 		log("\n");
 		log("    -schedule\n");
 		log("        Enter each operand at the level its own logic arrives, estimated\n");
@@ -1096,6 +1266,10 @@ struct ArithTreePass : public Pass {
 			}
 			if (arg == "-no-fma") {
 				opt.fma_fusion = false;
+				continue;
+			}
+			if (arg == "-fma-chains") {
+				opt.fma_chains = true;
 				continue;
 			}
 			if (arg == "-schedule") {
