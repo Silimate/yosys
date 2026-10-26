@@ -47,3 +47,14 @@ module sdffce( input clk, rst, en,
 		end
 	end
 endmodule
+
+module sdffe_neg( input clk, rst, en,
+			input [1:0] d1, output reg [1:0] q1,
+		);
+	always @( negedge clk ) begin
+		if ( rst )
+			q1 <= 0;
+		else if ( en )
+			q1 <= d1;
+	end
+endmodule

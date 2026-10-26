@@ -263,10 +263,26 @@ select -module sdffe_pp -assert-count 1 t:\\pdk_icg {a:$DUTY=CLK=0.500000 EN=0.1
 select -module sdffe_pp -assert-count 1 t:\\pdk_icg {a:$ACKT=CLK=1.000000 EN=0.360000 SE=0.0 GCLK=0.190000} %i
 select -module sdffe_pp -assert-count 1 t:\$sdff {a:$DUTY=CLK=0.095000 SRST=0.1} %i
 
-# The transformed FFs are equivalent, with an ICG that latches its enable
-foreach mod {sdffe_pp sdffe_nn sdffe_two_rst sdffce} {
-    design -load sdffe_before
-    hierarchy -top $mod
-    read_verilog -lib clockgate_icg.v
-    equiv_opt -assert -map clockgate_icg.v -multiclock clockgate -sdffe -pos pdk_icg ce:clkin:clkout
+# Fine-grained cells and falling-edge FFs
+design -load sdffe_before
+techmap
+clockgate -sdffe -pos pdk_icg ce:clkin:clkout -neg pdk_icg_neg ce:clkin:clkout
+select -module sdffe_nn -assert-count 1 t:\\pdk_icg
+select -module sdffe_nn -assert-count 1 t:\$_OR_
+select -module sdffe_nn -assert-count 0 t:\$_SDFFE_*
+select -module sdffe_nn -assert-count 2 t:\$_SDFF_PN1_ t:\$_SDFF_PN0_ %u
+select -module sdffe_neg -assert-count 1 t:\\pdk_icg_neg
+select -module sdffe_neg -assert-count 0 t:\\pdk_icg
+select -module sdffe_neg -assert-count 2 t:\$_SDFF_NP0_
+
+# The transformed FFs are equivalent, with ICGs that latch their enable
+foreach mod {sdffe_pp sdffe_nn sdffe_two_rst sdffce sdffe_neg} {
+    foreach fine {0 1} {
+        design -load sdffe_before
+        hierarchy -top $mod
+        if {$fine} { techmap }
+        read_verilog -lib clockgate_icg.v
+        equiv_opt -assert -map clockgate_icg.v -multiclock clockgate -sdffe \
+            -pos pdk_icg ce:clkin:clkout -neg pdk_icg_neg ce:clkin:clkout
+    }
 }
