@@ -81,10 +81,21 @@ if (YOSYS_ENABLE_VERIFIC)
 
 	# A source release is compiled here; the Silimate-specific objects below are for binary drops
 	if (EXISTS ${YOSYS_VERIFIC_DIR}/util/Strings.cpp)
+		# Installed for code that calls Verific's API: each compiled package's headers and, with
+		# SystemVerilog, the std package's source
 		foreach (component ${YOSYS_VERIFIC_COMPONENTS})
 			file(GLOB component_sources ${YOSYS_VERIFIC_DIR}/${component}/*.cpp)
 			list(APPEND verific_sources ${component_sources})
+			file(GLOB component_headers RELATIVE ${YOSYS_VERIFIC_DIR} ${YOSYS_VERIFIC_DIR}/${component}/*.h)
+			foreach (header ${component_headers})
+				list(APPEND verific_data_files include/verific/${header} ${YOSYS_VERIFIC_DIR}/${header})
+			endforeach()
 		endforeach()
+		if ("verilog" IN_LIST YOSYS_VERIFIC_COMPONENTS)
+			list(APPEND verific_data_files
+				include/verific/verilog_packages/std.sv ${YOSYS_VERIFIC_DIR}/verilog_packages/std.sv
+			)
+		endif()
 		add_library(verific_source STATIC ${verific_sources})
 		target_include_directories(verific_source PRIVATE ${verific_include_dirs})
 		target_link_libraries(verific_source PUBLIC PkgConfig::zlib)
