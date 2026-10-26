@@ -3822,7 +3822,7 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 		}
 
 		if (nl_done.count(it->first) == 0) {
-			VerificImporter importer(false, false, options.nosva, false, false, false, false, false);
+			VerificImporter importer(false, false, options.nosva, options.sva_continue, false, false, false, false);
 			importer.mode_blackbox_prims = options.blackbox_prims;
 			nl_done[it->first] = it->second;
 			// SILIMATE: an error leaves no partly imported module behind
