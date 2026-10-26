@@ -1,0 +1,28 @@
+# -gate_delays: per-gate and per-pin delays for the builtin gate library
+
+read_verilog <<EOT
+module top(input a, b, s, output y);
+  assign y = s ? a : b;
+endmodule
+EOT
+techmap
+design -save mux
+
+# With unit delays the select reaches y through one MUX
+abc -g cmos
+select -assert-count 1 t:$_MUX_
+
+# A slow select pin is worth more gates
+design -load mux
+abc -g cmos -gate_delays MUX.S=10
+select -assert-count 0 t:$_MUX_ t:$_NMUX_
+
+# Explicit unit delays map as the default library does
+design -load mux
+abc -g cmos -gate_delays NOT=1,MUX=1
+select -assert-count 1 t:$_MUX_
+
+# A pin the gate does not have is rejected
+design -load mux
+logger -expect error "Invalid -gate_delays entry 'MUX.C=2'" 1
+abc -g cmos -gate_delays MUX.C=2

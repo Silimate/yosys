@@ -105,6 +105,14 @@ enum class gate_type_t {
 
 #define G(_name) gate_type_t::G_ ## _name
 
+// SILIMATE: the builtin library's gates and their pins, in the order the genlib formulas name them
+static const dict<std::string, std::string> builtin_gate_pins = {
+	{"BUF", "A"}, {"NOT", "A"}, {"AND", "AB"}, {"NAND", "AB"}, {"OR", "AB"}, {"NOR", "AB"},
+	{"XOR", "AB"}, {"XNOR", "AB"}, {"ANDNOT", "AB"}, {"ORNOT", "AB"}, {"AOI3", "ABC"},
+	{"OAI3", "ABC"}, {"AOI4", "ABCD"}, {"OAI4", "ABCD"}, {"MUX", "ABS"}, {"NMUX", "ABS"},
+	{"MUX4", "STABCD"}, {"MUX8", "STUABCDEFGH"}, {"MUX16", "STUVABCDEFGHIJKLMNOP"},
+};
+
 struct gate_t
 {
 	int id;
@@ -146,6 +154,7 @@ struct AbcConfig
 	int abc_max_node_retention_origins = 5; // number of node retention origins (default 5)
 	std::string signal_map_file;
 	std::string cdc_file;
+	dict<std::string, double> gate_delays; // SILIMATE: -gate_delays, "<gate>" or "<gate>.<pin>" -> delay
 
 	bool is_yosys_abc() const {
 #ifdef ABCEXTERNAL
@@ -1490,44 +1499,57 @@ void emit_global_input_files(const AbcConfig &config)
 		FILE *f = fopen(buffer.c_str(), "wt");
 		if (f == nullptr)
 			log_error("Opening %s for writing failed: %s\n", buffer.c_str(), strerror(errno));
+		// SILIMATE: -gate_delays gives a gate, or one pin of it, a delay other than 1
+		auto pins = [&](const std::string &gate, const char *phase) {
+			if (config.gate_delays.empty())
+				return stringf("PIN * %-7s 1 999 1 0 1 0", phase);
+			std::string text;
+			for (char pin : builtin_gate_pins.at(gate)) {
+				std::string key = gate + "." + pin;
+				double delay = config.gate_delays.count(key) ? config.gate_delays.at(key) :
+						config.gate_delays.count(gate) ? config.gate_delays.at(gate) : 1;
+				text += stringf("%sPIN %c %s 1 999 %g 0 %g 0", text.empty() ? "" : " ", pin, phase, delay, delay);
+			}
+			return text;
+		};
 		fprintf(f, "GATE ZERO    1 Y=CONST0;\n");
 		fprintf(f, "GATE ONE     1 Y=CONST1;\n");
-		fprintf(f, "GATE BUF    %d Y=A;                  PIN * NONINV  1 999 1 0 1 0\n", cell_cost.at(ID($_BUF_)));
-		fprintf(f, "GATE NOT    %d Y=!A;                 PIN * INV     1 999 1 0 1 0\n", cell_cost.at(ID($_NOT_)));
+		fprintf(f, "GATE BUF    %d Y=A;                  %s\n", cell_cost.at(ID($_BUF_)), pins("BUF", "NONINV").c_str());
+		fprintf(f, "GATE NOT    %d Y=!A;                 %s\n", cell_cost.at(ID($_NOT_)), pins("NOT", "INV").c_str());
 		if (config.enabled_gates.count("AND"))
-			fprintf(f, "GATE AND    %d Y=A*B;                PIN * NONINV  1 999 1 0 1 0\n", cell_cost.at(ID($_AND_)));
+			fprintf(f, "GATE AND    %d Y=A*B;                %s\n", cell_cost.at(ID($_AND_)), pins("AND", "NONINV").c_str());
 		if (config.enabled_gates.count("NAND"))
-			fprintf(f, "GATE NAND   %d Y=!(A*B);             PIN * INV     1 999 1 0 1 0\n", cell_cost.at(ID($_NAND_)));
+			fprintf(f, "GATE NAND   %d Y=!(A*B);             %s\n", cell_cost.at(ID($_NAND_)), pins("NAND", "INV").c_str());
 		if (config.enabled_gates.count("OR"))
-			fprintf(f, "GATE OR     %d Y=A+B;                PIN * NONINV  1 999 1 0 1 0\n", cell_cost.at(ID($_OR_)));
+			fprintf(f, "GATE OR     %d Y=A+B;                %s\n", cell_cost.at(ID($_OR_)), pins("OR", "NONINV").c_str());
 		if (config.enabled_gates.count("NOR"))
-			fprintf(f, "GATE NOR    %d Y=!(A+B);             PIN * INV     1 999 1 0 1 0\n", cell_cost.at(ID($_NOR_)));
+			fprintf(f, "GATE NOR    %d Y=!(A+B);             %s\n", cell_cost.at(ID($_NOR_)), pins("NOR", "INV").c_str());
 		if (config.enabled_gates.count("XOR"))
-			fprintf(f, "GATE XOR    %d Y=(A*!B)+(!A*B);      PIN * UNKNOWN 1 999 1 0 1 0\n", cell_cost.at(ID($_XOR_)));
+			fprintf(f, "GATE XOR    %d Y=(A*!B)+(!A*B);      %s\n", cell_cost.at(ID($_XOR_)), pins("XOR", "UNKNOWN").c_str());
 		if (config.enabled_gates.count("XNOR"))
-			fprintf(f, "GATE XNOR   %d Y=(A*B)+(!A*!B);      PIN * UNKNOWN 1 999 1 0 1 0\n", cell_cost.at(ID($_XNOR_)));
+			fprintf(f, "GATE XNOR   %d Y=(A*B)+(!A*!B);      %s\n", cell_cost.at(ID($_XNOR_)), pins("XNOR", "UNKNOWN").c_str());
 		if (config.enabled_gates.count("ANDNOT"))
-			fprintf(f, "GATE ANDNOT %d Y=A*!B;               PIN * UNKNOWN 1 999 1 0 1 0\n", cell_cost.at(ID($_ANDNOT_)));
+			fprintf(f, "GATE ANDNOT %d Y=A*!B;               %s\n", cell_cost.at(ID($_ANDNOT_)), pins("ANDNOT", "UNKNOWN").c_str());
 		if (config.enabled_gates.count("ORNOT"))
-			fprintf(f, "GATE ORNOT  %d Y=A+!B;               PIN * UNKNOWN 1 999 1 0 1 0\n", cell_cost.at(ID($_ORNOT_)));
+			fprintf(f, "GATE ORNOT  %d Y=A+!B;               %s\n", cell_cost.at(ID($_ORNOT_)), pins("ORNOT", "UNKNOWN").c_str());
 		if (config.enabled_gates.count("AOI3"))
-			fprintf(f, "GATE AOI3   %d Y=!((A*B)+C);         PIN * INV     1 999 1 0 1 0\n", cell_cost.at(ID($_AOI3_)));
+			fprintf(f, "GATE AOI3   %d Y=!((A*B)+C);         %s\n", cell_cost.at(ID($_AOI3_)), pins("AOI3", "INV").c_str());
 		if (config.enabled_gates.count("OAI3"))
-			fprintf(f, "GATE OAI3   %d Y=!((A+B)*C);         PIN * INV     1 999 1 0 1 0\n", cell_cost.at(ID($_OAI3_)));
+			fprintf(f, "GATE OAI3   %d Y=!((A+B)*C);         %s\n", cell_cost.at(ID($_OAI3_)), pins("OAI3", "INV").c_str());
 		if (config.enabled_gates.count("AOI4"))
-			fprintf(f, "GATE AOI4   %d Y=!((A*B)+(C*D));     PIN * INV     1 999 1 0 1 0\n", cell_cost.at(ID($_AOI4_)));
+			fprintf(f, "GATE AOI4   %d Y=!((A*B)+(C*D));     %s\n", cell_cost.at(ID($_AOI4_)), pins("AOI4", "INV").c_str());
 		if (config.enabled_gates.count("OAI4"))
-			fprintf(f, "GATE OAI4   %d Y=!((A+B)*(C+D));     PIN * INV     1 999 1 0 1 0\n", cell_cost.at(ID($_OAI4_)));
+			fprintf(f, "GATE OAI4   %d Y=!((A+B)*(C+D));     %s\n", cell_cost.at(ID($_OAI4_)), pins("OAI4", "INV").c_str());
 		if (config.enabled_gates.count("MUX"))
-			fprintf(f, "GATE MUX    %d Y=(A*B)+(S*B)+(!S*A); PIN * UNKNOWN 1 999 1 0 1 0\n", cell_cost.at(ID($_MUX_)));
+			fprintf(f, "GATE MUX    %d Y=(A*B)+(S*B)+(!S*A); %s\n", cell_cost.at(ID($_MUX_)), pins("MUX", "UNKNOWN").c_str());
 		if (config.enabled_gates.count("NMUX"))
-			fprintf(f, "GATE NMUX   %d Y=!((A*B)+(S*B)+(!S*A)); PIN * UNKNOWN 1 999 1 0 1 0\n", cell_cost.at(ID($_NMUX_)));
+			fprintf(f, "GATE NMUX   %d Y=!((A*B)+(S*B)+(!S*A)); %s\n", cell_cost.at(ID($_NMUX_)), pins("NMUX", "UNKNOWN").c_str());
 		if (config.map_mux4)
-			fprintf(f, "GATE MUX4   %d Y=(!S*!T*A)+(S*!T*B)+(!S*T*C)+(S*T*D); PIN * UNKNOWN 1 999 1 0 1 0\n", 2*cell_cost.at(ID($_MUX_)));
+			fprintf(f, "GATE MUX4   %d Y=(!S*!T*A)+(S*!T*B)+(!S*T*C)+(S*T*D); %s\n", 2*cell_cost.at(ID($_MUX_)), pins("MUX4", "UNKNOWN").c_str());
 		if (config.map_mux8)
-			fprintf(f, "GATE MUX8   %d Y=(!S*!T*!U*A)+(S*!T*!U*B)+(!S*T*!U*C)+(S*T*!U*D)+(!S*!T*U*E)+(S*!T*U*F)+(!S*T*U*G)+(S*T*U*H); PIN * UNKNOWN 1 999 1 0 1 0\n", 4*cell_cost.at(ID($_MUX_)));
+			fprintf(f, "GATE MUX8   %d Y=(!S*!T*!U*A)+(S*!T*!U*B)+(!S*T*!U*C)+(S*T*!U*D)+(!S*!T*U*E)+(S*!T*U*F)+(!S*T*U*G)+(S*T*U*H); %s\n", 4*cell_cost.at(ID($_MUX_)), pins("MUX8", "UNKNOWN").c_str());
 		if (config.map_mux16)
-			fprintf(f, "GATE MUX16  %d Y=(!S*!T*!U*!V*A)+(S*!T*!U*!V*B)+(!S*T*!U*!V*C)+(S*T*!U*!V*D)+(!S*!T*U*!V*E)+(S*!T*U*!V*F)+(!S*T*U*!V*G)+(S*T*U*!V*H)+(!S*!T*!U*V*I)+(S*!T*!U*V*J)+(!S*T*!U*V*K)+(S*T*!U*V*L)+(!S*!T*U*V*M)+(S*!T*U*V*N)+(!S*T*U*V*O)+(S*T*U*V*P); PIN * UNKNOWN 1 999 1 0 1 0\n", 8*cell_cost.at(ID($_MUX_)));
+			fprintf(f, "GATE MUX16  %d Y=(!S*!T*!U*!V*A)+(S*!T*!U*!V*B)+(!S*T*!U*!V*C)+(S*T*!U*!V*D)+(!S*!T*U*!V*E)+(S*!T*U*!V*F)+(!S*T*U*!V*G)+(S*T*U*!V*H)+(!S*!T*!U*V*I)+(S*!T*!U*V*J)+(!S*T*!U*V*K)+(S*T*!U*V*L)+(!S*!T*U*V*M)+(S*!T*U*V*N)+(!S*T*U*V*O)+(S*T*U*V*P); %s\n", 8*cell_cost.at(ID($_MUX_)), pins("MUX16", "UNKNOWN").c_str());
 		fclose(f);
 	}
 }
@@ -2111,6 +2133,12 @@ struct AbcPass : public Pass {
 		log("        this attribute is a unique integer for each ABC process started. This\n");
 		log("        is useful for debugging the partitioning of clock domains.\n");
 		log("\n");
+		log("    -gate_delays <gate>[.<pin>]=<delay>,...\n");
+		log("        give gates of the builtin library (BUF, NOT and the -g types), or one\n");
+		log("        input pin of a gate, a delay other than the default 1. for example\n");
+		log("        'NOT=0.5,MUX=1,MUX.S=2' makes a mux select pin twice as slow as its data\n");
+		log("        pins. not used with -liberty/-genlib or -lut.\n");
+		log("\n");
 		log("    -dress\n");
 		log("        run the 'dress' command after all other ABC commands. This aims to\n");
 		log("        preserve naming by an equivalence check between the original and\n");
@@ -2305,6 +2333,18 @@ struct AbcPass : public Pass {
 			}
 			if (arg == "-markgroups") {
 				config.markgroups = true;
+				continue;
+			}
+			// SILIMATE: per-gate and per-pin delays for the builtin gate library
+			if (arg == "-gate_delays" && argidx+1 < args.size()) {
+				for (auto &entry : split_tokens(args[++argidx], ",")) {
+					size_t eq = entry.find('='), dot = entry.find('.');
+					std::string gate = entry.substr(0, std::min(eq, dot));
+					if (eq == std::string::npos || !builtin_gate_pins.count(gate) || (dot < eq &&
+							(eq != dot + 2 || builtin_gate_pins.at(gate).find(entry[dot+1]) == std::string::npos)))
+						cmd_error(args, argidx, stringf("Invalid -gate_delays entry '%s'", entry));
+					config.gate_delays[entry.substr(0, eq)] = atof(entry.c_str() + eq + 1);
+				}
 				continue;
 			}
 			if (arg == "-max_threads" && argidx+1 < args.size()) {
