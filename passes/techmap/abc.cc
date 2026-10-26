@@ -2137,7 +2137,8 @@ struct AbcPass : public Pass {
 		log("        give gates of the builtin library (BUF, NOT and the -g types), or one\n");
 		log("        input pin of a gate, a delay other than the default 1. for example\n");
 		log("        'NOT=0.5,MUX=1,MUX.S=2' makes a mux select pin twice as slow as its data\n");
-		log("        pins. not used with -liberty/-genlib or -lut.\n");
+		log("        pins. a delay is a finite number >= 0. not used with -liberty/-genlib\n");
+		log("        or -lut.\n");
 		log("\n");
 		log("    -dress\n");
 		log("        run the 'dress' command after all other ABC commands. This aims to\n");
@@ -2339,11 +2340,14 @@ struct AbcPass : public Pass {
 			if (arg == "-gate_delays" && argidx+1 < args.size()) {
 				for (auto &entry : split_tokens(args[++argidx], ",")) {
 					size_t eq = entry.find('='), dot = entry.find('.');
-					std::string gate = entry.substr(0, std::min(eq, dot));
-					if (eq == std::string::npos || !builtin_gate_pins.count(gate) || (dot < eq &&
-							(eq != dot + 2 || builtin_gate_pins.at(gate).find(entry[dot+1]) == std::string::npos)))
+					auto pins = builtin_gate_pins.find(entry.substr(0, std::min(eq, dot)));
+					const char *value = eq == std::string::npos ? "" : entry.c_str() + eq + 1;
+					char *end;
+					double delay = strtod(value, &end);
+					if (pins == builtin_gate_pins.end() || end == value || *end || !std::isfinite(delay) || delay < 0 ||
+							(dot < eq && (eq != dot + 2 || pins->second.find(entry[dot+1]) == std::string::npos)))
 						cmd_error(args, argidx, stringf("Invalid -gate_delays entry '%s'", entry));
-					config.gate_delays[entry.substr(0, eq)] = atof(entry.c_str() + eq + 1);
+					config.gate_delays[entry.substr(0, eq)] = delay;
 				}
 				continue;
 			}
