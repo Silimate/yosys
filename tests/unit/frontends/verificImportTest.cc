@@ -211,6 +211,36 @@ TEST_F(VerificImportTest, ExtNetsRouteInEveryInstanceOfASharedModule)
 	EXPECT_EQ(y.as_const(), Const(0b01, 2));
 }
 
+TEST_F(VerificImportTest, SvaContinueImportsTheRestOfTheModule)
+{
+	Design failed, continued;
+	// disable iff in a procedural assertion, which the SVA importer can't read in that context
+	const char *sv = "module top(input clk, rst, en, req, output reg ack);\n"
+			 "  always @(posedge clk) ack <= req;\n"
+			 "  always @(posedge clk) if (en) begin\n"
+			 "    gated: assert property (disable iff (rst) req |=> ack);\n"
+			 "  end\n"
+			 "  plain: assert property (@(posedge clk) req |=> ack);\n"
+			 "endmodule\n";
+	analyze(failed, sv);
+	try {
+		verific_import(&failed, {}, "top", {.keep_state = true, .throw_errors = true});
+		FAIL() << "no VerificImportError";
+	} catch (const VerificImportError &e) {
+		EXPECT_EQ(e.module, "top");
+	}
+	verific_import(&continued, {}, "top", {.throw_errors = true, .sva_continue = true});
+	Module *top = continued.module(RTLIL::escape_id("top"));
+	ASSERT_NE(top, nullptr);
+	Cell *gated = top->cell(RTLIL::escape_id("gated")), *plain = top->cell(RTLIL::escape_id("plain"));
+	ASSERT_NE(gated, nullptr);
+	ASSERT_NE(plain, nullptr);
+	EXPECT_TRUE(gated->get_bool_attribute(ID(unsupported_sva)));
+	EXPECT_EQ(gated->getPort(ID::A), SigSpec(State::Sx));
+	EXPECT_FALSE(plain->get_bool_attribute(ID(unsupported_sva)));
+	EXPECT_FALSE(plain->getPort(ID::A).is_fully_const());
+}
+
 YOSYS_NAMESPACE_END
 
 #endif

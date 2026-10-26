@@ -51,6 +51,10 @@ struct VerificImportOptions {
 	// instantiated more than once, through every instance, and those where a port is the
 	// referenced net itself
 	bool route_all_refs = false;
+	// an SVA property the importer can't read is imported as an unconstrained $assert, $assume or
+	// $cover cell marked unsupported_sva, as the verific pass's -sva-continue-on-err does, instead
+	// of failing the module
+	bool sva_continue = false;
 };
 
 // SILIMATE: an importer error under VerificImportOptions::throw_errors. The module it interrupted is
