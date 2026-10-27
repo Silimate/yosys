@@ -229,6 +229,8 @@ struct ClockgatePass : public Pass {
 		log("This pass transforms each set of FFs sharing the same clock and\n");
 		log("enable signal into a clock-gating cell and a set of enable-less FFs.\n");
 		log("Primarily a power-saving transformation on ASIC designs.\n");
+		log("FFs whose sync reset has priority over the enable ($sdffe, $_SDFFE_*)\n");
+		log("are gated by CE | SRST and keep the sync reset.\n");
 		log("\n");
 		log("    -pos <celltype> <ce>:<clk>:<gclk>\n");
 		log("        If specified, rising-edge FFs will have CE inputs\n");
@@ -262,7 +264,8 @@ struct ClockgatePass : public Pass {
 		log("    -max_src <n>\n");
 		log("        Maximum number of src attributes to copy to ICG cells (default: unlimited).\n");
 		log("    -word\n");
-		log("        Use word-level $not cell for CE inversion instead of gate-level $_NOT_.\n");
+		log("        Use word-level $not/$or cells for the ICG enable logic instead of\n");
+		log("        gate-level $_NOT_/$_OR_.\n");
 		log("        \n");
 	}
 
@@ -275,8 +278,11 @@ struct ClockgatePass : public Pass {
 		SigBit ce_bit;
 		bool pol_clk;
 		bool pol_ce;
+		// Sync reset with priority over the enable, which must also open the gate
+		SigBit srst_bit;
+		bool pol_srst = false;
 		[[nodiscard]] Hasher hash_into(Hasher h) const {
-			auto t = std::make_tuple(clk_bit, ce_bit, pol_clk, pol_ce);
+			auto t = std::make_tuple(clk_bit, ce_bit, pol_clk, pol_ce, srst_bit, pol_srst);
 			h.eat(t);
 			return h;
 		}
@@ -284,7 +290,9 @@ struct ClockgatePass : public Pass {
 			return (clk_bit == other.clk_bit) &&
 			       (ce_bit == other.ce_bit) &&
 			       (pol_clk == other.pol_clk) &&
-			       (pol_ce == other.pol_ce);
+			       (pol_ce == other.pol_ce) &&
+			       (srst_bit == other.srst_bit) &&
+			       (pol_srst == other.pol_srst);
 		}
 	};
 
@@ -295,8 +303,8 @@ struct ClockgatePass : public Pass {
 		Wire* new_net;
 		// The ICG cell created for this clock net
 		Cell* icg_cell = nullptr;
-		// The CE inverter cell (if pol_ce is negative)
-		Cell* ce_not_cell = nullptr;
+		// Cells driving the ICG enable (CE/SRST inverters, CE | SRST)
+		std::vector<Cell*> en_cells;
 		// Count of src attributes added
 		int src_count = 0;
 		// Total sum of disabled FFs on a clock net
@@ -313,6 +321,10 @@ struct ClockgatePass : public Pass {
 		SigBit clk = ff.sig_clk[0];
 		SigBit ce = ff.sig_ce[0];
 		ClkNetInfo info{clk, ce, ff.pol_clk, ff.pol_ce};
+		if (ff.has_srst && !ff.ce_over_srst) {
+			info.srst_bit = ff.sig_srst[0];
+			info.pol_srst = ff.pol_srst;
+		}
 		return info;
 	}
 
@@ -415,7 +427,7 @@ struct ClockgatePass : public Pass {
 				FfData ff(nullptr, cell);
 				// It would be odd to get constants, but we better handle it
 				if (ff.has_ce) {
-					if (ff.has_srst && !ff.ce_over_srst)
+					if (ff.has_srst && !ff.ce_over_srst && !ff.sig_srst[0].is_wire())
 						continue;
 					if (!ff.sig_clk.is_bit() || !ff.sig_ce.is_bit())
 						continue;
@@ -449,6 +461,13 @@ struct ClockgatePass : public Pass {
 
 						// Fraction of time this FF is disabled (CE not asserted).
 						double disabled_frac = 1.0 - ce_active_frac;
+
+						// A sync reset over the enable also opens the gate.
+						if (info.srst_bit.is_wire()) {
+							double srst_duty = get_cell_activity(cell, ID(SRST), ID($DUTY));
+							double srst_active_frac = info.pol_srst ? srst_duty : (1.0 - srst_duty);
+							disabled_frac *= 1.0 - srst_active_frac;
+						}
 						gclk_info.en_disabled_sum += disabled_frac;
 					}
 				}
@@ -494,6 +513,16 @@ struct ClockgatePass : public Pass {
 					double ce_activity = get_cell_activity(rep, ID(EN), ID($ACKT));
 					double ce_active_frac = clk.pol_ce ? ce_duty : (1.0 - ce_duty);
 
+					// The ICG enable is CE | SRST, whose toggles each pass while the other is inactive.
+					if (clk.srst_bit.is_wire()) {
+						double srst_duty = get_cell_activity(rep, ID(SRST), ID($DUTY));
+						double srst_activity = get_cell_activity(rep, ID(SRST), ID($ACKT));
+						double srst_active_frac = clk.pol_srst ? srst_duty : (1.0 - srst_duty);
+						ce_activity = ce_activity * (1.0 - srst_active_frac) + srst_activity * (1.0 - ce_active_frac);
+						ce_active_frac = 1.0 - (1.0 - ce_active_frac) * (1.0 - srst_active_frac);
+						ce_duty = ce_active_frac;
+					}
+
 					// Calculate the duty and activity of the gated clock.
 					double gclk_duty = clk_duty * ce_active_frac;
 					double gclk_ackt = clk_activity * ce_active_frac;
@@ -534,12 +563,31 @@ struct ClockgatePass : public Pass {
 						ce_not->setPort(ID::A, clk.ce_bit);
 						ce_not->setPort(ID::Y, ce_not_wire);
 					}
-					gclk.ce_not_cell = ce_not;
+					gclk.en_cells.push_back(ce_not);
 					icg->setPort(matching_icg_desc->ce_pin, ce_not_wire);
-
-					if (use_disabled_threshold) { // set fanout of CE inverter
-						ce_not->set_string_attribute(ID($FANOUT), "1");
+				}
+				// OR the sync reset into the enable
+				if (clk.srst_bit.is_wire()) {
+					SigBit srst = clk.srst_bit;
+					if (!clk.pol_srst) {
+						Wire *srst_not_wire = module->addWire(NEW_ID2_SUFFIX("srst_not_w"));
+						Cell *srst_not = word_level
+							? module->addNot(NEW_ID2_SUFFIX("srst_not"), srst, srst_not_wire)
+							: module->addNotGate(NEW_ID2_SUFFIX("srst_not"), srst, srst_not_wire);
+						gclk.en_cells.push_back(srst_not);
+						srst = srst_not_wire;
 					}
+					SigBit ce = icg->getPort(matching_icg_desc->ce_pin);
+					Wire *en_wire = module->addWire(NEW_ID2_SUFFIX("en_w"));
+					Cell *en_or = word_level
+						? module->addOr(NEW_ID2_SUFFIX("en_or"), ce, srst, en_wire)
+						: module->addOrGate(NEW_ID2_SUFFIX("en_or"), ce, srst, en_wire);
+					gclk.en_cells.push_back(en_or);
+					icg->setPort(matching_icg_desc->ce_pin, en_wire);
+				}
+				if (use_disabled_threshold) { // set fanout of the enable cells
+					for (auto en_cell : gclk.en_cells)
+						en_cell->set_string_attribute(ID($FANOUT), "1");
 				}
 			}
 
@@ -555,8 +603,8 @@ struct ClockgatePass : public Pass {
 				// Accumulate src attributes from all FFs sharing this ICG
 				if (max_src < 0 || it->second.src_count < max_src) {
 					it->second.icg_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
-					if (it->second.ce_not_cell)
-						it->second.ce_not_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
+					for (auto en_cell : it->second.en_cells)
+						en_cell->add_strpool_attribute(ID::src, cell->get_strpool_attribute(ID::src));
 					it->second.src_count++;
 				}
 
