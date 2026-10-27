@@ -5,4 +5,8 @@ yosys_backend(verilog
 		bmuxmap
 		demuxmap
 		clean_zerowidth
+	DATA_DIR
+		include/backends/verilog
+	DATA_FILES
+		verilog_backend.h
 )
