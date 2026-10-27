@@ -229,6 +229,8 @@ struct ClockgatePass : public Pass {
 		log("This pass transforms each set of FFs sharing the same clock and\n");
 		log("enable signal into a clock-gating cell and a set of enable-less FFs.\n");
 		log("Primarily a power-saving transformation on ASIC designs.\n");
+		log("FFs whose sync reset has priority over the enable ($sdffe, $_SDFFE_*)\n");
+		log("are gated by CE | SRST and keep the sync reset.\n");
 		log("\n");
 		log("    -pos <celltype> <ce>:<clk>:<gclk>\n");
 		log("        If specified, rising-edge FFs will have CE inputs\n");
@@ -264,10 +266,6 @@ struct ClockgatePass : public Pass {
 		log("    -word\n");
 		log("        Use word-level $not/$or cells for the ICG enable logic instead of\n");
 		log("        gate-level $_NOT_/$_OR_.\n");
-		log("    -sdffe\n");
-		log("        Also transform FFs whose sync reset has priority over the enable\n");
-		log("        ($sdffe, $_SDFFE_*). Their ICG is enabled by CE | SRST, and they\n");
-		log("        keep the sync reset.\n");
 		log("        \n");
 	}
 
@@ -345,7 +343,6 @@ struct ClockgatePass : public Pass {
 		bool use_disabled_threshold = false;
 		int max_src = -1;
 		bool word_level = false;
-		bool gate_sdffe = false;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-pos" && argidx+2 < args.size()) {
@@ -394,10 +391,6 @@ struct ClockgatePass : public Pass {
 				word_level = true;
 				continue;
 			}
-			if (args[argidx] == "-sdffe") {
-				gate_sdffe = true;
-				continue;
-			}
 			break;
 		}
 
@@ -434,7 +427,7 @@ struct ClockgatePass : public Pass {
 				FfData ff(nullptr, cell);
 				// It would be odd to get constants, but we better handle it
 				if (ff.has_ce) {
-					if (ff.has_srst && !ff.ce_over_srst && (!gate_sdffe || !ff.sig_srst[0].is_wire()))
+					if (ff.has_srst && !ff.ce_over_srst && !ff.sig_srst[0].is_wire())
 						continue;
 					if (!ff.sig_clk.is_bit() || !ff.sig_ce.is_bit())
 						continue;
