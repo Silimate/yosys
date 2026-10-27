@@ -1,0 +1,39 @@
+# A script that computes choices: z equals the box input c & d but is built from the box output,
+# so it becomes a choice for that input, which must not break the box order in &if
+read_verilog -specify <<EOT
+(* abc9_box, whitebox *)
+module bx(input a, output y);
+  assign y = ~a;
+  specify
+    (a => y) = 1;
+  endspecify
+endmodule
+module top(input c, d, output y, z);
+  bx k(.a(c & d), .y(y));
+  assign z = (c & (d & y)) | (d & (c & ~y));
+endmodule
+EOT
+hierarchy -top top
+proc
+design -save gold
+
+abc9 -lut 4 -script +&st;&synch2;&if
+design -stash gate
+design -copy-from gold -as gold top
+design -copy-from gate -as gate top
+design -copy-from gold =bx
+delete =bx/t:$specify2
+setattr -mod -unset whitebox =bx
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -prove-asserts -show-ports miter
+
+design -load gold
+abc9 -lut 4 -script +&st;&dch,-f;&if
+design -stash gate
+design -copy-from gold -as gold top
+design -copy-from gate -as gate top
+design -copy-from gold =bx
+delete =bx/t:$specify2
+setattr -mod -unset whitebox =bx
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -prove-asserts -show-ports miter

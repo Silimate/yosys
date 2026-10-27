@@ -92,14 +92,6 @@ jobs:
           restore-keys: |
             test-build-${{ matrix.os }}
 
-      # SILIMATE: key on the attempt too, or a rerun's build hits attempt 1's key, is never
-      # saved, and the test jobs test attempt 1's binary
-      - name: Cache Build Directory
-        uses: actions/cache@v6
-        with:
-          path: build
-          key: ${{ runner.os }}-build-${{ github.run_id }}-${{ github.run_attempt }}
-
       - name: Build
         shell: bash
         run: |
@@ -111,6 +103,28 @@ jobs:
       - name: Log yosys-config output
         run: |
           ./build/yosys-config || true
+
+      # SILIMATE: key on the attempt too, or a rerun's build hits attempt 1's key, is never
+      # saved, and the test jobs test attempt 1's binary. Push runs have no test jobs to
+      # read it, so skip it there.
+      - name: Save Build Directory to Cache
+        if: github.event_name != 'push'
+        uses: actions/cache/save@v6
+        with:
+          path: build
+          key: ${{ runner.os }}-build-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # SILIMATE: a failed save is only a warning, so this job would pass and the test jobs
+      # would fail on a cache miss, which rerunning them can't fix. Fail here instead, so
+      # rerunning failed jobs rebuilds.
+      - name: Check Build Directory was Cached
+        if: github.event_name != 'push'
+        uses: actions/cache/restore@v6
+        with:
+          path: build
+          key: ${{ runner.os }}-build-${{ github.run_id }}-${{ github.run_attempt }}
+          lookup-only: true
+          fail-on-cache-miss: true
 
   test-yosys:
     name: Run tests
