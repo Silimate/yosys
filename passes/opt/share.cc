@@ -877,8 +877,10 @@ struct ShareWorker
 	const pool<ssc_pair_t> &find_cell_activation_patterns(RTLIL::Cell *cell, const char *indent)
 	{
 		if (recursion_state.count(cell)) {
-			static pool<ssc_pair_t> empty_patterns_set;
-			return empty_patterns_set;
+			// back-edge of a combinational loop: assume always active, a safe over-approximation
+			// (an empty set would mark the rest of the loop as never active and delete live logic)
+			static pool<ssc_pair_t> always_active_patterns_set = {ssc_pair_t()};
+			return always_active_patterns_set;
 		}
 
 		if (activation_patterns_cache.count(cell))
