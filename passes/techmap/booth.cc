@@ -249,48 +249,24 @@ struct BoothPassWorker {
 
 			this->cell = cell;
 
-			// To simplify the generator size the arguments
-			// to be the same. Then allow logic synthesis to
-			// clean things up. Size to biggest
-
-			int x_sz_revised = x_sz;
-			int y_sz_revised = y_sz;
-
-			if (x_sz != y_sz) {
-				if (x_sz < y_sz) {
-					if (y_sz % 2 != 0) {
-						x_sz_revised = y_sz + 1;
-						y_sz_revised = y_sz + 1;
-					} else {
-						x_sz_revised = y_sz;
-					}
-				} else {
-					if (x_sz % 2 != 0) {
-						y_sz_revised = x_sz + 1;
-						x_sz_revised = x_sz + 1;
-					} else {
-						y_sz_revised = x_sz;
-					}
-				}
-			} else {
-				if (x_sz % 2 != 0) {
-					y_sz_revised = y_sz + 1;
-					x_sz_revised = x_sz + 1;
-				}
+			// SILIMATE: recode a constant operand (its zero digits leave only constants), else the
+			// narrower one, each operand at its own width rather than both padded square
+			bool a_const = sigmap(A).is_fully_const(), b_const = sigmap(B).is_fully_const();
+			if (a_const != b_const ? a_const : y_sz > x_sz) {
+				std::swap(A, B);
+				std::swap(x_sz, y_sz);
 			}
 
-			log_assert((x_sz_revised == y_sz_revised) && (x_sz_revised % 2 == 0) && (y_sz_revised % 2 == 0));
-
-
-			A.extend_u0(x_sz_revised, is_signed);
-			B.extend_u0(y_sz_revised, is_signed);
+			// SILIMATE: the low-power architecture recodes whole bit pairs
+			if (lowpower && y_sz % 2 != 0)
+				B.extend_u0(++y_sz, is_signed);
 
 			// Make sure output domain is big enough to take
 			// all combinations.
 			// Later logic synthesis will kill unused
 			// portions of the output domain.
 
-			int required_op_size = x_sz_revised + y_sz_revised;
+			int required_op_size = x_sz + y_sz;
 
 			if (required_op_size != z_sz) {
 				SigSpec expanded_Y = module->addWire(NEW_ID2_SUFFIX("y"), required_op_size); // SILIMATE: Improve the naming
@@ -904,10 +880,11 @@ struct BoothPassWorker {
 					else
 						need_padded_cell = false;
 					y2 = Y[y_ix];
-
-					BuildBur4e(enc_name, y0, y1, y2, one_int[encoder_ix], two_int[encoder_ix], s_int[encoder_ix],
-						   sb_int[encoder_ix]);
 				}
+
+				// SILIMATE: also encode an odd-width multiplier's last pair, topped by its extension
+				BuildBur4e(enc_name, y0, y1, y2, one_int[encoder_ix], two_int[encoder_ix], s_int[encoder_ix],
+					   sb_int[encoder_ix]);
 
 				encoder_ix++;
 
