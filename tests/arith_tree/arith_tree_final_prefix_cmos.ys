@@ -117,6 +117,32 @@ select -assert-none t:$mul
 select -assert-min 1 t:$_AOI3_ t:$_OAI3_ %u
 design -reset
 
+# A select whose upper bits come from a shift and lower bits from a product: the bits that
+# skip the tree are the shift's, so the guard does not fire on the product beside them
+read_verilog <<EOT
+module prefix_cmos_mixed_arm(
+	input c,
+	input [7:0] u,
+	input [2:0] v,
+	input [3:0] p, q,
+	input [7:0] r, s,
+	output [15:0] y
+);
+	wire [7:0] sh = u << v;
+	wire [7:0] pq = p * q;
+	wire [15:0] m = c ? {sh, pq} : 16'd0;
+	assign y = m + r + s;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+logger -expect log "kept 0 as AND/OR" 1
+equiv_opt -assert arith_tree -final prefix-cmos -schedule
+logger -check-expected
+design -load postopt
+select -assert-min 1 t:$_AOI3_ t:$_OAI3_ %u
+design -reset
+
 # A late operand that is not a product does not trip the guard
 read_verilog <<EOT
 module prefix_cmos_late_shift(

@@ -1073,10 +1073,18 @@ struct ArithTreeWorker {
 		auto d = bit_driver.find(sigmap(bit));
 		if (d == bit_driver.end() || !d->second->type.in(ID($mux), ID($pmux)))
 			return false;
-		for (auto port : {ID::A, ID::B})
-			for (auto arm : d->second->getPort(port))
-				if (is_product(arm))
+		// Only the arm bits at this bit's position, in A and in every slice of B
+		SigSpec y = sigmap(d->second->getPort(ID::Y)), arm_a = d->second->getPort(ID::A), arm_b = d->second->getPort(ID::B);
+		int width = GetSize(y);
+		for (int i = 0; i < width; i++) {
+			if (y[i] != sigmap(bit))
+				continue;
+			if (is_product(arm_a[i]))
+				return true;
+			for (int j = i; j < GetSize(arm_b); j += width)
+				if (is_product(arm_b[j]))
 					return true;
+		}
 		return false;
 	}
 
