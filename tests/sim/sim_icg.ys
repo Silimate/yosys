@@ -23,3 +23,25 @@ clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
 select -assert-count 1 t:$icg
 sim -clock clk -n 8 -w top
 select -assert-count 1 a:init=4'b0100 top/q %i
+
+# Nor does an enable that changes while CLK is high start a gated pulse or cut one
+# short. Over sim_icg.vcd's four 10ns cycles en is high at 7-9ns, inside the first
+# high phase, and at 20-27ns, from a low phase into the third: GCLK pulses once,
+# high for all of 25-30ns (2 toggles in 4 cycles, duty 5/40).
+design -reset
+read_rtlil <<EOT
+module \top
+	wire input 1 \clk
+	wire input 2 \en
+	wire output 3 \gclk
+	cell $icg \icg
+		connect \CLK \clk
+		connect \EN \en
+		connect \SE 1'0
+		connect \GCLK \gclk
+	end
+end
+EOT
+sim -r sim_icg.vcd -scope top -activity
+select -assert-count 1 w:gclk a:$ACKT=0.250000* %i
+select -assert-count 1 w:gclk a:$DUTY=0.125000* %i
