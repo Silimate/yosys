@@ -79,4 +79,5 @@ assign y = a * b;
 endmodule
 EOF
 booth
+select -assert-none t:$mul
 select -assert-max 700 t:$_XOR_
