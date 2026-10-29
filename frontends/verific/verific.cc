@@ -60,6 +60,8 @@ USING_YOSYS_NAMESPACE
 #include "VeriExpression.h"
 #include "VeriScope.h"
 #include "VeriId.h"
+#include "VeriModuleItem.h"
+#include "VeriVisitor.h"
 #endif
 
 #ifdef VERIFIC_VHDL_SUPPORT
@@ -206,6 +208,47 @@ static void dump_verific_file_closure(const char *output_path, Array *file_names
 		log_cmd_error("Cannot write file closure '%s'.\n", output_path);
 	json.begin_object();
 	json.entry_json("files", Json(files_json));
+	json.end_object();
+}
+
+// SILIMATE: the modules a parse tree instantiates, in any generate branch
+struct VerificInstantiatedModules : public VeriVisitor
+{
+	std::set<std::string> names;
+	void VERI_VISIT(VeriModuleInstantiation, node) override
+	{
+		if (const char *name = node.GetModuleName())
+			names.insert(name);
+	}
+};
+
+// SILIMATE: write each analyzed module's file, ports and instantiated modules, unelaborated
+static void dump_verific_modules(const char *output_path)
+{
+	PrettyJson json;
+	if (!json.write_to_file(output_path))
+		log_cmd_error("Cannot write modules '%s'.\n", output_path);
+	json.begin_object();
+	MapIter mi;
+	VeriModule *veri_module;
+	FOREACH_VERILOG_MODULE(mi, veri_module) {
+		if (veri_module->GetClassId() != ID_VERIMODULE)
+			continue; // packages, interfaces, primitives, ...
+		Json::array ports;
+		unsigned i;
+		VeriIdDef *port;
+		FOREACH_ARRAY_ITEM(veri_module->GetPorts(), i, port)
+			if (port && port->Name())
+				ports.push_back(std::string(port->Name()));
+		VerificInstantiatedModules instances;
+		veri_module->Accept(instances);
+		const char *file = LineFile::GetFileName(veri_module->Linefile());
+		json.entry_json(veri_module->GetName(), Json::object{
+			{"file", file ? file : ""},
+			{"ports", ports},
+			{"instances", Json::array(instances.names.begin(), instances.names.end())},
+		});
+	}
 	json.end_object();
 }
 #endif
@@ -3784,6 +3827,13 @@ struct VerificPass : public Pass {
 		log("Note: -dump-file-closure must appear before the file-mode flag (-f, -F, -sv, etc.).\n");
 		log("\n");
 		log("\n");
+		log("    verific -dump-modules <output.json>\n");
+		log("\n");
+		log("Write each analyzed Verilog/SystemVerilog module's source file, ports, and the\n");
+		log("modules it instantiates in any generate branch to <output.json>, without\n");
+		log("elaborating.\n");
+		log("\n");
+		log("\n");
 #endif
 		log("    verific [-work <libname>] {-sv|-vhdl|...} <hdl-file>\n");
 		log("\n");
@@ -4258,6 +4308,14 @@ struct VerificPass : public Pass {
 		if (GetSize(args) > argidx && args[argidx] == "-force-ram") {
 			for (argidx++; argidx < GetSize(args); argidx++)
 				verific_force_ram_signals.push_back(args[argidx]);
+			goto check_error;
+		}
+
+		// SILIMATE: the analyzed modules, without elaborating them
+		if (GetSize(args) > argidx && args[argidx] == "-dump-modules") {
+			if (++argidx >= GetSize(args))
+				log_cmd_error("Missing JSON output path for -dump-modules.\n");
+			dump_verific_modules(args[argidx++].c_str());
 			goto check_error;
 		}
 
