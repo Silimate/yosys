@@ -26,3 +26,57 @@ EOF
 synth -run :fine
 # test compatibility with alumacc
 equiv_opt -assert booth
+
+# SILIMATE: mismatched and odd widths, each operand at its own width. The reference takes
+# the narrower operand first: SAT models $mul with a row per bit of A, so proves it faster
+design -reset
+read_verilog <<EOF
+module gold(input [15:0] a, input [4:0] b, input signed [15:0] c, input signed [4:0] d,
+	output [20:0] y, output signed [20:0] z);
+assign y = b * a;
+assign z = d * c;
+endmodule
+module gate(input [15:0] a, input [4:0] b, input signed [15:0] c, input signed [4:0] d,
+	output [20:0] y, output signed [20:0] z);
+assign y = a * b;
+assign z = c * d;
+endmodule
+EOF
+booth gate
+select -assert-none gate/t:$mul
+equiv_make gold gate equiv
+hierarchy -top equiv
+equiv_simple
+equiv_status -assert
+
+# SILIMATE: the narrower operand is recoded, or a constant one even when wider
+design -reset
+read_verilog <<EOF
+module top(input [4:0] a, input [15:0] b, input signed [4:0] c, input signed [15:0] d,
+	input [5:0] e, input signed [5:0] f,
+	output [20:0] y, output signed [20:0] z, output [17:0] p, output signed [17:0] q);
+assign y = a * b;
+assign z = c * d;
+assign p = e * 12'd2741;
+assign q = f * -12'sd1234;
+endmodule
+EOF
+equiv_opt -assert booth
+
+design -reset
+read_verilog <<EOF
+module top(input signed [4:0] a, input signed [9:0] b, output signed [14:0] y);
+assign y = a * b;
+endmodule
+EOF
+equiv_opt -assert booth -lowpower
+
+# SILIMATE: an 8x128 multiply gets five rows of 129 decoders, not 65 as if 128x128
+design -reset
+read_verilog <<EOF
+module top(input [7:0] a, input [127:0] b, output [135:0] y);
+assign y = a * b;
+endmodule
+EOF
+booth
+select -assert-max 700 t:$_XOR_
