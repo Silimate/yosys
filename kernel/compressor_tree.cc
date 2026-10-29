@@ -397,6 +397,112 @@ void emit_kogge_stone(Module *module, SigSpec a, SigSpec b, SigSpec y, IdString 
 		module->addXorGate(NEW_ID3_SUFFIX("ks_sum"), p_pre[i], g[i - 1], y[i]); // SILIMATE: Improve the naming
 }
 
+// SILIMATE: each level alternates polarity, so a stored signal is either the
+// value or its complement, and an input of the wrong polarity takes one inverter
+void emit_kogge_stone_cmos(Module *module, SigSpec a, SigSpec b, SigSpec y, IdString cell_name)
+{
+	int width = GetSize(y);
+	log_assert(GetSize(a) == width);
+	log_assert(GetSize(b) == width);
+
+	if (width == 0)
+		return;
+
+	// Operands sign-extended from bits ka-1 and kb-1 sum to a max(ka, kb) + 1 bit signed
+	// value, so build the prefix tree only that wide and extend its MSB
+	auto sext_width = [](const SigSpec &s) {
+		int k = GetSize(s);
+		while (k > 1 && s[k - 2] == s[k - 1])
+			k--;
+		return k;
+	};
+	int sum_width = std::max(sext_width(a), sext_width(b)) + 1;
+	if (sum_width < width) {
+		emit_kogge_stone_cmos(module, a.extract(0, sum_width), b.extract(0, sum_width), y.extract(0, sum_width), cell_name);
+		for (int i = sum_width; i < width; i++)
+			module->connect(y[i], y[sum_width - 1]);
+		return;
+	}
+
+	if (width == 1) {
+		module->addXorGate(NEW_ID3_SUFFIX("ks_sum"), a[0], b[0], y[0]);
+		return;
+	}
+
+	// A signal and whether it holds the complement of the value it stands for
+	struct Pol {
+		SigBit sig;
+		bool inv;
+	};
+	dict<SigBit, SigBit> inverted;
+	auto as = [&](const Pol &p, bool inv) {
+		if (p.inv == inv)
+			return p.sig;
+		auto it = inverted.find(p.sig);
+		if (it != inverted.end())
+			return it->second;
+		SigBit n = module->addWire(NEW_ID3_SUFFIX("ks_n"));
+		module->addNotGate(NEW_ID3_SUFFIX("ks_not"), p.sig, n);
+		return inverted[p.sig] = n;
+	};
+
+	// Generate and (OR-)propagate, both complemented; the sum still needs the XOR
+	std::vector<Pol> g(width), t(width);
+	std::vector<SigBit> p(width);
+	for (int i = 0; i < width; i++) {
+		SigBit gn = module->addWire(NEW_ID3_SUFFIX("ks_g"));
+		SigBit tn = module->addWire(NEW_ID3_SUFFIX("ks_t"));
+		p[i] = module->addWire(NEW_ID3_SUFFIX("ks_p"));
+		module->addNandGate(NEW_ID3_SUFFIX("ks_g_nand"), a[i], b[i], gn);
+		module->addNorGate(NEW_ID3_SUFFIX("ks_t_nor"), a[i], b[i], tn);
+		module->addXorGate(NEW_ID3_SUFFIX("ks_p_xor"), a[i], b[i], p[i]);
+		g[i] = {gn, true};
+		t[i] = {tn, true};
+	}
+
+	int num_levels = 0;
+	while ((1 << num_levels) < width)
+		num_levels++;
+
+	for (int k = 1; k <= num_levels; k++) {
+		int s = 1 << (k - 1);
+		std::vector<Pol> g_next = g, t_next = t;
+		for (int i = s; i < width; i++) {
+			// g_i | (t_i & g_(i-s)), in the polarity g_i holds
+			bool inv = g[i].inv;
+			SigBit ti = as(t[i], inv), gj = as(g[i - s], inv);
+			SigBit gnew = module->addWire(NEW_ID3_SUFFIX("ks_gnext"));
+			if (inv)
+				module->addOai3Gate(NEW_ID3_SUFFIX("ks_g_oai"), ti, gj, g[i].sig, gnew);
+			else
+				module->addAoi3Gate(NEW_ID3_SUFFIX("ks_g_aoi"), ti, gj, g[i].sig, gnew);
+			g_next[i] = {gnew, !inv};
+
+			// t_i & t_(i-s); the last level needs no propagate
+			if (k < num_levels) {
+				SigBit tj = as(t[i - s], inv);
+				SigBit tnew = module->addWire(NEW_ID3_SUFFIX("ks_tnext"));
+				if (inv)
+					module->addNorGate(NEW_ID3_SUFFIX("ks_t_nor"), ti, tj, tnew);
+				else
+					module->addNandGate(NEW_ID3_SUFFIX("ks_t_nand"), ti, tj, tnew);
+				t_next[i] = {tnew, !inv};
+			}
+		}
+		g = std::move(g_next);
+		t = std::move(t_next);
+	}
+
+	// g[i] is the carry out of bit i
+	module->connect(y[0], p[0]);
+	for (int i = 1; i < width; i++) {
+		if (g[i - 1].inv)
+			module->addXnorGate(NEW_ID3_SUFFIX("ks_sum"), p[i], g[i - 1].sig, y[i]);
+		else
+			module->addXorGate(NEW_ID3_SUFFIX("ks_sum"), p[i], g[i - 1].sig, y[i]);
+	}
+}
+
 Cell *emit_final_adder(Module *module, SigSpec a, SigSpec b, SigSpec y, FinalAdder choice, IdString cell_name) {
 	switch (choice) {
 		case FinalAdder::DEFAULT:
@@ -405,6 +511,10 @@ Cell *emit_final_adder(Module *module, SigSpec a, SigSpec b, SigSpec y, FinalAdd
 		}
 		case FinalAdder::PARALLEL_PREFIX: {
 			emit_kogge_stone(module, a, b, y, cell_name);
+			return nullptr;
+		}
+		case FinalAdder::PARALLEL_PREFIX_CMOS: { // SILIMATE
+			emit_kogge_stone_cmos(module, a, b, y, cell_name);
 			return nullptr;
 		}
 	}
@@ -416,6 +526,7 @@ FinalAdder pick_final_adder(int width, int final_depth, FinalMode mode) {
 	switch (mode) {
 		case FinalMode::RIPPLE:  return FinalAdder::RIPPLE;
 		case FinalMode::PREFIX:  return FinalAdder::PARALLEL_PREFIX;
+		case FinalMode::PREFIX_CMOS: return FinalAdder::PARALLEL_PREFIX_CMOS; // SILIMATE
 		case FinalMode::AUTO:
 		default: {
 			bool wide = width >= RIPPLE_PREFIX_WIDTH_THRESHOLD;
