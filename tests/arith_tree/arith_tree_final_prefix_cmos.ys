@@ -1,0 +1,137 @@
+# -final prefix-cmos: the final adder as a Kogge-Stone graph of inverting gates
+
+read_verilog <<EOT
+module prefix_cmos_unsigned(
+	input [31:0] a, b, c, d,
+	output [31:0] y
+);
+	assign y = a + b + c + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix-cmos
+design -load postopt
+select -assert-count 2 t:$fa
+select -assert-none t:$add
+select -assert-min 1 t:$_AOI3_
+select -assert-min 1 t:$_OAI3_
+select -assert-none t:$_AND_ t:$_OR_ %u
+design -reset
+
+read_verilog <<EOT
+module prefix_cmos_signed(
+	input signed [15:0] a, b,
+	input signed [11:0] c,
+	output signed [19:0] y
+);
+	assign y = a + b + c;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix-cmos
+design -load postopt
+select -assert-min 1 t:$_AOI3_ t:$_OAI3_ %u
+select -assert-none t:$_AND_ t:$_OR_ %u
+design -reset
+
+read_verilog <<EOT
+module prefix_cmos_subtract(
+	input [23:0] a, b, c, d,
+	output [23:0] y
+);
+	assign y = a - b - c + d;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix-cmos
+design -load postopt
+select -assert-min 1 t:$_AOI3_ t:$_OAI3_ %u
+select -assert-none t:$_AND_ t:$_OR_ %u
+design -reset
+
+# Every width from 1 up exercises the polarity bookkeeping at each prefix depth
+read_verilog <<EOT
+module prefix_cmos_widths(
+	input [0:0] a1, b1, c1, output [0:0] y1,
+	input [1:0] a2, b2, c2, output [1:0] y2,
+	input [2:0] a3, b3, c3, output [2:0] y3,
+	input [4:0] a5, b5, c5, output [4:0] y5,
+	input [7:0] a8, b8, c8, output [7:0] y8,
+	input [8:0] a9, b9, c9, output [8:0] y9,
+	input [16:0] a17, b17, c17, output [16:0] y17
+);
+	assign y1 = a1 + b1 + c1;
+	assign y2 = a2 + b2 + c2;
+	assign y3 = a3 + b3 + c3;
+	assign y5 = a5 + b5 + c5;
+	assign y8 = a8 + b8 + c8;
+	assign y9 = a9 + b9 + c9;
+	assign y17 = a17 + b17 + c17;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix-cmos
+design -load postopt
+select -assert-none t:$add
+select -assert-none t:$_AND_ t:$_OR_ %u
+design -reset
+
+# A late product whose upper bits skip the tree keeps the AND/OR prefix network:
+# only the product has bits above column 3, so they reach the final adder untouched
+read_verilog <<EOT
+module prefix_cmos_late_product(
+	input [3:0] p, q, r, s,
+	output [7:0] y
+);
+	assign y = p * q + r + s;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix-cmos -schedule
+design -load postopt
+select -assert-count 1 t:$mul
+select -assert-none t:$_AOI3_ t:$_OAI3_ %u
+select -assert-min 1 t:$_AND_
+select -assert-min 1 t:$_OR_
+design -reset
+
+# The same sum with the product expanded into the tree has nothing to bypass it
+read_verilog <<EOT
+module prefix_cmos_fused_product(
+	input [3:0] p, q, r, s,
+	output [7:0] y
+);
+	assign y = p * q + r + s;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix-cmos -schedule -fma-chains
+design -load postopt
+select -assert-none t:$mul
+select -assert-min 1 t:$_AOI3_ t:$_OAI3_ %u
+design -reset
+
+# A late operand that is not a product does not trip the guard
+read_verilog <<EOT
+module prefix_cmos_late_shift(
+	input [15:0] u,
+	input [3:0] v,
+	input [7:0] r, s,
+	output [15:0] y
+);
+	assign y = (u << v) + r + s;
+endmodule
+EOT
+hierarchy -auto-top
+proc
+equiv_opt -assert arith_tree -final prefix-cmos -schedule
+design -load postopt
+select -assert-min 1 t:$_AOI3_ t:$_OAI3_ %u
+select -assert-none t:$_AND_ t:$_OR_ %u
+design -reset

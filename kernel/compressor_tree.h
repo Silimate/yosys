@@ -86,12 +86,14 @@ enum class FinalAdder {
 	DEFAULT,         // emit $add and let downstream techmap pick
 	RIPPLE,          // emit $add with explicit narrow hint
 	PARALLEL_PREFIX, // emit $add with PARALLEL_PREFIX
+	PARALLEL_PREFIX_CMOS, // SILIMATE: Kogge-Stone in inverting gates (see emit_kogge_stone_cmos)
 };
 
 enum class FinalMode {
 	AUTO,
 	RIPPLE,
 	PREFIX,
+	PREFIX_CMOS, // SILIMATE: see emit_kogge_stone_cmos
 };
 
 // SILIMATE: every emitter takes cell_name, the originating cell, so the emitted
@@ -138,6 +140,20 @@ std::pair<SigSpec, SigSpec> reduce_scheduled(Module *module, std::vector<DepthSi
  * @cell_name: Originating cell, used to name the emitted logic
  */
 void emit_kogge_stone(Module *module, SigSpec a, SigSpec b, SigSpec y, IdString cell_name);
+
+/**
+ * emit_kogge_stone_cmos() - SILIMATE: Emit a Kogge-Stone adder in inverting gates
+ * @module: The Yosys module to which the gates will be added
+ * @a: Signal A
+ * @b: Signal B
+ * @y: Signal Y = (A + B) mod 2^W
+ * @cell_name: Originating cell, used to name the emitted logic
+ *
+ * The same prefix graph as emit_kogge_stone(), with each level built as one
+ * $_AOI3_/$_OAI3_ (generate) and one $_NAND_/$_NOR_ (propagate) of alternating
+ * polarity, so a level is one inverting gate instead of an AND and an OR.
+ */
+void emit_kogge_stone_cmos(Module *module, SigSpec a, SigSpec b, SigSpec y, IdString cell_name);
 
 /**
  * emit_final_adder() - Emit the final carry-propagate addition between the two reduced vectors

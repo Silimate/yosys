@@ -107,6 +107,9 @@ struct ArithTreeWorker {
 	pool<Cell *> macc;
 	pool<Cell *> sext_linked;
 	pool<Cell *> fused;
+	// SILIMATE: final adders built under -final prefix-cmos, and those kept as an AND/OR
+	// prefix network because a late product reaches them past the tree
+	int prefix_cmos = 0, prefix_kept = 0;
 
 	struct Operand {
 		SigSpec sig;
@@ -1058,13 +1061,71 @@ struct ArithTreeWorker {
 			e.depth = level.at(e.depth);
 	}
 
+	// SILIMATE: whether a bit comes out of a word-level multiplier, directly or through a select arm
+	bool from_product(SigBit bit)
+	{
+		auto is_product = [&](SigBit b) {
+			auto d = bit_driver.find(sigmap(b));
+			return d != bit_driver.end() && d->second->type.in(ID($mul), ID($macc), ID($macc_v2));
+		};
+		if (is_product(bit))
+			return true;
+		auto d = bit_driver.find(sigmap(bit));
+		if (d == bit_driver.end() || !d->second->type.in(ID($mux), ID($pmux)))
+			return false;
+		for (auto port : {ID::A, ID::B})
+			for (auto arm : d->second->getPort(port))
+				if (is_product(arm))
+					return true;
+		return false;
+	}
+
+	// SILIMATE: an inverting-gate prefix adder gives every input full log depth, which suits
+	// inputs that arrive together. A late product whose upper bits reach a or b untouched,
+	// within a compressor level of the tree's outputs, does better on the AND/OR network
+	// the mapper reshapes, with its shorter carry path from the top columns.
+	bool late_product_bypass(const SigSpec &a, const SigSpec &b, const dict<SigBit, int> &leaf, int earliest, int final_depth)
+	{
+		int bar = std::max(earliest + final_depth - CompressorTree::FA_GATE_DEPTH, earliest + CompressorTree::FA_GATE_DEPTH);
+		for (int i = 0; i < GetSize(a); i++)
+			for (auto bit : {a[i], b[i]}) {
+				auto it = leaf.find(bit);
+				if (it != leaf.end() && it->second >= bar && from_product(bit))
+					return true;
+			}
+		return false;
+	}
+
 	void emit_tree(Cell *cell, std::vector<Operand> &operands, SigSpec result_y, std::vector<int> &neg_offsets)
 	{
 		int width = GetSize(result_y);
+		// SILIMATE: -final prefix-cmos needs the earliest operand's arrival and that of every
+		// bit handed to the tree
+		bool cmos = opt.final_mode == CompressorTree::FinalMode::PREFIX_CMOS;
+		int earliest = -1;
+		if (cmos)
+			for (auto &op : operands) {
+				int d = GetSize(op.factor_b) ? std::max(arrival(op.sig), arrival(op.factor_b)) + 1 : arrival(op.sig);
+				earliest = earliest < 0 ? d : std::min(earliest, d);
+			}
 		auto pool = build_operand_pool(cell, operands, width, neg_offsets);
+		dict<SigBit, int> leaf;
+		if (cmos)
+			for (auto &e : pool)
+				for (auto bit : e.sig)
+					if (bit.wire)
+						leaf[bit] = arrival(bit);
 		int final_depth = 0;
 		auto [a, b] = CompressorTree::reduce_scheduled(module, std::move(pool), width, opt.strategy, cell->name, nullptr, &final_depth, opt.cell_fa); // SILIMATE: Improve the naming
 		auto final_choice = CompressorTree::pick_final_adder(width, final_depth, opt.final_mode);
+		if (cmos) {
+			if (late_product_bypass(a, b, leaf, std::max(earliest, 0), final_depth)) {
+				final_choice = CompressorTree::FinalAdder::PARALLEL_PREFIX;
+				prefix_kept++;
+			} else {
+				prefix_cmos++;
+			}
+		}
 		CompressorTree::emit_final_adder(module, a, b, result_y, final_choice, cell->name); // SILIMATE: Improve the naming
 	}
 
@@ -1191,8 +1252,15 @@ struct ArithTreePass : public Pass {
 		log("        '42' (the default) prefers 4:2 compressor groupings, with\n");
 		log("        fallback to 3:2 compressors for residuals\n");
 		log("\n");
-		log("    -final <auto|ripple|prefix>\n");
+		log("    -final <auto|ripple|prefix|prefix-cmos>\n");
 		log("        Selects the architecture used for the final two-vector add.\n");
+		log("        'prefix' builds a Kogge-Stone adder of AND/OR/XOR gates;\n");
+		log("        'prefix-cmos' builds the same prefix graph from inverting gates\n");
+		log("        ($_NAND_/$_NOR_ and $_AOI3_/$_OAI3_ of alternating polarity), one\n");
+		log("        gate per prefix level, for flows whose mapper would otherwise\n");
+		log("        trade those levels away for area. An adder that a late product\n");
+		log("        reaches past the tree (its upper bits arriving untouched, about\n");
+		log("        as late as the tree's own outputs) keeps the AND/OR network.\n");
 		log("\n");
 		log("    -no-fma\n");
 		log("        Disable fused multiply-add expansion in $macc cells\n");
@@ -1271,6 +1339,7 @@ struct ArithTreePass : public Pass {
 				if (v == "auto") { opt.final_mode = CompressorTree::FinalMode::AUTO; }
 				else if (v == "ripple") { opt.final_mode = CompressorTree::FinalMode::RIPPLE; }
 				else if (v == "prefix") { opt.final_mode = CompressorTree::FinalMode::PREFIX; }
+				else if (v == "prefix-cmos") { opt.final_mode = CompressorTree::FinalMode::PREFIX_CMOS; } // SILIMATE
 				else { log_cmd_error("arith_tree: unknown -final '%s'\n", v.c_str()); }
 				continue;
 			}
@@ -1306,13 +1375,20 @@ struct ArithTreePass : public Pass {
 		}
 		extra_args(args, argidx, design);
 
+		int prefix_cmos = 0, prefix_kept = 0;
 		for (auto mod : design->selected_modules()) {
 			// Rejoining moves the parent's other operand up a column, which only -bit-offsets can chain
 			if (opt.bit_offsets)
 				rejoin_stripped_lsbs(mod);
 			ArithTreeWorker worker(opt, mod);
 			worker.run();
+			prefix_cmos += worker.prefix_cmos;
+			prefix_kept += worker.prefix_kept;
 		}
+		// SILIMATE
+		if (opt.final_mode == CompressorTree::FinalMode::PREFIX_CMOS)
+			log("Built %d final adder(s) from inverting gates; kept %d as AND/OR, reached late by a product.\n",
+			    prefix_cmos, prefix_kept);
 	}
 } ArithTreePass;
 
