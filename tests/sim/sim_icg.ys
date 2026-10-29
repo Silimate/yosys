@@ -1,0 +1,25 @@
+# Gating a register's clock with $icg must not change what it captures. The $icg
+# latches EN | SE while CLK is low, so an enable a flop changes on the rising edge
+# gates the next edge, as the $dffe's enable did, not the edge it changed on.
+read_verilog <<EOT
+module top(input clk, output reg [3:0] q = 0);
+	reg en = 0;
+	always @(posedge clk)
+		en <= ~en;
+	always @(posedge clk)
+		if (en)
+			q <= q + 1;
+endmodule
+EOT
+proc
+opt_dff
+design -save dffe
+
+sim -clock clk -n 8 -w top
+select -assert-count 1 a:init=4'b0100 top/q %i
+
+design -load dffe
+clockgate -pos $icg EN:CLK:GCLK -tie_lo SE -min_net_size 1
+select -assert-count 1 t:$icg
+sim -clock clk -n 8 -w top
+select -assert-count 1 a:init=4'b0100 top/q %i
