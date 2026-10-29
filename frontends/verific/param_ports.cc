@@ -24,7 +24,7 @@
 
 #include "kernel/yosys.h"
 
-#ifdef YOSYS_ENABLE_VERIFIC
+#if defined(YOSYS_ENABLE_VERIFIC) && defined(VERIFIC_HIER_TREE_SUPPORT) // hier_tree counts the copies
 
 #include "Array.h"
 #include "Map.h"
@@ -148,7 +148,10 @@ static ValueType value_type(VeriExpression *e, const Types &types, int depth = 0
 			return {32, true};
 		if (!id || !id->IsParam() || id->IsType())
 			return {};
-		return untyped(id) ? value_type(id->GetInitialValue(), types, depth + 1) : declared(id->GetDataType());
+		if (!untyped(id))
+			return declared(id->GetDataType());
+		// An overridable one takes each parent's value, whose type its default doesn't tell
+		return id->IsLocalParam() ? value_type(id->GetInitialValue(), types, depth + 1) : ValueType{};
 	}
 	case ID_VERIBINARYOPERATOR: {
 		auto op = static_cast<VeriBinaryOperator *>(e);
@@ -205,16 +208,16 @@ static bool has_wire_type(VeriIdDef *id, const Types &types)
 	return t != nullptr;
 }
 
-// Whether an override differs per loop index: it reads a genvar, a parameter being promoted, or a
-// parameter computed from either
-static bool varies(VeriExpression *e, const pool<VeriIdDef *> &promoted, pool<VeriIdDef *> &seen)
+// Whether an override differs per instance: it reads a parameter being promoted, a genvar if
+// `genvars`, or a parameter computed from either
+static bool varies(VeriExpression *e, const pool<VeriIdDef *> &promoted, bool genvars, pool<VeriIdDef *> &seen)
 {
 	for (auto id : refs(e)) {
 		if (!id || !seen.insert(id).second)
 			continue;
-		if (id->IsGenVar() || promoted.count(id))
+		if ((genvars && id->IsGenVar()) || promoted.count(id))
 			return true;
-		if (id->IsParam() && varies(id->GetInitialValue(), promoted, seen))
+		if (id->IsParam() && varies(id->GetInitialValue(), promoted, genvars, seen))
 			return true;
 	}
 	return false;
@@ -520,9 +523,9 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 	// Parameters an instantiation sets from a loop index, and later ones it sets from parameters
 	// already chosen: a parent can only promote those if the child follows, whatever its copies
 	dict<VeriModule *, pool<VeriIdDef *>> promote;
-	pool<VeriIdDef *> all, too_few;
+	pool<VeriIdDef *> all;
 	pool<VeriModule *> under_vhdl;
-	auto grow = [&](const pool<VeriIdDef *> &from) {
+	auto grow = [&](const pool<VeriIdDef *> &from, bool genvars) {
 		bool grew = false;
 		for (auto &it : uses) {
 			if (it.first->IsInterface() || it.first->IsPrimitive() || under_vhdl.count(it.first))
@@ -531,13 +534,13 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 				for (auto &o : overrides(use.second, it.first)) {
 					VeriIdDef *p = o.first;
 					pool<VeriIdDef *> visited;
-					if (p->IsParam() && !p->IsType() && !p->IsLocalParam() && !all.count(p) && !too_few.count(p) && varies(o.second, from, visited))
+					if (p->IsParam() && !p->IsType() && !p->IsLocalParam() && !all.count(p) && varies(o.second, from, genvars, visited))
 						promote[it.first].insert(p), all.insert(p), grew = true;
 				}
 		}
 		return grew;
 	};
-	grow({});
+	grow({}, true);
 	if (all.empty())
 		return 0;
 
@@ -576,10 +579,10 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 	for (auto &it : promote)
 		if (GetSize(variants[it.first]) < min_variants || under_vhdl.count(it.first)) {
 			for (auto p : it.second)
-				all.erase(p), too_few.insert(p);
+				all.erase(p);
 			it.second.clear();
 		}
-	while (grow(all)) {}
+	while (grow(all, false)) {}
 
 	pool<VeriModule *> keys;
 	for (auto &it : promote)
@@ -639,7 +642,7 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 			tracked.insert(locals.begin(), locals.end());
 			for (auto id : tracked)
 				if (!has_wire_type(id, types))
-					blocked.emplace(id, untyped(id) ? "its values differ in width or sign" : "its type has no matching port");
+					blocked.emplace(id, untyped(id) ? "its values don't share one known width and sign" : "its type has no matching port");
 			UseScan scan(tracked, local_ok);
 			m->Accept(scan);
 			for (auto &b : scan.blocked)
