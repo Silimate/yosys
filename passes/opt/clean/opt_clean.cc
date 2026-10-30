@@ -95,7 +95,9 @@ struct OptCleanPass : public Pass {
 			clean_ctx.stats.log();
 
 			design->optimize();
-			design->check();
+			// SILIMATE: check only the cleaned modules, so per-module callers don't pay for the whole design
+			for (auto module : selected_modules)
+				module->check();
 		}
 
 		log_pop();
@@ -154,7 +156,9 @@ struct CleanPass : public Pass {
 			clean_ctx.stats.log();
 
 			design->optimize();
-			design->check();
+			// SILIMATE: check only the cleaned modules, so per-module callers don't pay for the whole design
+			for (auto module : selected_modules)
+				module->check();
 		}
 
 		request_garbage_collection();
