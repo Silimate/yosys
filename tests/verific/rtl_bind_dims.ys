@@ -7,7 +7,8 @@ logger -expect log "RTL bind of module top: 16 register bit\(s\) placed from the
 verific -import -all -top top
 logger -check-expected
 # `?` stands in for the `=` and the spaces, which a select pattern cannot spell
-select -assert-mod-count 1 A:rtl_bind_dims=a?p3:0?b?p0:3?c?p5:2?m?u0:1,p1:0
+# The ports d and y are not registers, but their variables are listed too, as for every wire
+select -assert-mod-count 1 A:rtl_bind_dims=a?p3:0?b?p0:3?c?p5:2?d?p3:0?m?u0:1,p1:0?y?p3:0
 
 # reg_rename places a dump that lists these registers one index per signal by those ranges,
 # whatever order it lists them in: bit 0 is the LSB, which is b[3] for `logic [0:3] b`

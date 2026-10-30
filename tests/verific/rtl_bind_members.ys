@@ -8,4 +8,7 @@ verific -cfg db_synopsys_register_names 1
 verific -sv rtl_bind_members.sv
 verific -import -all -top top
 # `?` stands in for the `=`, the `;`, the spaces and the brackets, which a select pattern cannot spell
-select -assert-mod-count 1 A:rtl_bind_members=arr?.a:4:p3:0?.n.p:2:p1:0?.n.q:1?.pa?1?.p:2:p1:0?.pa?1?.q:1?.pa?0?.p:2:p1:0?.pa?0?.q:1?.b:1?bus_q?.data:8:p7:0?.mask:2:p1:0?s?.a:4:p3:0?.n.p:2:p1:0?.n.q:1?.pa?1?.p:2:p1:0?.pa?1?.q:1?.pa?0?.p:2:p1:0?.pa?0?.q:1?.b:1
+# The ports d, y and z are not registers, but their variables are listed too, as for every wire
+# bus_q lists .data:8:p7:0;.mask:2:p1:0 and arr, d, s, y and z each list s_t's leaves
+# .a:4:p3:0;.n.p:2:p1:0;.n.q:1;.pa[1].p:2:p1:0;.pa[1].q:1;.pa[0].p:2:p1:0;.pa[0].q:1;.b:1
+select -assert-mod-count 1 A:rtl_bind_members=arr?.a:4:p3:0?.n.p:2:p1:0?.n.q:1?.pa?1?.p:2:p1:0?.pa?1?.q:1?.pa?0?.p:2:p1:0?.pa?0?.q:1?.b:1?bus_q?.data:8:p7:0?.mask:2:p1:0?d?.a:4:p3:0?.n.p:2:p1:0?.n.q:1?.pa?1?.p:2:p1:0?.pa?1?.q:1?.pa?0?.p:2:p1:0?.pa?0?.q:1?.b:1?s?.a:4:p3:0?.n.p:2:p1:0?.n.q:1?.pa?1?.p:2:p1:0?.pa?1?.q:1?.pa?0?.p:2:p1:0?.pa?0?.q:1?.b:1?y?.a:4:p3:0?.n.p:2:p1:0?.n.q:1?.pa?1?.p:2:p1:0?.pa?1?.q:1?.pa?0?.p:2:p1:0?.pa?0?.q:1?.b:1?z?.a:4:p3:0?.n.p:2:p1:0?.n.q:1?.pa?1?.p:2:p1:0?.pa?1?.q:1?.pa?0?.p:2:p1:0?.pa?0?.q:1?.b:1
