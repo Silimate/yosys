@@ -1,0 +1,48 @@
+# verific -promote_params: a module copied once per generate-loop index elaborates once, with the
+# index-driven parameters as input ports, and the design stays equivalent.
+
+verific -sv promote_params.sv
+verific -import top
+select -assert-mod-count 16 bank*
+select -assert-mod-count 17 match*
+flatten
+async2sync
+rename top gold
+design -stash gold
+
+# Below the copy count nothing changes
+verific -promote_params 18
+verific -sv promote_params.sv
+verific -import top
+select -assert-mod-count 16 bank*
+design -reset
+
+verific -promote_params 16
+verific -sv promote_params.sv
+logger -expect log "Keeping parameter MODE of module bank: it is read in a generate condition\." 1
+logger -expect log "Keeping parameter RST of module rbank: it is read in an asynchronous reset value\." 1
+logger -expect log "Keeping parameter LO of module match: its values don't share one known width and sign\." 1
+logger -expect log "Keeping parameter P of module wide: its values don't share one known width and sign\." 1
+logger -expect log "Promoted parameter\(s\) BASE, FN of module bank \(16 copies\) to input ports\." 1
+logger -expect log "Promoted parameter\(s\) K of module leaf \(8 copies\) to input ports\." 1
+logger -expect log "Promoted parameter\(s\) K of module pair \(2 copies\) to input ports\." 1
+logger -expect log "Promoted parameter\(s\) IDX of module match \(17 copies\) to input ports\." 1
+verific -import top
+logger -check-expected
+select -assert-mod-count 2 bank*
+select -assert-mod-count 1 leaf*
+select -assert-mod-count 1 pair*
+select -assert-mod-count 16 wide*
+select -assert-mod-count 17 match*
+select -assert-mod-count 16 rbank*
+select -assert-count 4 bank*/i:FN bank*/i:BASE
+flatten
+async2sync
+rename top gate
+design -stash gate
+
+design -copy-from gold -as gold gold
+design -copy-from gate -as gate gate
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+sat -verify -prove-asserts -set-init-zero -tempinduct -seq 1 miter

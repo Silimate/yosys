@@ -130,6 +130,8 @@ vector<string> verific_force_ram_signals;
 
 // SILIMATE: module names to elaborate as blackboxes (keep ports, skip body)
 static pool<std::string> verific_compile_as_blackbox;
+static int verific_promote_params_min; // SILIMATE: see param_ports.cc
+int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, const Map *parameters, int min_variants);
 
 static unsigned compile_as_blackbox_cb(const char *module_name)
 {
@@ -3358,6 +3360,8 @@ std::set<std::string> import_tops(const char* work, std::map<std::string,Netlist
 		}
 #endif
 #ifdef VERIFIC_HIER_TREE_SUPPORT
+		if (verific_promote_params_min > 0) // SILIMATE
+			verific_promote_params(&veri_modules, &vhdl_units, parameters, verific_promote_params_min);
 		if (show_message)
 			log("Running hier_tree::Elaborate().\n");
 		netlists = hier_tree::Elaborate(&veri_modules, &vhdl_units, parameters);
@@ -3444,6 +3448,7 @@ void verific_cleanup()
 	verific_libexts.clear();
 	verific_force_ram_signals.clear(); // SILIMATE
 	verific_compile_as_blackbox.clear(); // SILIMATE
+	verific_promote_params_min = 0; // SILIMATE
 #endif
 	verific_import_pending = false;
 }
@@ -3835,6 +3840,15 @@ struct VerificPass : public Pass {
 		log("\n");
 		log("Elaborate each listed module as a blackbox: keep the RTL port list\n");
 		log("but skip the implementation. Unlike -ignore_module, the module is still parsed\n");
+		log("\n");
+		log("\n");
+		log("    verific -promote_params <min_copies>\n");
+		log("\n");
+		log("At the next import, turn a parameter into an input port of the same name when\n");
+		log("a generate loop sets it from its index and its module would otherwise\n");
+		log("elaborate to at least <min_copies> copies. Each instance connects its override\n");
+		log("to the port, so the module elaborates once. A parameter that sizes or selects\n");
+		log("logic, sets a reset value or feeds a function stays a parameter.\n");
 		log("\n");
 		log("\n");
 #endif
@@ -4372,6 +4386,13 @@ struct VerificPass : public Pass {
 			veri_file::AddLibExt(".svp");
 			veri_file::AddLibExt(".h");
 			veri_file::AddLibExt(".inc");
+			goto check_error;
+		}
+
+		if (GetSize(args) > argidx && args[argidx] == "-promote_params") {
+			if (++argidx >= GetSize(args))
+				log_cmd_error("Missing minimum copy count for -promote_params.\n");
+			verific_promote_params_min = atoi(args[argidx++].c_str());
 			goto check_error;
 		}
 
