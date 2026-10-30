@@ -1,0 +1,19 @@
+# RTL bind lists the declared ranges and struct members of every wire's variable on its module,
+# as it does for the registers it stamps, so a design without registers has them too.
+# db_preserve_user_nets keeps top's internal wires and regs's register, which drive nothing.
+# Each of top's wires is part of one variable: a packed struct (s.a); a packed array of structs
+# (pa[1].a), listed by its element's members; an unpacked array of structs (ua[0].a), listed per
+# element; and a multi-dimensional vector (md[0][1]). The port d is listed too; the plain structs
+# d and s have no ranges to list.
+# In regs, the entry of a register anchored at an element of mem stays next to mem's own.
+
+verific -cfg db_preserve_user_nets 1
+verific -sv rtl_bind_wires.sv
+verific -import -all -top top
+# `?` stands in for the `=`, the `;`, the spaces and the brackets, which a select pattern cannot spell
+# In top, rtl_bind_dims is md=u0:1,p1:0,p2:0 pa=p1:0 ua=u0:1
+select -assert-mod-count 1 A:rtl_bind_dims=md?u0:1,p1:0,p2:0?pa?p1:0?ua?u0:1
+# In top, rtl_bind_members is d=.a:4:p3:0;.b:1 pa=.a:4:p3:0;.b:1 s=.a:4:p3:0;.b:1 ua[0]=.a:4:p3:0;.b:1 ua[1]=.a:4:p3:0;.b:1
+select -assert-mod-count 1 A:rtl_bind_members=d?.a:4:p3:0?.b:1?pa?.a:4:p3:0?.b:1?s?.a:4:p3:0?.b:1?ua?0??.a:4:p3:0?.b:1?ua?1??.a:4:p3:0?.b:1
+# In regs, rtl_bind_dims is d=p3:0 mem=u0:7,p3:0 mem[3]=p3:0
+select -assert-mod-count 1 A:rtl_bind_dims=d?p3:0?mem?u0:7,p3:0?mem?3??p3:0

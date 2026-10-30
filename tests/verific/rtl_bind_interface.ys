@@ -15,6 +15,9 @@ logger -check-expected
 select -assert-count 2 top/a:rtl_bind=i0/8*
 select -assert-count 1 top/a:rtl_bind=i0_x/4*
 select -assert-count 2 producer*/a:rtl_bind=m/8*
+# `?` stands in for the `=`, the `;` and the space, which a select pattern cannot spell
+# bus is listed next to i0 though its flattened members bus_a and bus_b_c are not registers
+select -assert-mod-count 1 A:rtl_bind_members=bus?.a:4:p3:0?.b_c:4:p3:0?i0?.a:4:p3:0?.b_c:4:p3:0
 log -pop
 
 log -header "Block separator \".\": the same stamps"

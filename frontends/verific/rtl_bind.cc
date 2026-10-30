@@ -362,7 +362,7 @@ std::optional<RtlBinder::Location> RtlBinder::decode_register(const std::string 
 	return loc;
 }
 
-// Same decode, but from a Q wire name (`foo`, `foo[3]`, `s.a`) instead of `foo_reg`
+// Same decode, but from a wire name (`foo`, `foo[3]`, `s.a`) instead of `foo_reg`
 const RtlBinder::Location *RtlBinder::place_net(RTLIL::Wire *wire)
 {
 	if (!wire || !wire->name.isPublic())
@@ -380,6 +380,22 @@ const RtlBinder::Location *RtlBinder::place_net(RTLIL::Wire *wire)
 		it = net_places.emplace(wire, loc).first;
 	}
 	return it->second ? &*it->second : nullptr;
+}
+
+// List the variable a wire is part of in `rtl_bind_dims` and `rtl_bind_members`, see rtl_bind.h
+void RtlBinder::list_variable(RTLIL::Wire *wire)
+{
+	const Location *loc = place_net(wire);
+	if (!loc)
+		return;
+	Shape shape;
+	if (!obj_dims.count(loc->var) && decl_shape(nl->GetTypeRange(loc->var.c_str()), shape)) {
+		std::string dims = shape.spell();
+		if (!dims.empty())
+			obj_dims[loc->var] = dims;
+	}
+	if (loc->elem && !obj_members.count(loc->obj))
+		spell_members(loc->elem, "", obj_members[loc->obj]);
 }
 
 void RtlBinder::begin(Netlist *netlist)
@@ -456,6 +472,8 @@ void RtlBinder::finish(RTLIL::Module *module)
 	if (decoded_bits || fallback_bits || missing_bits)
 		log("  RTL bind of module %s: %d register bit(s) placed from their register name, %d from their net, %d unbound.\n",
 				log_id(module->name), decoded_bits, fallback_bits, missing_bits);
+	for (auto wire : module->wires())
+		list_variable(wire);
 	std::string dims;
 	for (auto &it : obj_dims)
 		dims += (dims.empty() ? "" : " ") + it.first + "=" + it.second;

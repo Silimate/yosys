@@ -25,6 +25,9 @@ YOSYS_NAMESPACE_BEGIN
 // `data_q=p15:0 mem=u0:3,p7:0`: unpacked (u) then packed (p), outermost first.
 // Its `rtl_bind_members` lists the leaf members of each struct-typed object's element, top bits
 // first, as path, width and declared ranges, e.g. `s=.a:4:p3:0;.b.c:1`.
+// Both also list the variable of every wire: its declared ranges keyed by the variable, e.g.
+// `x=u0:7,p3:0` next to a register's `x[3]=p3:0`, and its element's members keyed by the object
+// a register there would be anchored at (`ua[0]` for the wire `ua[0].a`, `s` for `s.a`).
 struct RtlBinder
 {
 	void begin(Verific::Netlist *nl);
@@ -77,8 +80,8 @@ private:
 	bool vhdl = false;
 	std::map<RTLIL::Wire *, std::optional<Location>> net_places;
 	std::map<std::string, std::string> flattened; // `q0_sel` -> `q0.sel`
-	std::map<std::string, std::string> obj_dims; // stamped obj -> its declared ranges
-	std::map<std::string, std::string> obj_members; // stamped struct-typed obj -> its leaf members
+	std::map<std::string, std::string> obj_dims; // obj -> its declared ranges
+	std::map<std::string, std::string> obj_members; // obj with a struct element -> that element's leaf members
 	int decoded_bits = 0, fallback_bits = 0, missing_bits = 0;
 
 	bool parse_steps(const std::string &path, size_t pos, std::vector<Step> &steps) const;
@@ -91,6 +94,7 @@ private:
 	bool narrow(Location &loc, const Verific::TypeRange *node, int a, int b) const;
 	std::optional<Location> decode_register(const std::string &name, int q_width) const;
 	const Location *place_net(RTLIL::Wire *wire);
+	void list_variable(RTLIL::Wire *wire);
 };
 
 YOSYS_NAMESPACE_END
