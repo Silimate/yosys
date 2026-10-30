@@ -18,7 +18,7 @@ YOSYS_NAMESPACE_BEGIN
 #ifdef YOSYS_ENABLE_ZLIB
 
 gzip_ostream::obuf::obuf() {
-    setp(buffer, buffer + buffer_size - 1);
+    setp(buffer, buffer + buffer_size);
 }
 
 bool gzip_ostream::obuf::open(const std::string &filename) {
@@ -35,6 +35,16 @@ int gzip_ostream::obuf::sync() {
         pbump(-num);
     }
     return 0;
+}
+
+std::ostream::int_type gzip_ostream::obuf::overflow(int_type c) {
+    if (sync() != 0)
+        return traits_type::eof();
+    if (!traits_type::eq_int_type(c, traits_type::eof())) {
+        *pptr() = traits_type::to_char_type(c);
+        pbump(1);
+    }
+    return traits_type::not_eof(c);
 }
 
 gzip_ostream::obuf::~obuf() {
