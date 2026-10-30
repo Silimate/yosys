@@ -3899,8 +3899,8 @@ struct VerificPass : public Pass {
 		log("elaborate to at least <min_copies> copies. Each instance connects its override\n");
 		log("to the port, so the module elaborates once. A parameter that sizes or selects\n");
 		log("logic, sets a reset value or feeds a function stays a parameter, and so does\n");
-		log("every parameter of a module whose remaining parameters would still tell at\n");
-		log("least half its copies apart.\n");
+		log("every parameter of a module whose remaining parameters would still tell more\n");
+		log("than half its copies apart.\n");
 		log("\n");
 		log("\n");
 #endif
