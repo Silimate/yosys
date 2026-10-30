@@ -13,8 +13,8 @@ namespace Zlib {
 }
 
 /*
-An output stream that uses a stringbuf to buffer data internally,
-using zlib to write gzip-compressed data every time the stream is flushed.
+An output stream that buffers data internally, using zlib to write gzip-compressed
+data when the buffer fills or the stream is flushed. It is not seekable.
 */
 class gzip_ostream : public std::ostream {
 public:
@@ -25,15 +25,16 @@ public:
 		return outbuf.open(filename);
 	}
 private:
-	class obuf : public std::stringbuf {
+	class obuf : public std::streambuf {
 	public:
 		obuf();
 		bool open(const std::string &filename);
 		virtual int sync() override;
+		virtual int_type overflow(int_type c) override;
 		virtual ~obuf();
 	private:
 		static const int buffer_size = 4096;
-		char buffer[buffer_size];             // Internal buffer for compressed data
+		char buffer[buffer_size];             // Internal buffer for uncompressed data
 		Zlib::gzFile gzf = nullptr;                 // Handle to the gzip file
 	};
 

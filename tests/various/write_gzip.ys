@@ -1,3 +1,4 @@
+! mkdir -p temp
 read_verilog <<EOT
 module top(input a, output y);
 assign y = !a;
@@ -14,3 +15,32 @@ read_verilog write_gzip.v
 ! rm -f write_gzip.v
 hierarchy -top top
 select -assert-any top
+
+# Larger than the gzip stream's 4 KiB buffer, so the buffer fills and flushes mid-write
+design -reset
+read_verilog <<EOT
+module top(input [1023:0] a, b, output [1023:0] y);
+genvar i;
+for (i = 0; i < 1024; i = i + 1)
+	assign y[i] = a[i] ^ b[i];
+endmodule
+EOT
+write_rtlil temp/write_gzip.il.gz
+design -reset
+read_rtlil temp/write_gzip.il.gz
+select -assert-count 1024 t:$xor
+
+# write_aiger2 and write_xaiger2 seek back to patch earlier output,
+# so check that the .gz decompresses to the plain file
+design -reset
+read_verilog <<EOT
+module top(input [7:0] a, b, output [7:0] y);
+assign y = a + b;
+endmodule
+EOT
+write_aiger2 temp/write_gzip.aig
+write_aiger2 temp/write_gzip.aig.gz
+! gunzip -c temp/write_gzip.aig.gz | cmp - temp/write_gzip.aig
+write_xaiger2 temp/write_gzip.xaig
+write_xaiger2 temp/write_gzip.xaig.gz
+! gunzip -c temp/write_gzip.xaig.gz | cmp - temp/write_gzip.xaig

@@ -1874,7 +1874,10 @@ struct Aiger2Backend : Backend {
 
 		design->bufNormalize(true);
 		writer.setup(top);
-		writer.write(f);
+		// The writer seeks back to patch earlier output, which a .gz stream or a pipe can't do
+		std::stringstream buf;
+		writer.write(&buf);
+		*f << buf.rdbuf();
 
 		// we are leaving the sacred land, un-bufnormalize
 		// (if not, this will lead to bugs: the buf-normalized
@@ -1956,7 +1959,10 @@ struct XAiger2Backend : Backend {
 
 		design->bufNormalize(true);
 		writer.setup(top);
-		writer.write(f);
+		// The writer seeks back to patch earlier output, which a .gz stream or a pipe can't do
+		std::stringstream buf;
+		writer.write(&buf);
+		*f << buf.rdbuf();
 
 		// we are leaving the sacred land, un-bufnormalize
 		// (if not, this will lead to bugs: the buf-normalized
