@@ -4,7 +4,8 @@
 verific -sv promote_params.sv
 verific -import top
 select -assert-mod-count 16 bank*
-select -assert-mod-count 17 match*
+select -assert-mod-count 16 match*
+select -assert-mod-count 16 core*
 flatten
 async2sync
 rename top gold
@@ -21,20 +22,28 @@ verific -promote_params 16
 verific -sv promote_params.sv
 logger -expect log "Keeping parameter MODE of module bank: it is read in a generate condition\." 1
 logger -expect log "Keeping parameter RST of module rbank: it is read in an asynchronous reset value\." 1
-logger -expect log "Keeping parameter LO of module match: its values don't share one known width and sign\." 1
-logger -expect log "Keeping parameter P of module wide: its values don't share one known width and sign\." 1
+logger -expect log "Keeping parameter TAG of module rbank: promoting it would leave 16 of the module's 16 copies\." 1
+logger -expect log "Keeping parameter V of module mixed: its values don't share one known width and sign\." 1
+logger -expect log "Keeping parameter FN of module shell: it is read in a generate condition\." 1
+logger -expect log "Keeping parameter BASE of module shell: promoting it would leave 16 of the module's 16 copies\." 1
 logger -expect log "Promoted parameter\(s\) BASE, FN of module bank \(16 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) K of module leaf \(8 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) K of module pair \(2 copies\) to input ports\." 1
-logger -expect log "Promoted parameter\(s\) IDX of module match \(17 copies\) to input ports\." 1
+logger -expect log "Promoted parameter\(s\) P of module wide \(16 copies\) to input ports\." 1
+logger -expect log "Promoted parameter\(s\) IDX of module match \(16 copies\) to input ports\." 1
+logger -expect log "Promoted parameter\(s\) BASE of module core \(16 copies\) to input ports\." 1
 verific -import top
 logger -check-expected
 select -assert-mod-count 2 bank*
 select -assert-mod-count 1 leaf*
 select -assert-mod-count 1 pair*
-select -assert-mod-count 16 wide*
-select -assert-mod-count 17 match*
+select -assert-mod-count 1 wide*
+select -assert-mod-count 1 match*
 select -assert-mod-count 16 rbank*
+select -assert-mod-count 17 mixed*
+select -assert-mod-count 16 shell*
+select -assert-mod-count 1 core*
+select -assert-count 1 wide/i:P wide/s:64 %i
 select -assert-count 4 bank*/i:FN bank*/i:BASE
 flatten
 async2sync

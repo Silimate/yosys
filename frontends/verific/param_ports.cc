@@ -32,6 +32,7 @@
 #include "Strings.h"
 #include "hier_tree.h"
 #include "HierTreeNode.h"
+#include "VeriBaseValue_Stat.h"
 #include "VeriConstVal.h"
 #include "VeriCopy.h"
 #include "VeriExpression.h"
@@ -130,51 +131,20 @@ static ValueType declared(VeriDataType *t)
 	return {};
 }
 
-// An untyped parameter takes its value's type (LRM 6.20.2); `types` holds those already agreed on
-static ValueType value_type(VeriExpression *e, const Types &types, int depth = 0)
+// A value's type, width 0 unless it is a number, and its image
+static std::pair<ValueType, std::string> evaluated(VeriBaseValue *v)
 {
-	if (!e || depth > 16)
-		return {};
-	switch (e->GetClassId()) {
-	case ID_VERIINTVAL: case ID_VERICONSTVAL: {
-		auto c = static_cast<VeriConst *>(e);
-		return {int(c->Size(nullptr)), c->Sign() != 0};
+	std::pair<ValueType, std::string> out;
+	if (!v)
+		return out;
+	if (v->Type() == VeriBaseValue::INTEGER || v->Type() == VeriBaseValue::BASEDNUM) {
+		verific_int64 size_sign = v->StaticSizeSign();
+		out.first = {int(std::abs(size_sign)), size_sign < 0};
 	}
-	case ID_VERIIDREF: {
-		VeriIdDef *id = e->GetId();
-		if (id && types.count(id))
-			return types.at(id);
-		if (id && id->IsGenVar())
-			return {32, true};
-		if (!id || !id->IsParam() || id->IsType())
-			return {};
-		if (!untyped(id))
-			return declared(id->GetDataType());
-		// An overridable one takes each parent's value, whose type its default doesn't tell
-		return id->IsLocalParam() ? value_type(id->GetInitialValue(), types, depth + 1) : ValueType{};
-	}
-	case ID_VERIBINARYOPERATOR: {
-		auto op = static_cast<VeriBinaryOperator *>(e);
-		ValueType l = value_type(op->GetLeft(), types, depth + 1), r = value_type(op->GetRight(), types, depth + 1);
-		if (!l.width || !r.width)
-			return {};
-		switch (op->OperType()) {
-		case VERI_PLUS: case VERI_MIN: case VERI_MUL: case VERI_DIV: case VERI_MODULUS:
-		case VERI_REDAND: case VERI_REDOR: case VERI_REDXOR: case VERI_REDXNOR:
-			return {std::max(l.width, r.width), l.sign && r.sign};
-		case VERI_LSHIFT: case VERI_RSHIFT: case VERI_ARITLSHIFT: case VERI_ARITRSHIFT: case VERI_POWER:
-			return l;
-		}
-		return {};
-	}
-	case ID_VERIUNARYOPERATOR: {
-		auto op = static_cast<VeriUnaryOperator *>(e);
-		unsigned t = op->OperType();
-		return t == VERI_PLUS || t == VERI_MIN || t == VERI_REDNOT ? value_type(op->GetArg(), types, depth + 1) : ValueType{};
-	}
-	default:
-		return {};
-	}
+	char *image = v->Image();
+	out.second = image ? image : "";
+	Strings::free(image);
+	return out;
 }
 
 static VeriRange *range(int msb)
@@ -186,8 +156,8 @@ static VeriRange *range(int msb)
 static VeriDataType *wire_type(VeriIdDef *id, const Types &types)
 {
 	if (untyped(id)) {
-		// A parameter's values must agree; a localparam has the one
-		ValueType t = types.count(id) ? types.at(id) : id->IsLocalParam() ? value_type(id->GetInitialValue(), types) : ValueType{};
+		// It takes its value's type, which must be the same in every copy
+		ValueType t = types.count(id) ? types.at(id) : ValueType{};
 		return t.width ? new VeriDataType(VERI_WIRE, t.sign ? VERI_SIGNED : 0, range(t.width - 1)) : nullptr;
 	}
 	VeriDataType *t = id->GetDataType();
@@ -544,17 +514,50 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 	if (all.empty())
 		return 0;
 
-	// How many copies each module would elaborate to, from Verific's tree of instances
+	// How many copies each module would elaborate to, from Verific's tree of instances, with the
+	// values each copy gives its parameters and the type each value has in every copy
 	dict<VeriModule *, pool<std::string>> variants;
+	dict<VeriModule *, pool<std::vector<std::string>>> copies;
+	Types types;
+	pool<VeriIdDef *> mixed;
+	dict<VeriModule *, std::vector<VeriIdDef *>> local_ids;
+	auto record = [&](HierTreeNode *node, VeriModule *mod, const std::string &sig) {
+		if (!local_ids.count(mod))
+			local_ids[mod] = by_name(derivable(mod));
+		std::vector<std::string> values;
+		std::vector<VeriIdDef *> params = items<VeriIdDef>(mod->GetParameters());
+		for (auto ids : {&params, &local_ids.at(mod)})
+			for (auto id : *ids) {
+				// The tree leaves a constant as written unevaluated: an override or the default
+				InterfaceInfo *info = node->GetParamValue(id);
+				VeriBaseValue *v = info ? info->GetVeriEvaluatedValue() : nullptr, *own = nullptr;
+				VeriExpression *e = info && !v && !id->IsType() ? info->GetVeriExpression() : nullptr;
+				if (e && refs(e).empty())
+					v = own = e->StaticEvaluate(0, nullptr);
+				auto value = evaluated(v);
+				delete own;
+				if (mixed.count(id) || (types.count(id) && !(types.at(id) == value.first)) || !value.first.width)
+					types.erase(id), mixed.insert(id);
+				else
+					types[id] = value.first;
+				// A value this can't print tells this copy apart from every other
+				if (ids == &params)
+					values.push_back(value.second.empty() ? "?" + sig : value.second);
+			}
+		copies[mod].insert(values);
+	};
 	std::function<void(HierTreeNode *, bool)> walk = [&](HierTreeNode *node, bool vhdl) {
 		if (node->IsInstance()) {
 			VeriModuleItem *item = node->IsVerilogNode() ? node->GetVerilogModule() : nullptr;
 			if (item && item->IsModule()) {
+				auto mod = static_cast<VeriModule *>(item);
 				char *sig = node->GetSignature();
-				variants[static_cast<VeriModule *>(item)].insert(sig ? sig : "");
+				std::string s = sig ? sig : "";
 				Strings::free(sig);
+				if (variants[mod].insert(s).second)
+					record(node, mod, s);
 				if (vhdl)
-					under_vhdl.insert(static_cast<VeriModule *>(item));
+					under_vhdl.insert(mod);
 			}
 			vhdl = !node->IsVerilogNode();
 		}
@@ -567,14 +570,15 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 	unsigned errors = Message::ErrorCount();
 	Message::RegisterCallBackMsg(quiet);
 	const Map *tops = hier_tree::CreateHierarchicalTree(veri_modules, vhdl_units, parameters);
+	bool failed = Message::ErrorCount() != errors;
 	MapIter mi;
 	HierTreeNode *top;
 	FOREACH_MAP_ITEM(tops, mi, 0, &top)
-		if (top)
+		if (top && !failed)
 			walk(top, false);
 	hier_tree::DeleteHierarchicalTree();
 	Message::RegisterCallBackMsg(msg_func);
-	if (Message::ErrorCount() != errors)
+	if (failed)
 		return 0;
 	for (auto &it : promote)
 		if (GetSize(variants[it.first]) < min_variants || under_vhdl.count(it.first)) {
@@ -589,26 +593,19 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 		keys.insert(it.first);
 	std::vector<VeriModule *> modules = by_name(keys);
 
-	// The type each untyped parameter takes, where all its values agree on one
-	Types types;
-	for (bool changed = true; changed;) {
-		changed = false;
-		for (auto m : modules)
-			for (auto p : by_name(promote.at(m))) {
-				if (!untyped(p))
-					continue;
-				ValueType t;
-				bool agree = true;
-				for (auto &use : uses[m]) {
-					dict<VeriIdDef *, VeriExpression *> ov = overrides(use.second, m);
-					ValueType v = value_type(ov.count(p) ? ov.at(p) : p->GetInitialValue(), types);
-					agree = agree && v.width && (!t.width || v == t);
-					t = v;
-				}
-				if (agree && !(types.count(p) && types.at(p) == t))
-					types[p] = t, changed = true;
-			}
-	}
+	// The copies a module would still elaborate to, told apart by the parameters it keeps
+	auto copies_left = [&](VeriModule *m) {
+		std::vector<VeriIdDef *> params = items<VeriIdDef>(m->GetParameters());
+		pool<std::vector<std::string>> left;
+		for (auto &values : copies[m]) {
+			std::vector<std::string> kept;
+			for (size_t i = 0; i < params.size(); i++)
+				if (!promote.at(m).count(params[i]))
+					kept.push_back(values[i]);
+			left.insert(kept);
+		}
+		return GetSize(left);
+	};
 
 	// Drop every parameter that some read, type or instantiation keeps a constant
 	auto keep = [&](VeriModule *m, VeriIdDef *p, const std::string &why) {
@@ -668,6 +665,12 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 			for (auto p : by_name(ps))
 				if (blocked.count(p))
 					keep(m, p, blocked.at(p)), changed = true;
+			// Ports only pay for themselves by merging copies. A child still collapses when its
+			// parent keeps these: it connects the parent's parameter instead.
+			int before = GetSize(copies[m]), after = copies_left(m);
+			if (!promote.at(m).empty() && 2 * after > before)
+				for (auto p : by_name(promote.at(m)))
+					keep(m, p, stringf("promoting it would leave %d of the module's %d copies", after, before)), changed = true;
 		}
 	}
 
