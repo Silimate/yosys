@@ -2427,9 +2427,6 @@ public:
 	unsigned int rtlil_hash();
 
 	std::string to_rtlil_str() const;
-#ifdef YOSYS_ENABLE_PYTHON
-	static std::map<unsigned int, RTLIL::Module*> *get_all_modules(void);
-#endif
 };
 
 namespace RTLIL_BACKEND {
@@ -2481,9 +2478,6 @@ public:
 	}
 
 	std::string to_rtlil_str() const;
-#ifdef YOSYS_ENABLE_PYTHON
-	static std::map<unsigned int, RTLIL::Wire*> *get_all_wires(void);
-#endif
 };
 
 inline int GetSize(RTLIL::Wire *wire) {
@@ -2500,10 +2494,6 @@ struct RTLIL::Memory : public RTLIL::NamedObject
 	int width, start_offset, size;
 
 	std::string to_rtlil_str() const;
-#ifdef YOSYS_ENABLE_PYTHON
-	~Memory();
-	static std::map<unsigned int, RTLIL::Memory*> *get_all_memorys(void);
-#endif
 };
 
 struct RTLIL::Cell : public RTLIL::NamedObject
@@ -2572,10 +2562,6 @@ public:
 	template<typename T> void rewrite_sigspecs2(T &functor);
 
 	std::string to_rtlil_str() const;
-
-#ifdef YOSYS_ENABLE_PYTHON
-	static std::map<unsigned int, RTLIL::Cell*> *get_all_cells(void);
-#endif
 
 	bool has_memid() const;
 	bool is_mem_cell() const;
