@@ -533,6 +533,7 @@ static int tcl_set_param(ClientData, Tcl_Interp *interp, int objc, Tcl_Obj *cons
 
 int yosys_tcl_interp_init(Tcl_Interp *interp)
 {
+	yosys_tcl_set_library(interp); // SILIMATE
 	if (Tcl_Init(interp)!=TCL_OK)
 		log_warning("Tcl_Init() call failed - %s\n",Tcl_ErrnoMsg(Tcl_GetErrno()));
 	Tcl_CreateCommand(interp, "yosys", tcl_yosys_cmd, NULL, NULL);

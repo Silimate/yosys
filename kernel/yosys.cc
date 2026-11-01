@@ -433,6 +433,15 @@ void rewrite_filename(std::string &filename)
 // defined in tclapi.cc
 extern int yosys_tcl_interp_init(Tcl_Interp *interp);
 
+// SILIMATE: point a new interpreter at the Tcl script library a pyosys wheel carries as
+// share/tcl, so Tcl_Init works where Tcl itself is not installed. Call before Tcl_Init.
+void yosys_tcl_set_library(Tcl_Interp *interp)
+{
+	std::string dir = yosys_share_dirname + "tcl";
+	if (!yosys_share_dirname.empty() && check_file_exists(dir + "/init.tcl"))
+		Tcl_SetVar(interp, "tcl_library", dir.c_str(), TCL_GLOBAL_ONLY);
+}
+
 extern Tcl_Interp *yosys_get_tcl_interp()
 {
 	if (yosys_tcl_interp == NULL) {

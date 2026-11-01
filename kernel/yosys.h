@@ -59,6 +59,7 @@ void yosys_shutdown();
 
 #ifdef YOSYS_ENABLE_TCL
 Tcl_Interp *yosys_get_tcl_interp();
+void yosys_tcl_set_library(Tcl_Interp *interp); // SILIMATE
 #endif
 
 extern RTLIL::Design *yosys_design;

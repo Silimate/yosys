@@ -531,6 +531,17 @@ if (YOSYS_ENABLE_PYTHON)
 			)
 		endif()
 		yosys_install_component_data(${library_components} DESTINATION ${pyosys_install_dir}/share)
+		# SILIMATE: a wheel can run where Tcl is not installed, so it carries Tcl's script
+		# library (init.tcl and friends) as share/tcl, which yosys_tcl_set_library() finds
+		if (YOSYS_ENABLE_TCL)
+			string(REGEX MATCH "^[0-9]+\\.[0-9]+" tcl_version "${tcl_VERSION}")
+			set(tcl_script_dir "${tcl_LIBDIR}/tcl${tcl_version}")
+			if (EXISTS "${tcl_script_dir}/init.tcl")
+				install(DIRECTORY "${tcl_script_dir}/" DESTINATION ${pyosys_install_dir}/share/tcl)
+			else()
+				message(WARNING "No Tcl script library at ${tcl_script_dir}; pyosys will not carry one")
+			endif()
+		endif()
 	endif()
 endif()
 
