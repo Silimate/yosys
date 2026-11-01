@@ -2,7 +2,8 @@ proc unknown {args} {
     # Check if it's a getter
     if {[llength $args] > 0} {
         set first_arg [lindex $args 0]
-        if {[string match "get_*" $first_arg]} {
+        # SILIMATE: sdc -constants sets sdc_any_getter, as it reads only get_ports results
+        if {[string match "get_*" $first_arg] && ![info exists ::sdc_any_getter]} {
             # It's a getter, has it been redirected from specialized C++ code?
             if {[llength $args] > 1} {
                 set second_arg [lindex $args 1]
