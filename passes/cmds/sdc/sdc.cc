@@ -917,6 +917,10 @@ struct SdcPass : public Pass {
 		SDCInterpreter& sdc = SDCInterpreter::get();
 		Tcl_Interp *interp = sdc.fresh_interp(design);
 		Tcl_Preserve(interp);
+		// SILIMATE: -constants reads only get_ports results, so let the flags other getters use in
+		// timing exceptions (-hierarchical, -regexp, -nocase) through instead of rejecting them
+		if (constants_mode)
+			sdc.objects->collect_mode = SdcObjects::CollectMode::FullGetter;
 		std::string stub_path = "+/sdc/graph-stubs.sdc";
 		rewrite_filename(stub_path);
 		if (Tcl_EvalFile(interp, stub_path.c_str()) != TCL_OK)
