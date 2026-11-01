@@ -1,0 +1,1 @@
+set FORCES_DIR .
