@@ -79,6 +79,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew install bison flex gperf tcl-tk@8 libffi dwarfutils libelf ccache llvm
+          echo "PKG_CONFIG_PATH=$(brew --prefix tcl-tk@8)/lib/pkgconfig" >> $GITHUB_ENV # keg-only, so CMake finds it for the sdc pass
           printf '%s\n' $(brew --prefix bison)/bin $(brew --prefix flex)/bin $(brew --prefix llvm)/bin >> $GITHUB_PATH
           python3 -m pip install wheel packaging 'pybind11>=3,<4' 'cxxheaderparser>=1.4' delocate
       - uses: actions/cache@v6

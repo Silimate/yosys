@@ -77,8 +77,6 @@ def compile_pyosys(cmake_options=None, parallel=os.cpu_count() or 1):
 			"-DYOSYS_INSTALL_LIBRARY:BOOL=OFF",
 			"-DYOSYS_INSTALL_PYTHON:BOOL=ON",
 			"-DYOSYS_BUILD_PYTHON_ONLY:BOOL=ON",
-			# Tcl interpreter not very useful when only building libyosys
-			"-DYOSYS_WITHOUT_TCL:BOOL=ON",
 			# Extra options
 			*(cmake_options or []),
 			*MACOSX_DEPLOYMENT_TARGET_FLAGS,

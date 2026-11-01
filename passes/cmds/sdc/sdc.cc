@@ -708,8 +708,11 @@ public:
 			Tcl_DeleteInterp(interp);
 
 		interp = Tcl_CreateInterp();
+		// SILIMATE: use a wheel's bundled script library; without one, the stubs define unknown
+		// themselves and the SDC needs only Tcl's built-in commands, so go on with a warning
+		yosys_tcl_set_library(interp);
 		if (Tcl_Init(interp)!=TCL_OK)
-			log_error("Tcl_Init() call failed - %s\n",Tcl_ErrnoMsg(Tcl_GetErrno()));
+			log_warning("Tcl_Init() call failed - %s\n",Tcl_ErrnoMsg(Tcl_GetErrno()));
 
 		objects = std::make_unique<SdcObjects>(design);
 		objects->collect_mode = SdcObjects::CollectMode::SimpleGetter;
