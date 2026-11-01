@@ -914,6 +914,10 @@ struct SdcPass : public Pass {
 		std::string sdc_path = args[argidx++];
 		if (argidx < args.size())
 			log_cmd_error("Unexpected extra positional argument %s after SDC file %s.\n", args[argidx], sdc_path);
+		// SILIMATE: strip the quotes a path with spaces needs, as other file arguments do
+		rewrite_filename(sdc_path);
+		for (auto &path : stubs_paths)
+			rewrite_filename(path);
 		SDCInterpreter& sdc = SDCInterpreter::get();
 		Tcl_Interp *interp = sdc.fresh_interp(design);
 		Tcl_Preserve(interp);
