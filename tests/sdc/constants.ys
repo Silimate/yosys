@@ -4,7 +4,7 @@ hierarchy -top constants
 
 logger -expect warning "only input ports can be tied" 1
 logger -expect warning "is not a get_ports result" 1
-sdc -constants -stubs constants_stubs.tcl constants.sdc
+sdc -constants -stubs "constants_stubs.tcl" "constants.sdc"
 logger -check-expected
 
 # en reaches the child, sel[1] the and: both fold; sel[0] is untied, so its mux stays
