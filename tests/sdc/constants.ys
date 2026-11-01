@@ -4,6 +4,7 @@ hierarchy -top constants
 
 logger -expect warning "only input ports can be tied" 1
 logger -expect warning "is not a get_ports result" 1
+logger -expect warning "it matches nothing" 2
 sdc -constants -stubs constants_stubs.tcl constants.sdc
 logger -check-expected
 

@@ -121,6 +121,7 @@ struct SdcObjects {
 	// set_logic_zero/set_logic_one put on those ports (sdc -constants)
 	dict<size_t, std::vector<PortPattern>> port_nodes;
 	std::vector<std::tuple<Wire*, BitSelection, State>> logic_constants;
+	bool constants_mode = false;
 
 	void sniff_module(std::list<std::string>& hierarchy, Module* mod) {
 		std::string prefix;
@@ -723,9 +724,43 @@ static int sdc_get_pins_cmd(ClientData data, Tcl_Interp *interp, int objc, Tcl_O
 	return getter_graph_node(TclCall{interp, objc, objv});
 }
 
+// SILIMATE: whether every argument is a list of exact port names, each with at most one numeric
+// bit index: what get_ports resolves without flags, wildcards or ranges
+static bool exact_port_query(int objc, Tcl_Obj* const objv[]) {
+	for (int i = 1; i < objc; i++) {
+		YS_Tcl_Size count;
+		Tcl_Obj** elems;
+		if (Tcl_ListObjGetElements(nullptr, objv[i], &count, &elems) != TCL_OK)
+			return false;
+		for (YS_Tcl_Size j = 0; j < count; j++) {
+			std::string pat = Tcl_GetString(elems[j]);
+			size_t open = pat.find('[');
+			std::string index = open == std::string::npos ? "0" : pat.substr(open + 1, pat.size() - open - 2);
+			if (pat.empty() || pat[0] == '-' || pat.find_first_of("*?") != std::string::npos ||
+					(open != std::string::npos && pat.back() != ']') || index.empty() ||
+					index.find_first_not_of("0123456789") != std::string::npos)
+				return false;
+		}
+	}
+	return true;
+}
+
 static int sdc_get_ports_cmd(ClientData data, Tcl_Interp *interp, int objc, Tcl_Obj* const objv[])
 {
 	auto* objects = (SdcObjects*)data;
+	// SILIMATE: under -constants, a query this can't resolve exactly matches nothing, with a warning,
+	// instead of stopping the pass
+	if (objects->constants_mode && !exact_port_query(objc, objv)) {
+		std::string query;
+		for (int i = 0; i < objc; i++)
+			query += (i ? " " : "") + std::string(Tcl_GetString(objv[i]));
+		log_warning("%s: sdc -constants resolves only exact port names and bits; it matches nothing.\n", query);
+		int ret = getter_graph_node(TclCall{interp, objc, objv});
+		if (ret == TCL_OK)
+			if (auto idx = magic_node_index(Tcl_GetStringResult(interp)))
+				objects->port_nodes[*idx] = {};
+		return ret;
+	}
 	GetterOpts opts("get_ports", {"regexp", "nocase"});
 	opts.parse(objc, objv);
 	if (objects->collect_mode == SdcObjects::CollectMode::SimpleGetter)
@@ -917,10 +952,14 @@ struct SdcPass : public Pass {
 		SDCInterpreter& sdc = SDCInterpreter::get();
 		Tcl_Interp *interp = sdc.fresh_interp(design);
 		Tcl_Preserve(interp);
-		// SILIMATE: -constants reads only get_ports results, so let the flags other getters use in
-		// timing exceptions (-hierarchical, -regexp, -nocase) through instead of rejecting them
-		if (constants_mode)
-			sdc.objects->collect_mode = SdcObjects::CollectMode::FullGetter;
+		// SILIMATE: -constants reads only get_ports results, so the stubs' unknown records every other
+		// getter (get_cells, get_pins, get_nets, ...) unparsed: their flags and patterns can't stop it
+		if (constants_mode) {
+			sdc.objects->constants_mode = true;
+			Tcl_SetVar(interp, "sdc_any_getter", "1", TCL_GLOBAL_ONLY);
+			for (auto cmd : {"get_pins", "get_nets"})
+				Tcl_DeleteCommand(interp, cmd);
+		}
 		std::string stub_path = "+/sdc/graph-stubs.sdc";
 		rewrite_filename(stub_path);
 		if (Tcl_EvalFile(interp, stub_path.c_str()) != TCL_OK)
