@@ -319,9 +319,21 @@ struct SdcObjects {
 				log_warning("set_logic on %s skipped: only input ports can be tied.\n", log_id(wire));
 				continue;
 			}
-			for (int i = 0; i < wire->width; i++)
-				if (bits.is_set(i))
-					tied[SigBit(wire, i)] = value; // a later command wins, as in STA
+			// The SDC numbers bits as the HDL declares them ([7:4], [0:3]), not by RTLIL offset
+			std::vector<int> offsets;
+			if (bits.all)
+				for (int i = 0; i < wire->width; i++)
+					offsets.push_back(i);
+			for (size_t idx = 0; !bits.all && idx < bits.bits.size(); idx++)
+				if (bits.bits[idx]) {
+					int offset = wire->from_hdl_index(idx);
+					if (offset == INT_MIN)
+						log_warning("set_logic on %s[%zu] skipped: no such bit.\n", log_id(wire), idx);
+					else
+						offsets.push_back(offset);
+				}
+			for (int offset : offsets)
+				tied[SigBit(wire, offset)] = value; // a later command wins, as in STA
 		}
 		if (tied.empty())
 			return;
