@@ -8,6 +8,7 @@
 #include <list>
 #include <optional>
 #include <iostream>
+#include <sstream>
 
 #if TCL_MAJOR_VERSION < 9
 typedef int YS_Tcl_Size;
@@ -115,6 +116,11 @@ struct SdcObjects {
 	pool<std::pair<std::string, Cell*>> constrained_cells;
 	dict<std::pair<std::string, CellPin>, BitSelection> constrained_pins;
 	dict<std::pair<std::string, Wire*>, BitSelection> constrained_nets;
+
+	// SILIMATE: what each get_ports call node resolved to, and the constants
+	// set_logic_zero/set_logic_one put on those ports (sdc -constants)
+	dict<size_t, std::vector<PortPattern>> port_nodes;
+	std::vector<std::tuple<Wire*, BitSelection, State>> logic_constants;
 
 	void sniff_module(std::list<std::string>& hierarchy, Module* mod) {
 		std::string prefix;
@@ -303,6 +309,54 @@ struct SdcObjects {
 	void keep_hierarchy() {
 		(void)KeepHierarchyWorker(this, design).mark();
 	}
+	// SILIMATE: drive every reader of a top input port bit set_logic_zero/set_logic_one
+	// named from its constant instead. The port itself stays, so the SDC still finds it.
+	void tie_logic_constants() {
+		Module* top = design->top_module();
+		dict<SigBit, State> tied;
+		for (auto& [wire, bits, value] : logic_constants) {
+			if (!wire->port_input || wire->port_output) {
+				log_warning("set_logic on %s skipped: only input ports can be tied.\n", log_id(wire));
+				continue;
+			}
+			// The SDC numbers bits as the HDL declares them ([7:4], [0:3]), not by RTLIL offset
+			std::vector<int> offsets;
+			if (bits.all)
+				for (int i = 0; i < wire->width; i++)
+					offsets.push_back(i);
+			for (size_t idx = 0; !bits.all && idx < bits.bits.size(); idx++)
+				if (bits.bits[idx]) {
+					int offset = wire->from_hdl_index(idx);
+					if (offset == INT_MIN)
+						log_warning("set_logic on %s[%zu] skipped: no such bit.\n", log_id(wire), idx);
+					else
+						offsets.push_back(offset);
+				}
+			for (int offset : offsets)
+				tied[SigBit(wire, offset)] = value; // a later command wins, as in STA
+		}
+		if (tied.empty())
+			return;
+		if (!top->processes.empty())
+			log_warning("Module %s has processes, which keep reading the tied ports; run proc first.\n", log_id(top));
+		auto tie = [&](const SigSpec& sig) {
+			SigSpec out;
+			for (auto bit : sig)
+				out.append(tied.count(bit) ? SigBit(tied.at(bit)) : bit);
+			return out;
+		};
+		for (auto cell : top->cells())
+			for (auto& [port, sig] : dict<IdString, SigSpec>(cell->connections())) {
+				SigSpec tied_sig = tie(sig);
+				if (cell->input(port) && tied_sig != sig)
+					cell->setPort(port, tied_sig);
+			}
+		std::vector<SigSig> conns;
+		for (auto& [lhs, rhs] : top->connections())
+			conns.push_back({lhs, tie(rhs)});
+		top->new_connections(conns);
+		log("Tied %d input port bit(s) to the constants set_logic_zero/set_logic_one gave them.\n", GetSize(tied));
+	}
 };
 
 // TODO vectors
@@ -430,6 +484,17 @@ struct SdcGraphNode {
 	}
 };
 
+// SILIMATE: the graph node index a YOSYS_SDC_MAGIC_NODE_<n> string names, if it is one
+static std::optional<size_t> magic_node_index(const std::string& arg) {
+	const std::string prefix = "YOSYS_SDC_MAGIC_NODE_";
+	if (arg.compare(0, prefix.size(), prefix) != 0 || arg.size() == prefix.size())
+		return std::nullopt;
+	for (size_t i = prefix.size(); i < arg.size(); i++)
+		if (!std::isdigit(arg[i]))
+			return std::nullopt;
+	return std::stoul(arg.substr(prefix.size()));
+}
+
 static size_t get_node_count(Tcl_Interp* interp) {
 	const char* idx_raw = Tcl_GetVar(interp, "sdc_call_index", TCL_GLOBAL_ONLY);
 	log_assert(idx_raw);
@@ -482,19 +547,23 @@ std::vector<SdcGraphNode> build_graph(const std::vector<std::vector<std::string>
 		auto& new_node = graph[i];
 		for (size_t j = 0; j < sdc_calls[i].size(); j++) {
 			auto arg = sdc_calls[i][j];
-			const std::string prefix = "YOSYS_SDC_MAGIC_NODE_";
-			auto pos = arg.find(prefix);
-			if (pos != std::string::npos) {
-				std::string rest = arg.substr(pos + prefix.length());
-				for (auto c : rest)
-					if (!std::isdigit(c))
-						log_error("weird thing %s in %s\n", rest.c_str(), arg.c_str());
-				size_t arg_node_idx = std::stoi(rest);
-				log_assert(arg_node_idx < graph.size());
-				new_node.addChild(&graph[arg_node_idx]);
-			} else {
-				new_node.addChild(arg);
+			// SILIMATE: a list argument can hold several nodes ("[get_clocks a] [get_clocks b]");
+			// anything else that is not all nodes stays a plain string
+			std::istringstream tokens(arg);
+			std::vector<size_t> nodes;
+			std::string token;
+			bool all_nodes = true;
+			while (all_nodes && tokens >> token) {
+				auto idx = magic_node_index(token);
+				all_nodes = idx && *idx < graph.size();
+				if (all_nodes)
+					nodes.push_back(*idx);
 			}
+			if (all_nodes && !nodes.empty())
+				for (auto idx : nodes)
+					new_node.addChild(&graph[idx]);
+			else
+				new_node.addChild(arg);
 
 		}
 	}
@@ -604,16 +673,23 @@ struct GetterOpts : TclOpts {
 			}
 			break;
 		}
+		// SILIMATE: each argument is a Tcl list of patterns, as in STA tools: get_ports {a b}
+		// names two ports, and get_ports { a } names a, not " a "
 		for (; i < objc; i++) {
-			patterns.push_back(Tcl_GetString(objv[i]));
+			YS_Tcl_Size count = 0;
+			Tcl_Obj** elems = nullptr;
+			if (Tcl_ListObjGetElements(nullptr, objv[i], &count, &elems) != TCL_OK) {
+				patterns.push_back(Tcl_GetString(objv[i]));
+				continue;
+			}
+			for (YS_Tcl_Size j = 0; j < count; j++)
+				patterns.push_back(Tcl_GetString(elems[j]));
 		}
 	};
 	void check_simple() {
 		if (regexp_flag || hierarchical_flag || nocase_flag || separator != "/" || of_objects) {
 			log_error("%s got unexpected flags in simple mode\n", name);
 		}
-		if (patterns.size() != 1)
-			log_error("%s got unexpected number of patterns in simple mode: %zu\n", name, patterns.size());
 	}
 	void check_simple_sep() {
 		if (separator != "/")
@@ -665,7 +741,56 @@ static int sdc_get_ports_cmd(ClientData data, Tcl_Interp *interp, int objc, Tcl_
 			merge_or_init(std::make_pair(name, wire), objects->constrained_ports, matching_bits);
 	}
 
-	return getter_graph_node(TclCall{interp, objc, objv});
+	// SILIMATE: remember what this node resolved to, for set_logic_zero/set_logic_one
+	int ret = getter_graph_node(TclCall{interp, objc, objv});
+	if (ret == TCL_OK)
+		if (auto idx = magic_node_index(Tcl_GetStringResult(interp)))
+			objects->port_nodes[*idx] = resolved;
+	return ret;
+}
+
+// SILIMATE: set_logic_zero/set_logic_one, under sdc -constants: record the constant on
+// every port bit the arguments resolve to (get_ports nodes, also nested in list), then
+// record the call as unknown would
+static void collect_logic_ports(Tcl_Interp* interp, SdcObjects* objects, const std::string& arg,
+		State value, int depth = 0) {
+	auto idx = magic_node_index(arg);
+	if (!idx) {
+		log_warning("set_logic argument '%s' is not a get_ports result; ignored.\n", arg);
+		return;
+	}
+	if (objects->port_nodes.count(*idx)) {
+		for (auto& [name, wire, bits] : objects->port_nodes.at(*idx))
+			objects->logic_constants.push_back({wire, bits, value});
+		return;
+	}
+	Tcl_Obj* calls = Tcl_GetVar2Ex(interp, "sdc_calls", nullptr, TCL_GLOBAL_ONLY);
+	Tcl_Obj* call = nullptr;
+	YS_Tcl_Size argc = 0;
+	Tcl_Obj** argv = nullptr;
+	if (depth < 16 && calls && Tcl_ListObjIndex(interp, calls, *idx, &call) == TCL_OK && call &&
+			Tcl_ListObjGetElements(interp, call, &argc, &argv) == TCL_OK && argc > 0 &&
+			std::string(Tcl_GetString(argv[0])) == "list") {
+		for (YS_Tcl_Size i = 1; i < argc; i++)
+			collect_logic_ports(interp, objects, Tcl_GetString(argv[i]), value, depth + 1);
+		return;
+	}
+	log_warning("set_logic argument '%s' is not a get_ports result; ignored.\n", arg);
+}
+
+static int sdc_set_logic_cmd(ClientData data, Tcl_Interp *interp, int objc, Tcl_Obj* const objv[])
+{
+	auto* objects = (SdcObjects*)data;
+	State value = std::string(Tcl_GetString(objv[0])) == "set_logic_one" ? State::S1 : State::S0;
+	for (int i = 1; i < objc; i++) {
+		YS_Tcl_Size argc = 0;
+		Tcl_Obj** argv = nullptr;
+		if (Tcl_ListObjGetElements(interp, objv[i], &argc, &argv) != TCL_OK)
+			return TCL_ERROR;
+		for (YS_Tcl_Size j = 0; j < argc; j++)
+			collect_logic_ports(interp, objects, Tcl_GetString(argv[j]), value);
+	}
+	return redirect_unknown(TclCall{interp, objc, objv});
 }
 
 static int sdc_get_nets_cmd(ClientData data, Tcl_Interp *interp, int objc, Tcl_Obj* const objv[])
@@ -742,6 +867,17 @@ struct SdcPass : public Pass {
 		log("    -keep_hierarchy\n");
 		log("        Add keep_hierarchy attributes while retaining SDC validity.\n");
 		log("\n");
+		// SILIMATE
+		log("    -constants\n");
+		log("        Tie the top-level input ports that set_logic_zero and set_logic_one\n");
+		log("        name (through get_ports, or a list of get_ports results) to those\n");
+		log("        constants: every reader of such a port bit reads the constant instead,\n");
+		log("        and the port itself stays. Run after proc.\n");
+		log("\n");
+		log("    -stubs <file>\n");
+		log("        Evaluate this Tcl file before the SDC, e.g. to set the variables it\n");
+		log("        reads. Can be given more than once.\n");
+		log("\n");
 	}
 	SdcPass() : Pass("sdc", "Read an SDC file") { }
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override {
@@ -751,6 +887,7 @@ struct SdcPass : public Pass {
 		bool dump_mode = false;
 		bool dump_graph_mode = false;
 		bool keep_hierarchy_mode = false;
+		bool constants_mode = false; // SILIMATE
 		std::vector<std::string> stubs_paths;
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-dump") {
@@ -761,6 +898,9 @@ struct SdcPass : public Pass {
 				continue;
 			} else if (args[argidx] == "-keep_hierarchy") {
 				keep_hierarchy_mode = true;
+				continue;
+			} else if (args[argidx] == "-constants") { // SILIMATE
+				constants_mode = true;
 				continue;
 			} else if (args[argidx] == "-stubs" && argidx+1 < args.size()) {
 				stubs_paths.push_back(args[++argidx]);
@@ -784,12 +924,18 @@ struct SdcPass : public Pass {
 		for (auto path : stubs_paths)
 			if (Tcl_EvalFile(interp, path.c_str()) != TCL_OK)
 				log_cmd_error("SDC interpreter returned an error in OpenSTA stub file %s: %s\n", path.c_str(), Tcl_GetStringResult(interp));
+		// SILIMATE: after the stubs, so a stub file cannot shadow them
+		if (constants_mode)
+			for (auto cmd : {"set_logic_zero", "set_logic_one"})
+				Tcl_CreateObjCommand(interp, cmd, sdc_set_logic_cmd, (ClientData) sdc.objects.get(), NULL);
 		if (Tcl_EvalFile(interp, sdc_path.c_str()) != TCL_OK)
 			log_cmd_error("SDC interpreter returned an error: %s\n", Tcl_GetStringResult(interp));
 		if (dump_mode)
 			sdc.objects->dump();
 		if (keep_hierarchy_mode)
 			sdc.objects->keep_hierarchy();
+		if (constants_mode) // SILIMATE
+			sdc.objects->tie_logic_constants();
 		inspect_globals(interp, dump_graph_mode);
 		Tcl_Release(interp);
 	}
