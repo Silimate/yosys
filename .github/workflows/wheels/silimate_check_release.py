@@ -9,12 +9,15 @@ records the build type in its version string, e.g.
 out of each wheel's libyosys.
 
 A wheel built without Tcl still imports and synthesizes, but has no sdc pass, so also
-check for that pass and for the Tcl script library the wheel carries as share/tcl.
+install each wheel in a fresh venv and run sdc, whose Tcl must start from the script
+library the wheel carries as share/tcl.
 """
 
 import pathlib
 import re
+import subprocess
 import sys
+import tempfile
 import zipfile
 
 # The build type is a single word right after the hash. Without one the compiler
@@ -31,12 +34,24 @@ def build_type(wheel):
 		return match.group(1).decode(errors="replace") if match else None
 
 
+SDC_SMOKE = """
+from pyosys import libyosys as ys
+open("t.v", "w").write("module t(input a, output y); assign y = a; endmodule\\n")
+open("t.sdc", "w").write("create_clock -name c -period 1\\nputs \\"tcl_library=[info library]\\"\\n")
+ys.run_pass("read_verilog t.v; hierarchy -top t; sdc t.sdc", ys.Design())
+"""
+
+
 def has_tcl(wheel):
-	with zipfile.ZipFile(wheel) as zf:
-		names = zf.namelist()
-		libs = [n for n in names if re.search(r"(^|/)libyosys[^/]*\.(so|dylib|pyd)$", n)]
-		return bool(libs) and b"Read an SDC file" in zf.read(libs[0]) and \
-			any(n.endswith("/share/tcl/init.tcl") for n in names)
+	with tempfile.TemporaryDirectory() as tmp:
+		venv = pathlib.Path(tmp, "venv")
+		subprocess.run([sys.executable, "-m", "venv", venv], check=True)
+		py = venv / "bin" / "python"
+		subprocess.run([py, "-m", "pip", "install", "-q", "--no-deps", wheel], check=True)
+		run = subprocess.run([py, "-c", SDC_SMOKE], cwd=tmp, capture_output=True, text=True)
+	out = run.stdout + run.stderr
+	return run.returncode == 0 and "Tcl_Init() call failed" not in out and \
+		re.search(r"^tcl_library=\S*/pyosys/share/tcl$", out, re.M) is not None
 
 
 def main(dirs):
@@ -51,7 +66,7 @@ def main(dirs):
 		if kind != "Release":
 			bad.append(f"{wheel.name} (not a Release build: pass -C cmake=-DCMAKE_BUILD_TYPE=Release)")
 		if not tcl:
-			bad.append(f"{wheel.name} (no Tcl: sdc pass or share/tcl/init.tcl missing)")
+			bad.append(f"{wheel.name} (no Tcl: sdc failed or did not start Tcl from share/tcl)")
 	if bad:
 		sys.exit("bad wheels: " + ", ".join(bad))
 

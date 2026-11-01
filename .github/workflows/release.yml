@@ -53,7 +53,7 @@ jobs:
           echo ${{ github.token }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           docker pull $IMAGE || (docker build -t $IMAGE - < .github/workflows/wheels/manylinux.Dockerfile && docker push $IMAGE)
           docker run --rm -v $PWD:$PWD -w $PWD -e PYOSYS_VERSION_OVERRIDE $IMAGE \
-            sh -c '.github/workflows/wheels/build.sh && auditwheel repair --plat manylinux2014_x86_64 -w dist wheelhouse/*.whl'
+            sh -c '.github/workflows/wheels/build.sh && auditwheel repair --plat manylinux2014_x86_64 -w dist wheelhouse/*.whl && python3 .github/workflows/wheels/silimate_check_release.py dist'
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-linux
@@ -89,6 +89,7 @@ jobs:
           restore-keys: ccache-macos-
       - run: .github/workflows/wheels/build.sh
       - run: delocate-wheel -v -w dist wheelhouse/*.whl # bundle the Homebrew libraries into the wheel
+      - run: python3 .github/workflows/wheels/silimate_check_release.py dist # the bundled wheel still runs Tcl
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-macos
