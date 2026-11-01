@@ -2,9 +2,9 @@ read_verilog constants.v
 proc
 hierarchy -top constants
 
+logger -expect warning "it matches nothing" 2
 logger -expect warning "only input ports can be tied" 1
 logger -expect warning "is not a get_ports result" 1
-logger -expect warning "it matches nothing" 2
 sdc -constants -stubs constants_stubs.tcl constants.sdc
 logger -check-expected
 
@@ -20,3 +20,7 @@ sat -verify -prove y a -prove z 1'b0 -prove h b[1] -prove u b[2]
 # The tied ports stay ports
 select -assert-count 1 i:en
 select -assert-count 1 i:sel
+
+# -constants leaves the getters -keep_hierarchy needs unresolved
+logger -expect error "can't be combined" 1
+sdc -constants -keep_hierarchy constants.sdc

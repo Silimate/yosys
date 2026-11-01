@@ -907,7 +907,9 @@ struct SdcPass : public Pass {
 		log("        Tie the top-level input ports that set_logic_zero and set_logic_one\n");
 		log("        name (through get_ports, or a list of get_ports results) to those\n");
 		log("        constants: every reader of such a port bit reads the constant instead,\n");
-		log("        and the port itself stays. Run after proc.\n");
+		log("        and the port itself stays. Run after proc. Only exact port names and\n");
+		log("        numeric bits resolve: other getters, and get_ports queries with flags,\n");
+		log("        wildcards or ranges, are skipped. Can't be combined with -keep_hierarchy.\n");
 		log("\n");
 		log("    -stubs <file>\n");
 		log("        Evaluate this Tcl file before the SDC, e.g. to set the variables it\n");
@@ -945,6 +947,9 @@ struct SdcPass : public Pass {
 		}
 		if (argidx >= args.size())
 			log_cmd_error("Missing SDC file.\n");
+		// SILIMATE: -constants leaves get_pins and get_nets unresolved, which -keep_hierarchy needs
+		if (constants_mode && keep_hierarchy_mode)
+			log_cmd_error("-constants and -keep_hierarchy can't be combined: run sdc once with each.\n");
 
 		std::string sdc_path = args[argidx++];
 		if (argidx < args.size())
