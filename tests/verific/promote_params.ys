@@ -26,6 +26,8 @@ logger -expect log "Keeping parameter TAG of module rbank: promoting it would le
 logger -expect log "Keeping parameter V of module cat: its values don't share one known width and sign\." 1
 logger -expect log "Keeping parameter V of module neg: its values don't share one known width and sign\." 1
 logger -expect log "Keeping parameter V of module scmp: its values don't share one known width and sign\." 1
+logger -expect log "Keeping parameter P of module ones: its values don't share one known width and sign\." 1
+logger -expect log "Keeping parameter V of module fill: its values don't share one known width and sign\." 1
 logger -expect log "Keeping parameter FN of module shell: it is read in a generate condition\." 1
 logger -expect log "Keeping parameter BASE of module shell: promoting it would leave 16 of the module's 16 copies\." 1
 logger -expect log "Promoted parameter\(s\) BASE, FN of module bank \(16 copies\) to input ports\." 1
@@ -55,6 +57,8 @@ select -assert-mod-count 1 lt*
 select -assert-mod-count 17 cat*
 select -assert-mod-count 17 neg*
 select -assert-mod-count 17 scmp*
+select -assert-mod-count 17 ones*
+select -assert-mod-count 17 fill*
 select -assert-count 1 wide/i:P wide/s:64 %i
 select -assert-count 1 mixed/i:V mixed/s:64 %i
 select -assert-count 1 node/i:ID node/s:32 %i

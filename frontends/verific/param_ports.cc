@@ -405,10 +405,27 @@ struct UseScan : public VeriVisitor {
 	}
 };
 
-// An operand whose value doesn't depend on the width of the expression around it
+// Whether a tree holds an unbased unsized literal ('0, '1, 'x or 'z), which takes the width of the
+// expression around it
+struct FillScan : public VeriVisitor {
+	using VeriVisitor::Visit;
+	bool found = false;
+	void Visit(VeriConstVal &node) override { found = found || node.IsUnsizedBit(); }
+};
+
+static bool fills(VeriTreeNode *node)
+{
+	FillScan scan;
+	if (node)
+		node->Accept(scan);
+	return scan.found;
+}
+
+// An operand whose value doesn't depend on the width of the expression around it: a name, a select,
+// a concatenation or a literal, unless it holds a literal that fills that width
 static bool primary(VeriExpression *e)
 {
-	if (!e)
+	if (!e || fills(e))
 		return false;
 	switch (e->GetClassId()) {
 	case ID_VERIIDREF: case ID_VERIINDEXEDID: case ID_VERIINDEXEDMEMORYID:
@@ -749,6 +766,14 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 	for (auto m : modules)
 		for (auto p : promote.at(m)) {
 			if (!untyped(p) || !mixed.count(p) || !widest.count(p) || unnatural.count(p) || !derived(m, {p}).empty())
+				continue;
+			// A value written as '1 would fill the wider port
+			bool filled = fills(p->GetInitialValue());
+			for (auto &use : uses[m]) {
+				dict<VeriIdDef *, VeriExpression *> ov = overrides(use.second, m);
+				filled = filled || (ov.count(p) && fills(ov.at(p)));
+			}
+			if (filled)
 				continue;
 			WholeScan scan(p, !both_signs.count(p));
 			m->Accept(scan);

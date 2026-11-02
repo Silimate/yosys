@@ -82,6 +82,16 @@ module cat #(parameter V = 0) (output [71:0] y);
 	assign y = {V, 8'h5};
 endmodule
 
+// '1 fills the width of the comparison, so P == '1 holds for an 8-bit 8'hff but not at 32 bits
+module ones #(parameter P = 0) (output y);
+	assign y = P == '1;
+endmodule
+
+// One copy is overridden with '1, a 1-bit value that would fill a wider port with ones
+module fill #(parameter V = 0) (output [15:0] y);
+	assign y = V;
+endmodule
+
 // One copy's value is negative, which a wider type would extend differently
 module neg #(parameter V = 0) (output [15:0] y);
 	assign y = V;
@@ -124,7 +134,8 @@ module top (
 	output [15:0] eq, output [15:0] gt, output eq0, output gt0, output [16*2-1:0] par, output [16*64-1:0] wy,
 	output [16*64-1:0] my, output [63:0] my1, output [15:0] chit, output [15:0] cfirst,
 	output [19*16-1:0] nid, output [18:0] nhit, output [19*16-1:0] ncid, output [19*16-1:0] nrid,
-	output [16:0] ly, output [17*72-1:0] cy, output [17*16-1:0] ny, output [16:0] sy
+	output [16:0] ly, output [17*72-1:0] cy, output [17*16-1:0] ny, output [16:0] sy,
+	output [16:0] oy, output [17*16-1:0] fy
 );
 	for (genvar i = 0; i < 16; i++) begin : g
 		bank #(.FN(i), .BASE(16'h1000 + i * 16'h100), .MODE(i % 2)) u_bank (
@@ -147,6 +158,8 @@ module top (
 		cat #(.V(i)) u_cat (.y(cy[i*72 +: 72]));
 		neg #(.V(i - 1)) u_neg (.y(ny[i*16 +: 16]));
 		scmp #(.V(i)) u_scmp (.a(wdata), .y(sy[i]));
+		ones #(.P(32'd0 + i)) u_ones (.y(oy[i]));
+		fill #(.V(i)) u_fill (.y(fy[i*16 +: 16]));
 	end
 	node #(.ID(8'd200)) u_node8 (.sel(addr[15:0]), .id(nid[16*16 +: 16]), .hit(nhit[16]),
 		.cid(ncid[16*16 +: 16]), .rid(nrid[16*16 +: 16]));
@@ -158,6 +171,8 @@ module top (
 	cat #(.V(16'h7)) u_cat (.y(cy[16*72 +: 72]));
 	neg #(.V(8'd3)) u_neg (.y(ny[16*16 +: 16]));
 	scmp #(.V(8'd9)) u_scmp (.a(wdata), .y(sy[16]));
+	ones #(.P(8'hff)) u_ones (.y(oy[16]));
+	fill #(.V('1)) u_fill (.y(fy[16*16 +: 16]));
 	mixed #(.V(64'h1_0000_0000)) u_mixed (.y(my1));
 	match u_lone (addr[7:0], eq0, gt0);
 	wrap #(.A(64'h1_0000_0000)) u_wrap (.y(wy));
