@@ -41,6 +41,8 @@ logger -expect log "Moved the generate condition\(s\) of module shell that read 
 logger -expect log "Promoted parameter\(s\) BASE, FN of module shell \(16 copies\) to input ports\." 1
 logger -expect log "Moved the generate condition\(s\) of module fnsel that read FN onto parameter\(s\) FN\$cond0\." 1
 logger -expect log "Promoted parameter\(s\) FN of module fnsel \(32 copies\) to input ports\." 1
+logger -expect log "Promoted parameter\(s\) ADDR of module live \(16 copies\) to input ports\." 1
+logger -expect log "Keeping parameter ADDR of module dead: no instance elaborates the module\." 1
 logger -expect log "Promoted parameter\(s\) V of module mixed \(17 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) ID of module node \(19 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) ID of module nleaf \(19 copies\) to input ports\." 1
@@ -59,6 +61,8 @@ select -assert-mod-count 2 fnsel*
 select -assert-mod-count 16 outer*
 select -assert-mod-count 16 fncase*
 select -assert-mod-count 16 fnsum*
+select -assert-mod-count 1 live*
+select -assert-mod-count 0 dead*
 select -assert-mod-count 1 core*
 select -assert-mod-count 1 node*
 select -assert-mod-count 1 nleaf*

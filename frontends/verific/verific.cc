@@ -3905,7 +3905,9 @@ struct VerificPass : public Pass {
 		log("module only assigns, connects or compares the parameter whole. A generate if\n");
 		log("that tests the parameter, as in FN == 0, gets the test's outcome as a parameter\n");
 		log("of its own when every instance sets the parameter to a name or literal, so the\n");
-		log("module elaborates once per outcome.\n");
+		log("module elaborates once per outcome. A module that no instance elaborates, as\n");
+		log("one only in generate branches no copy takes, keeps its parameters, and passing\n");
+		log("a parameter on to it doesn't keep that one.\n");
 		log("\n");
 		log("\n");
 #endif

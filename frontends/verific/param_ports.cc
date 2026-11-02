@@ -868,6 +868,19 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 		}
 	while (grow(all, false)) {}
 
+	// A module that no instance elaborates, as one instantiated only in a generate branch that no copy
+	// takes, has no copies to merge and no values to type a port from, so its parameters stay. Nothing
+	// elaborates what its instantiations pass either, so passing a parameter on to it keeps nothing.
+	auto elaborated = [&](VeriModule *m) { return variants.count(m) && !variants.at(m).empty(); };
+	for (auto &it : promote)
+		if (!elaborated(it.first)) {
+			for (auto p : by_name(it.second)) {
+				log("Keeping parameter %s of module %s: no instance elaborates the module.\n", p->Name(), it.first->Name());
+				all.erase(p);
+			}
+			it.second.clear();
+		}
+
 	pool<VeriModule *> keys;
 	for (auto &it : promote)
 		keys.insert(it.first);
@@ -992,6 +1005,8 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 			for (auto &pass : scan.passed) {
 				VeriModule *c = std::get<1>(pass);
 				VeriIdDef *q = std::get<2>(pass);
+				if (!elaborated(c))
+					continue;
 				if (!promote.count(c) || !promote.at(c).count(q))
 					blocked.emplace(std::get<0>(pass), stringf("it sets parameter %s of module %s", q->Name(), c->Name()));
 				// The parameters that hold q's tests are set from what this passes
