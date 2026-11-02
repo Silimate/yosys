@@ -96,6 +96,10 @@ struct OptDffPass : public Pass {
 		log("        all result bits to be set to x. this behavior changes when 'a+0' is\n");
 		log("        replaced by 'a'. the -keepdc option disables all such optimizations.\n");
 		log("\n");
+		log("While the scratchpad string 'opt_dff.changed' is set, the name of each module\n");
+		log("this pass changes is appended to it, one per line, so a caller can tell which\n");
+		log("modules have anything new in them. Unset, it stays unset.\n");
+		log("\n");
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -142,6 +146,10 @@ struct OptDffPass : public Pass {
 		}
 		int64_t pool_start = pool, spent_total = 0;
 
+		const std::string changed_key = "opt_dff.changed";
+		bool record = design->scratchpad.count(changed_key);
+		std::string changed_names;
+
 		bool did_something = false;
 		for (auto mod : design->selected_modules()) {
 			// each module draws at most what the pool has left, and an empty pool turns -sat off
@@ -152,21 +160,30 @@ struct OptDffPass : public Pass {
 				effort = per_module > 0 ? std::min(per_module, pool) : pool;
 			}
 			OptDffWorker worker(mod_opt, mod, effort);
-			if (worker.run())
-				did_something = true;
+			bool changed = worker.run();
 			// constbits also runs without -sat: it folds bits with all-constant
 			// inputs, -sat additionally proves bits with wire inputs
 			if (worker.run_constbits()) {
-				did_something = true;
+				changed = true;
 				worker.refresh_after_edits();
 			}
 			if (mod_opt.sat && worker.run_eqbits())
-				did_something = true;
+				changed = true;
 			if (mod_opt.sat && worker.sat_budget.enabled()) {
 				int64_t spent = worker.sat_budget.total - worker.sat_budget.remaining;
 				spent_total += spent;
 				pool -= spent;
 			}
+			if (!changed)
+				continue;
+			did_something = true;
+			if (record)
+				changed_names += (changed_names.empty() ? "" : "\n") + mod->name.str();
+		}
+
+		if (record && !changed_names.empty()) {
+			const std::string &prior = design->scratchpad.at(changed_key);
+			design->scratchpad_set_string(changed_key, prior.empty() ? changed_names : prior + "\n" + changed_names);
 		}
 
 		if (spent_total > 0)
