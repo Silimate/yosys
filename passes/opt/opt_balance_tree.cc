@@ -771,7 +771,9 @@ struct OptBalanceTreePass : public Pass {
 			log("Converted %d sliced $add chains into trees.\n", sliced_add_count);
 
 		// Clean up
-		Yosys::run_pass("clean -purge");
+		// SILIMATE: clean the design this pass ran on, not the global one; they differ
+		// when pyosys runs the pass on its own ys.Design()
+		Pass::call(design, "clean -purge");
 	}
 } OptBalanceTreePass;
 
