@@ -1855,3 +1855,29 @@ select @c_cell @d_cell %i -assert-count 1
 
 design -reset
 log -pop
+
+
+# Test 45
+log -header "Cleanup removes the replaced chain but keeps unused public wires"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input  wire [3:0] a, b, c, d,
+  output wire [3:0] x
+);
+  // equiv_make pairs gold and gate by wire name, so the pass must not purge them
+  wire [3:0] spare = a;
+  assign x = a + b + c + d;
+endmodule
+EOF
+check -assert
+opt_clean
+
+equiv_opt -assert opt_balance_tree
+design -load postopt
+select t:$add -assert-count 3
+select w:spare -assert-count 1
+
+design -reset
+log -pop
