@@ -160,6 +160,20 @@ module fnsum #(parameter FN = 0) (output [7:0] y);
 	end
 endmodule
 
+// live passes ADDR on to dead only inside a generate if that no copy takes, so dead never elaborates.
+// It has no copies to merge and no values to type a port from, and passing ADDR to it doesn't keep
+// ADDR a parameter.
+module live #(parameter ADDR = 0, parameter EN = 0) (output [15:0] y);
+	assign y = ADDR;
+	if (EN) begin : g_on
+		dead #(.ADDR(ADDR)) u_dead (.y());
+	end
+endmodule
+
+module dead #(parameter ADDR = 0) (output [15:0] y);
+	assign y = ADDR;
+endmodule
+
 // Non-ANSI ports, overridden and connected by position. u_lone takes IDX's default.
 module match (a, y, z);
 	parameter IDX = 0;
@@ -179,7 +193,7 @@ module top (
 	output [16:0] ly, output [17*72-1:0] cy, output [17*16-1:0] ny, output [16:0] sy,
 	output [16:0] oy, output [17*16-1:0] fy,
 	output [16*4-1:0] sely, output [16*8-1:0] seltag, output [16*4-1:0] outy, output [16*8-1:0] outtag,
-	output [16*8-1:0] casey, output [16*8-1:0] sumy
+	output [16*8-1:0] casey, output [16*8-1:0] sumy, output [16*16-1:0] livey
 );
 	for (genvar i = 0; i < 16; i++) begin : g
 		bank #(.FN(i), .BASE(16'h1000 + i * 16'h100), .MODE(i % 2)) u_bank (
@@ -208,6 +222,7 @@ module top (
 		outer #(.K(i + 16)) u_outer (.a(addr[7:4]), .y(outy[i*4 +: 4]), .tag(outtag[i*8 +: 8]));
 		fncase #(.FN(i)) u_fncase (.y(casey[i*8 +: 8]));
 		fnsum #(.FN(i + 1)) u_fnsum (.y(sumy[i*8 +: 8]));
+		live #(.ADDR(16'h40 + i)) u_live (.y(livey[i*16 +: 16]));
 	end
 	node #(.ID(8'd200)) u_node8 (.sel(addr[15:0]), .id(nid[16*16 +: 16]), .hit(nhit[16]),
 		.cid(ncid[16*16 +: 16]), .rid(nrid[16*16 +: 16]));
