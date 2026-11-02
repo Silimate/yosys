@@ -1,0 +1,29 @@
+# While opt_dff.changed is set, opt_dff appends the name of each module it changes, so
+# a caller can revisit only those. `a` loads a constant and folds; `b` has nothing to fold.
+read_verilog <<EOT
+module a(input clk, output reg q);
+	always @(posedge clk) q <= 1'b0;
+endmodule
+module b(input clk, input d, output reg q);
+	always @(posedge clk) q <= d;
+endmodule
+EOT
+proc
+design -save start
+
+# Unset, it stays unset.
+opt_dff
+select -assert-none a/t:$dff
+scratchpad -assert-unset opt_dff.changed
+
+# Set, it names the module that changed and not the one that didn't.
+design -load start
+scratchpad -set opt_dff.changed ""
+opt_dff
+select -assert-none a/t:$dff
+select -assert-count 1 b/t:$dff
+scratchpad -assert opt_dff.changed \a
+
+# A call that changes nothing leaves the record as it was.
+opt_dff
+scratchpad -assert opt_dff.changed \a

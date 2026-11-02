@@ -65,3 +65,44 @@ equiv_make top gate equiv
 equiv_induct -seq 24 equiv
 equiv_status -assert equiv
 design -reset
+
+# Each repeat of the fold loop revisits only the modules the one before changed. One
+# round rewrites both leaves: `fast` folds its only register in the first repeat, while
+# `slow` folds one stage of a 20-stage line per repeat, more than one round's 16 take.
+# So the loop optimizes `fast` once after its fold and never again, and only `slow`
+# carries into round 2, which also rewrites `top` to take `fast`'s constant output.
+read_verilog <<EOT
+module slow(input clk, input d, output q);
+	reg [19:0] p;
+	always @(posedge clk) p <= {p[18:0], d};
+	assign q = p[19];
+endmodule
+module fast(input clk, input d, input x, output q);
+	reg r;
+	always @(posedge clk) r <= d & x;
+	assign q = r;
+endmodule
+module top(input clk, input x, output qs, output qf);
+	slow s(.clk(clk), .d(1'b0), .q(qs));
+	fast f(.clk(clk), .d(1'b0), .x(x), .q(qf));
+endmodule
+EOT
+hierarchy -top top
+proc
+design -save narrow
+logger -expect log "Round 1 rewrote 2 module" 1
+logger -expect log "Optimizing module fast\." 2
+logger -expect log "Round 2 rewrote 2 module" 1
+opt_hier -max_iter 0 -sat
+logger -check-expected
+select -assert-none slow/t:*dff*
+select -assert-none fast/t:*dff*
+scratchpad -assert opt_hier.saturated true
+scratchpad -assert-unset opt_dff.changed
+
+# A record the caller keeps in opt_dff.changed stays set, with the folds appended.
+design -load narrow
+scratchpad -set opt_dff.changed ""
+opt_hier -max_iter 0 -sat
+scratchpad -assert-set opt_dff.changed
+design -reset

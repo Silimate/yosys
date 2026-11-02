@@ -493,6 +493,36 @@ static pool<Module *> run_round(RTLIL::Design *d)
 	return changed;
 }
 
+static RTLIL::Selection select_modules(RTLIL::Design *d, const pool<Module *> &modules)
+{
+	RTLIL::Selection sel = RTLIL::Selection::EmptySelection(d);
+	for (auto module : modules)
+		sel.select(module);
+	return sel;
+}
+
+// Run opt_dff -sat on the modules and return the ones it changed, read back from its
+// opt_dff.changed record. A record the caller already keeps gets these names too;
+// otherwise the key is left unset again.
+static pool<Module *> fold_registers(RTLIL::Design *d, const pool<Module *> &modules)
+{
+	const std::string key = "opt_dff.changed";
+	bool kept = d->scratchpad.count(key);
+	size_t mark = kept ? d->scratchpad.at(key).size() : 0;
+	if (!kept)
+		d->scratchpad_set_string(key, "");
+	Pass::call_on_selection(d, select_modules(d, modules), "opt_dff -sat");
+	std::string names = d->scratchpad_get_string(key).substr(mark);
+	if (!kept)
+		d->scratchpad_unset(key);
+
+	pool<Module *> folded;
+	for (auto &name : split_tokens(names, "\n"))
+		if (Module *module = d->module(name))
+			folded.insert(module);
+	return folded;
+}
+
 struct OptHierPass : Pass {
 	OptHierPass() : Pass("opt_hier", "perform cross-boundary optimization") {}
 	void help() override
@@ -530,9 +560,11 @@ struct OptHierPass : Pass {
 		log("        at that constant by induction, which plain opt_dff cannot prove.\n");
 		log("        opt_dff -sat and opt_expr repeat until opt_dff changes nothing, so the\n");
 		log("        logic and registers a folded register feeds fold before the next round\n");
-		log("        looks for constant outputs. A round stops after 16 repeats and leaves\n");
-		log("        the rest to the next, so -max_iter bounds the total. Solver effort is\n");
-		log("        capped by opt_dff's scratchpad options (see 'help opt_dff').\n");
+		log("        looks for constant outputs. Each repeat revisits only the modules the\n");
+		log("        one before changed. A round stops after 16 repeats and leaves the\n");
+		log("        modules still changing to the next, so -max_iter bounds the total.\n");
+		log("        Solver effort is capped by opt_dff's scratchpad options (see\n");
+		log("        'help opt_dff').\n");
 		log("\n");
 		log("The number of rounds that changed something is left in the scratchpad as\n");
 		log("opt_hier.rounds, and opt_hier.saturated is set when the last round found\n");
@@ -610,28 +642,28 @@ struct OptHierPass : Pass {
 			// act on nothing this pass put there.
 			log("Round %d rewrote %d module(s); optimizing them before the next round.\n",
 					rounds, GetSize(changed));
-			RTLIL::Selection sel = RTLIL::Selection::EmptySelection(d);
-			for (auto module : changed)
-				sel.select(module);
+			RTLIL::Selection sel = select_modules(d, changed);
 			std::string opt_expr_cmd = full ? "opt_expr -full" : "opt_expr";
 			Pass::call_on_selection(d, sel, opt_expr_cmd);
 			if (!sat)
 				Pass::call_on_selection(d, sel, "opt_dff");
 			// A register opt_dff just folded feeds logic the opt_expr above already passed
 			// over, and that logic can hold another register's D. Both must fold before the
-			// next round, or it sees no constant output and stops. Unsetting the flag here is
-			// safe: rounds > 0, so it is set again once the rounds finish. The cap bounds a
-			// round's cost; a longer chain carries on in the next round, so -max_iter bounds it.
+			// next round, or it sees no constant output and stops. Modules don't affect each
+			// other until the next round, so a module opt_dff left alone has nothing new for
+			// opt_expr or the next opt_dff, and each repeat revisits only the modules the one
+			// before changed. The cap bounds a round's cost; the modules still changing at it
+			// carry on in the next round, so -max_iter bounds it.
+			pool<Module *> folding = changed;
 			for (int fold = 0; sat; fold++) {
 				if (fold == max_sat_folds) {
-					unfinished = changed;
+					unfinished = folding;
 					break;
 				}
-				d->scratchpad_unset("opt.did_something");
-				Pass::call_on_selection(d, sel, "opt_dff -sat");
-				if (!d->scratchpad_get_bool("opt.did_something"))
+				folding = fold_registers(d, folding);
+				if (folding.empty())
 					break;
-				Pass::call_on_selection(d, sel, opt_expr_cmd);
+				Pass::call_on_selection(d, select_modules(d, folding), opt_expr_cmd);
 			}
 			Pass::call_on_selection(d, sel, purge ? "opt_clean -purge" : "opt_clean");
 		}
