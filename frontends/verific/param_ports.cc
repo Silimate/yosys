@@ -24,6 +24,8 @@
 
 #include "kernel/yosys.h"
 
+#include <sstream>
+
 #if defined(YOSYS_ENABLE_VERIFIC) && defined(VERIFIC_HIER_TREE_SUPPORT) // hier_tree counts the copies
 
 #include "Array.h"
@@ -240,6 +242,7 @@ static void name_overrides(VeriModuleInstantiation *mi, VeriModule *mod)
 struct UseScan : public VeriVisitor {
 	using VeriVisitor::Visit;
 	const pool<VeriIdDef *> &tracked, &derivable;
+	const pool<VeriExpression *> &moved; // generate condition parts that move to parameters of their own
 	dict<VeriIdDef *, std::string> blocked;
 	dict<VeriIdDef *, pool<VeriIdDef *>> feeds;                      // id -> localparams computed from it
 	std::vector<std::tuple<VeriIdDef *, VeriModule *, VeriIdDef *>> passed; // id -> child parameter it sets
@@ -248,7 +251,8 @@ struct UseScan : public VeriVisitor {
 	VeriModule *child = nullptr;
 	VeriIdDef *formal = nullptr;
 
-	UseScan(const pool<VeriIdDef *> &tracked, const pool<VeriIdDef *> &derivable) : tracked(tracked), derivable(derivable) {}
+	UseScan(const pool<VeriIdDef *> &tracked, const pool<VeriIdDef *> &derivable, const pool<VeriExpression *> &moved) :
+		tracked(tracked), derivable(derivable), moved(moved) {}
 
 	void use(VeriIdDef *id)
 	{
@@ -314,6 +318,8 @@ struct UseScan : public VeriVisitor {
 #undef FIXED
 
 	void Visit(VeriGenerateConditional &node) override { fixed(node.GetIfExpr(), "a generate condition"); VeriVisitor::Visit(node); }
+	void Visit(VeriBinaryOperator &node) override { if (!moved.count(&node)) VeriVisitor::Visit(node); }
+	void Visit(VeriUnaryOperator &node) override { if (!moved.count(&node)) VeriVisitor::Visit(node); }
 	void Visit(VeriGenerateCase &node) override
 	{
 		fixed(node.GetCondition(), "a generate condition");
@@ -530,6 +536,128 @@ struct WholeScan : public VeriVisitor {
 	}
 };
 
+// Every identifier a tree reads, and those it reads through a select or a hierarchical name
+struct Reads : public VeriVisitor {
+	using VeriVisitor::Visit;
+	pool<VeriIdDef *> ids, selected;
+	void Visit(VeriIdRef &node) override { ids.insert(node.GetId()); }
+	void Visit(VeriIndexedId &node) override { ids.insert(node.GetId()), selected.insert(node.GetId()); VeriVisitor::Visit(node); }
+	void Visit(VeriIndexedMemoryId &node) override { ids.insert(node.GetId()), selected.insert(node.GetId()); VeriVisitor::Visit(node); }
+	void Visit(VeriSelectedName &node) override { ids.insert(node.GetId()), selected.insert(node.GetId()); VeriVisitor::Visit(node); }
+};
+
+struct GenerateIfs : public VeriVisitor {
+	using VeriVisitor::Visit;
+	std::vector<VeriGenerateConditional *> nodes;
+	void Visit(VeriGenerateConditional &node) override { nodes.push_back(&node); VeriVisitor::Visit(node); }
+};
+
+// Whether an expression is a comparison or a logical operation, whose one-bit value its context can't widen
+static bool one_bit(VeriExpression *e)
+{
+	if (e && e->GetClassId() == ID_VERIUNARYOPERATOR)
+		return static_cast<VeriUnaryOperator *>(e)->OperType() == VERI_LOGNOT;
+	if (!e || e->GetClassId() != ID_VERIBINARYOPERATOR)
+		return false;
+	switch (static_cast<VeriBinaryOperator *>(e)->OperType()) {
+	case VERI_LOGEQ: case VERI_LOGNEQ: case VERI_CASEEQ: case VERI_CASENEQ:
+	case VERI_LT: case VERI_GT: case VERI_LEQ: case VERI_GEQ: case VERI_LOGAND: case VERI_LOGOR:
+		return true;
+	default:
+		return false;
+	}
+}
+
+// The operands of an operator, the only places `direct`, `replace` and `split` look into
+static std::vector<VeriExpression *> operands(VeriExpression *e)
+{
+	switch (e ? e->GetClassId() : ID_VERIIDREF) {
+	case ID_VERIBINARYOPERATOR: {
+		auto b = static_cast<VeriBinaryOperator *>(e);
+		return {b->GetLeft(), b->GetRight()};
+	}
+	case ID_VERIUNARYOPERATOR:
+		return {static_cast<VeriUnaryOperator *>(e)->GetArg()};
+	case ID_VERIQUESTIONCOLON: {
+		auto q = static_cast<VeriQuestionColon *>(e);
+		return {q->GetIfExpr(), q->GetThenExpr(), q->GetElseExpr()};
+	}
+	default:
+		return {};
+	}
+}
+
+static bool is_ref(VeriExpression *e, VeriIdDef *id)
+{
+	return e && e->GetClassId() == ID_VERIIDREF && static_cast<VeriIdRef *>(e)->GetId() == id;
+}
+
+// How many references to `id` an expression holds as operands of operators
+static int direct(VeriExpression *e, VeriIdDef *id)
+{
+	int n = is_ref(e, id);
+	for (auto o : operands(e))
+		n += direct(o, id);
+	return n;
+}
+
+// Replaces each reference to `id` that `direct` counts with a copy of `value`
+static void replace(VeriExpression *e, VeriIdDef *id, VeriExpression *value)
+{
+	for (auto o : operands(e)) {
+		if (!is_ref(o, id)) {
+			replace(o, id, value);
+			continue;
+		}
+		VeriMapForCopy map;
+		e->ReplaceChildExpr(o, value->CopyExpression(map), 1);
+	}
+}
+
+// A copy of `e` that reads `value` wherever `e` reads `id`
+static VeriExpression *substitute(VeriExpression *e, VeriIdDef *id, VeriExpression *value)
+{
+	VeriMapForCopy map;
+	VeriExpression *copy = e->CopyExpression(map);
+	replace(copy, id, value);
+	return copy;
+}
+
+// A generate condition part that moves to a parameter of its own, and the node holding it
+typedef std::pair<VeriTreeNode *, VeriExpression *> Part;
+
+// Collects the parts of a generate condition that read `p` and otherwise only constants and yield
+// one bit. False when the condition reads `p` anywhere else.
+static bool split(VeriTreeNode *parent, VeriExpression *e, VeriIdDef *p, std::vector<Part> &out)
+{
+	Reads r;
+	if (e)
+		e->Accept(r);
+	if (!r.ids.count(p))
+		return true;
+	int all = 0;
+	for (auto id : refs(e))
+		all += id == p;
+	if (GetSize(r.ids) == 1 && !r.selected.count(p) && one_bit(e) && direct(e, p) == all) {
+		out.emplace_back(parent, e);
+		return true;
+	}
+	std::vector<VeriExpression *> ops = operands(e);
+	if (ops.empty())
+		return false;
+	for (auto o : ops)
+		if (!split(e, o, p, out))
+			return false;
+	return true;
+}
+
+static std::string text(VeriTreeNode *node)
+{
+	std::ostringstream s;
+	node->PrettyPrint(s, 0);
+	return s.str();
+}
+
 struct Rebind : public VeriVisitor {
 	using VeriVisitor::Visit;
 	const dict<VeriIdDef *, VeriIdDef *> &repl;
@@ -745,7 +873,45 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 		keys.insert(it.first);
 	std::vector<VeriModule *> modules = by_name(keys);
 
-	// The copies a module would still elaborate to, told apart by the parameters it keeps
+	// A generate condition only needs the outcome of a test on a parameter, so each one-bit part of it
+	// that reads the parameter and otherwise only constants moves to a parameter of its own, which every
+	// instance sets by evaluating the part on what it gives the parameter. The parameter can then become
+	// a port. That evaluation sees the same type and value the copy did only when the parameter is untyped
+	// and every instance sets it to a name or literal, so only those split. The default, which the new
+	// parameters' defaults test, must be a constant of its own.
+	dict<VeriIdDef *, std::vector<Part>> parts;
+	pool<VeriExpression *> moved;
+	for (auto m : modules) {
+		GenerateIfs gen;
+		m->Accept(gen);
+		for (auto p : promote.at(m)) {
+			bool ok = untyped(p) && primary(p->GetInitialValue()) && refs(p->GetInitialValue()).empty();
+			for (auto &use : uses[m]) {
+				dict<VeriIdDef *, VeriExpression *> ov = overrides(use.second, m);
+				ok = ok && (!ov.count(p) || primary(ov.at(p)));
+			}
+			std::vector<Part> found;
+			for (auto g : gen.nodes)
+				ok = ok && split(g, g->GetIfExpr(), p, found);
+			if (!ok || found.empty())
+				continue;
+			parts[p] = found;
+			for (auto &f : found)
+				moved.insert(f.second);
+		}
+	}
+	// The distinct parts that read a parameter, each a parameter of its own once it is promoted
+	auto tests = [&](VeriIdDef *p) {
+		std::vector<std::string> out;
+		if (parts.count(p))
+			for (auto &f : parts.at(p))
+				if (std::find(out.begin(), out.end(), text(f.second)) == out.end())
+					out.push_back(text(f.second));
+		return out;
+	};
+
+	// The copies a module would still elaborate to, told apart by the parameters it keeps. Each part
+	// moved to a parameter can tell them apart further, by its one bit.
 	auto copies_left = [&](VeriModule *m) {
 		std::vector<VeriIdDef *> params = items<VeriIdDef>(m->GetParameters());
 		pool<std::vector<std::string>> left;
@@ -756,7 +922,10 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 					kept.push_back(values[i]);
 			left.insert(kept);
 		}
-		return GetSize(left);
+		int bits = 0;
+		for (auto p : promote.at(m))
+			bits += GetSize(tests(p));
+		return GetSize(left) << std::min(bits, 16);
 	};
 
 	// Copies that disagree on an untyped parameter's width or sign still share one port when every
@@ -814,7 +983,7 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 			for (auto id : tracked)
 				if (!has_wire_type(id, types))
 					blocked.emplace(id, untyped(id) ? "its values don't share one known width and sign" : "its type has no matching port");
-			UseScan scan(tracked, local_ok);
+			UseScan scan(tracked, local_ok, moved);
 			m->Accept(scan);
 			for (auto &b : scan.blocked)
 				blocked.emplace(b.first, stringf("it is read in %s", b.second.c_str()));
@@ -823,6 +992,10 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 				VeriIdDef *q = std::get<2>(pass);
 				if (!promote.count(c) || !promote.at(c).count(q))
 					blocked.emplace(std::get<0>(pass), stringf("it sets parameter %s of module %s", q->Name(), c->Name()));
+				// The parameters that hold q's tests are set from what this passes
+				else if (parts.count(q))
+					blocked.emplace(std::get<0>(pass),
+							stringf("it sets parameter %s of module %s, which a generate condition reads", q->Name(), c->Name()));
 			}
 			// A localparam that stays one keeps every parameter it is computed from
 			for (bool grew = true; grew;) {
@@ -855,12 +1028,45 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 		std::vector<VeriIdDef *> ps = by_name(promote.at(m));
 		std::vector<VeriIdDef *> locals = by_name(derived(m, promote.at(m)));
 
-		// Each instance connects what it overrode the parameter with, or its default
+		// A parameter for each distinct test a generate condition makes on a promoted parameter, which
+		// defaults to the test on the parameter's default
+		dict<VeriIdDef *, std::vector<std::pair<VeriIdDef *, VeriExpression *>>> outcomes;
+		dict<VeriExpression *, VeriIdDef *> outcome_of;
+		Array *formals = m->GetParameterConnects();
+		for (auto p : ps) {
+			std::vector<std::string> done;
+			std::string names;
+			for (auto &f : parts.count(p) ? parts.at(p) : std::vector<Part>()) {
+				auto it = std::find(done.begin(), done.end(), text(f.second));
+				if (it != done.end()) {
+					outcome_of[f.second] = outcomes[p][it - done.begin()].first;
+					continue;
+				}
+				std::string name;
+				for (int k = GetSize(done); name.empty() || m->GetScope()->FindLocal(name.c_str()); k++)
+					name = stringf("%s$cond%d", p->Name(), k);
+				VeriIdDef *g = m->AddParameter(name.c_str(), nullptr, substitute(f.second, p, p->GetInitialValue()),
+							       formals && formals->Size());
+				outcomes[p].emplace_back(g, f.second);
+				outcome_of[f.second] = g;
+				done.push_back(text(f.second));
+				names += (names.empty() ? "" : ", ") + name;
+			}
+			if (!names.empty())
+				log("Moved the generate condition(s) of module %s that read %s onto parameter(s) %s.\n", m->Name(), p->Name(),
+				    names.c_str());
+		}
+
+		// Each instance connects what it overrode the parameter with, or its default, and sets each test
+		// on it to the test on what it overrode it with
 		for (auto &use : uses[m]) {
 			VeriModuleInstantiation *inst = use.second;
 			name_overrides(inst, m);
 			dict<VeriIdDef *, VeriExpression *> ov = overrides(inst, m);
 			for (auto p : ps) {
+				if (ov.count(p) && outcomes.count(p))
+					for (auto &o : outcomes.at(p))
+						inst->AddParamRef(o.first->Name(), substitute(o.second, p, ov.at(p)), m->GetScope());
 				VeriExpression *value = ov.count(p) ? ov.at(p) : p->GetInitialValue();
 				for (auto id : items<VeriInstId>(inst->GetIds())) {
 					VeriMapForCopy map;
@@ -880,6 +1086,11 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 				inst->RemoveParamRef(p->Name());
 			}
 		}
+
+		// Then each condition reads the parameter holding its test
+		for (auto p : ps)
+			for (auto &f : parts.count(p) ? parts.at(p) : std::vector<Part>())
+				f.first->ReplaceChildExpr(f.second, new VeriIdRef(outcome_of.at(f.second)), 1);
 
 		// The parameters become ports and the localparams computed from them wires, first under
 		// temporary names because the old declarations still hold theirs
