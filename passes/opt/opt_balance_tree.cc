@@ -772,8 +772,9 @@ struct OptBalanceTreePass : public Pass {
 
 		// Clean up
 		// SILIMATE: clean the design this pass ran on, not the global one; they differ
-		// when pyosys runs the pass on its own ys.Design()
-		Pass::call(design, "clean -purge");
+		// when pyosys runs the pass on its own ys.Design(). Plain clean removes the dead
+		// chain but keeps unused public wires, which equiv_make pairs gold and gate by.
+		Pass::call(design, "clean");
 	}
 } OptBalanceTreePass;
 
