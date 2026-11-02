@@ -147,6 +147,19 @@ static std::pair<ValueType, std::string> evaluated(VeriBaseValue *v)
 	return out;
 }
 
+// Whether a value is a number with no x or z bits that isn't negative, so that any type at least as
+// wide holds it unchanged, signed or not
+static bool natural(VeriBaseValue *v)
+{
+	if (!v || (v->Type() != VeriBaseValue::INTEGER && v->Type() != VeriBaseValue::BASEDNUM) || v->HasXZ())
+		return false;
+	verific_int64 size_sign = v->StaticSizeSign();
+	if (size_sign >= 0)
+		return size_sign > 0;
+	// A signed value's sign bit, which only a value that fits 64 bits shows here
+	return -size_sign <= 64 && !((v->Get64bitUnsigned() >> (-size_sign - 1)) & 1);
+}
+
 static VeriRange *range(int msb)
 {
 	return new VeriRange(new VeriIntVal(msb), new VeriIntVal(0));
@@ -392,6 +405,114 @@ struct UseScan : public VeriVisitor {
 	}
 };
 
+// An operand whose value doesn't depend on the width of the expression around it
+static bool primary(VeriExpression *e)
+{
+	if (!e)
+		return false;
+	switch (e->GetClassId()) {
+	case ID_VERIIDREF: case ID_VERIINDEXEDID: case ID_VERIINDEXEDMEMORYID:
+	case ID_VERICONCAT: case ID_VERIMULTICONCAT: case ID_VERICONSTVAL: case ID_VERIINTVAL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+// Counts a parameter's reads, and those that take its value whole, where a type at least as wide that
+// holds each copy's value unchanged gives the same result: the right side of an assignment, a port or
+// parameter connection, or a comparison with an operand the width can't change. A comparison is
+// signed only if both sides are, so unless every copy has the same sign, that operand must be
+// unsigned in every copy, and so name no parameter or genvar, whose type a copy may change.
+struct WholeScan : public VeriVisitor {
+	using VeriVisitor::Visit;
+	VeriIdDef *id;
+	bool same_sign;
+	int reads = 0, whole = 0;
+
+	WholeScan(VeriIdDef *id, bool same_sign) : id(id), same_sign(same_sign) {}
+
+	bool is(VeriExpression *e) { return e && e->GetClassId() == ID_VERIIDREF && static_cast<VeriIdRef *>(e)->GetId() == id; }
+	void take(VeriExpression *e) { whole += is(e); }
+	// The other side of a comparison
+	bool other(VeriExpression *e)
+	{
+		if (!primary(e))
+			return false;
+		if (same_sign)
+			return true;
+		if (e->Sign())
+			return false;
+		for (auto ref : refs(e))
+			if (!ref || ref->IsParam() || ref->IsGenVar())
+				return false;
+		return true;
+	}
+
+	void Visit(VeriIdRef &node) override { reads += node.GetId() == id; }
+	void Visit(VeriIndexedId &node) override { reads += node.GetId() == id; VeriVisitor::Visit(node); }
+	void Visit(VeriIndexedMemoryId &node) override { reads += node.GetId() == id; VeriVisitor::Visit(node); }
+	void Visit(VeriSelectedName &node) override { reads += node.GetId() == id; VeriVisitor::Visit(node); }
+
+	void Visit(VeriNetRegAssign &node) override { take(node.GetRValExpr()); VeriVisitor::Visit(node); }
+	void Visit(VeriBlockingAssign &node) override
+	{
+		if (node.OperType() == VERI_EQUAL_ASSIGN)
+			take(node.GetValue());
+		VeriVisitor::Visit(node);
+	}
+	void Visit(VeriNonBlockingAssign &node) override { take(node.GetValue()); VeriVisitor::Visit(node); }
+	void Visit(VeriBinaryOperator &node) override
+	{
+		switch (node.OperType()) {
+		case VERI_LOGEQ: case VERI_LOGNEQ: case VERI_CASEEQ: case VERI_CASENEQ:
+		case VERI_LT: case VERI_GT: case VERI_LEQ: case VERI_GEQ:
+			whole += is(node.GetLeft()) && other(node.GetRight());
+			whole += is(node.GetRight()) && other(node.GetLeft());
+			break;
+		default:
+			break;
+		}
+		VeriVisitor::Visit(node);
+	}
+
+	// Declarations and instantiations are walked by hand, as UseScan does, so every read is counted.
+	// A net's declaration assignment is a continuous assignment.
+	void decl(VeriDataType *type, const Array *ids, bool nets)
+	{
+		if (type)
+			type->Accept(*this);
+		for (auto i : items<VeriIdDef>(ids)) {
+			if (i->GetDimensions())
+				i->GetDimensions()->Accept(*this);
+			if (VeriExpression *init = i->GetInitialValue()) {
+				if (nets && i->IsNet())
+					take(init);
+				init->Accept(*this);
+			}
+		}
+	}
+	void Visit(VeriDataDecl &node) override { decl(node.GetDataType(), node.GetIds(), true); }
+	void Visit(VeriNetDecl &node) override { decl(node.GetDataType(), node.GetIds(), true); }
+	void Visit(VeriAnsiPortDecl &node) override { decl(node.GetDataType(), node.GetIds(), false); }
+	void Visit(VeriModuleInstantiation &node) override
+	{
+		if (VeriModule *mod = node.GetInstantiatedModule())
+			for (auto &o : overrides(&node, mod))
+				take(o.second);
+		for (auto e : items<VeriExpression>(node.GetParamValues()))
+			e->Accept(*this);
+		for (auto inst : items<VeriInstId>(node.GetIds())) {
+			if (inst->GetDimensions())
+				inst->GetDimensions()->Accept(*this);
+			for (auto e : items<VeriExpression>(inst->GetPortConnects())) {
+				take(e->GetClassId() == ID_VERIPORTCONNECT ? static_cast<VeriPortConnect *>(e)->GetConnection() : e);
+				e->Accept(*this);
+			}
+		}
+	}
+};
+
 struct Rebind : public VeriVisitor {
 	using VeriVisitor::Visit;
 	const dict<VeriIdDef *, VeriIdDef *> &repl;
@@ -520,6 +641,10 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 	dict<VeriModule *, pool<std::vector<std::string>>> copies;
 	Types types;
 	pool<VeriIdDef *> mixed;
+	// The widest of each identifier's value types, signed only if every value is, and the identifiers
+	// with values of both signs or with a value no wider type holds unchanged
+	Types widest;
+	pool<VeriIdDef *> both_signs, unnatural;
 	dict<VeriModule *, std::vector<VeriIdDef *>> local_ids;
 	auto record = [&](HierTreeNode *node, VeriModule *mod, const std::string &sig) {
 		if (!local_ids.count(mod))
@@ -535,11 +660,21 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 				if (e && refs(e).empty())
 					v = own = e->StaticEvaluate(0, nullptr);
 				auto value = evaluated(v);
+				if (!natural(v))
+					unnatural.insert(id);
 				delete own;
 				if (mixed.count(id) || (types.count(id) && !(types.at(id) == value.first)) || !value.first.width)
 					types.erase(id), mixed.insert(id);
 				else
 					types[id] = value.first;
+				if (!widest.count(id))
+					widest[id] = value.first;
+				else {
+					ValueType &w = widest.at(id);
+					if (w.sign != value.first.sign)
+						both_signs.insert(id);
+					w = {std::max(w.width, value.first.width), w.sign && value.first.sign};
+				}
 				// A value this can't print tells this copy apart from every other
 				if (ids == &params)
 					values.push_back(value.second.empty() ? "?" + sig : value.second);
@@ -606,6 +741,20 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 		}
 		return GetSize(left);
 	};
+
+	// Copies that disagree on an untyped parameter's width or sign still share one port when every
+	// value is a non-negative number, no localparam is computed from it, and the module only reads it
+	// whole: the widest copy's width, signed only if every copy is, holds each value unchanged
+	pool<VeriIdDef *> widened;
+	for (auto m : modules)
+		for (auto p : promote.at(m)) {
+			if (!untyped(p) || !mixed.count(p) || !widest.count(p) || unnatural.count(p) || !derived(m, {p}).empty())
+				continue;
+			WholeScan scan(p, !both_signs.count(p));
+			m->Accept(scan);
+			if (scan.whole == scan.reads)
+				types[p] = widest.at(p), widened.insert(p);
+		}
 
 	// Drop every parameter that some read, type or instantiation keeps a constant
 	auto keep = [&](VeriModule *m, VeriIdDef *p, const std::string &why) {
@@ -691,6 +840,13 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 				for (auto id : items<VeriInstId>(inst->GetIds())) {
 					VeriMapForCopy map;
 					VeriExpression *copy = value->CopyExpression(map);
+					// A port wider than the value would evaluate its operators at the port's width,
+					// where a narrower sum no longer wraps. A concatenation keeps it to its own width.
+					if (widened.count(p) && !primary(copy)) {
+						Array *one = new Array(1);
+						one->InsertLast(copy);
+						copy = new VeriConcat(one);
+					}
 					Array *conns = id->GetPortConnects();
 					VeriExpression *first = conns->Size() ? static_cast<VeriExpression *>(conns->GetFirst()) : nullptr;
 					bool positional = first && first->GetClassId() != ID_VERIPORTCONNECT && first->GetClassId() != ID_VERIDOTSTAR;
