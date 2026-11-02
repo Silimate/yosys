@@ -3900,7 +3900,9 @@ struct VerificPass : public Pass {
 		log("to the port, so the module elaborates once. A parameter that sizes or selects\n");
 		log("logic, sets a reset value or feeds a function stays a parameter, and so does\n");
 		log("every parameter of a module whose remaining parameters would still tell more\n");
-		log("than half its copies apart.\n");
+		log("than half its copies apart. Copies whose values differ in width or sign share a\n");
+		log("port as wide as the widest, when every value is a non-negative number and the\n");
+		log("module only assigns, connects or compares the parameter whole.\n");
 		log("\n");
 		log("\n");
 #endif
