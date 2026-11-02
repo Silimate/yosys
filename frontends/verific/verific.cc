@@ -3902,7 +3902,10 @@ struct VerificPass : public Pass {
 		log("every parameter of a module whose remaining parameters would still tell more\n");
 		log("than half its copies apart. Copies whose values differ in width or sign share a\n");
 		log("port as wide as the widest, when every value is a non-negative number and the\n");
-		log("module only assigns, connects or compares the parameter whole.\n");
+		log("module only assigns, connects or compares the parameter whole. A generate if\n");
+		log("that tests the parameter, as in FN == 0, gets the test's outcome as a parameter\n");
+		log("of its own when every instance sets the parameter to a name or literal, so the\n");
+		log("module elaborates once per outcome.\n");
 		log("\n");
 		log("\n");
 #endif

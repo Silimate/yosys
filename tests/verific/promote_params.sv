@@ -103,8 +103,9 @@ module scmp #(parameter V = 0) (input signed [7:0] a, output y);
 	assign y = a < V;
 endmodule
 
-// FN picks a generate branch, so shell's copies stay apart and it keeps BASE too. core still
-// elaborates once, its port connected to shell's parameter.
+// FN == 0 picks a generate branch, so it moves to a parameter of its own that each instance sets from
+// its FN, and FN and BASE become ports: shell elaborates once for FN 0 and once for the rest. core
+// elaborates once, its port connected to shell's.
 module shell #(parameter FN = 0, parameter BASE = 0) (input [31:0] addr, output hit, output first);
 	if (FN == 0) begin : g_first
 		assign first = 1'b1;
@@ -116,6 +117,47 @@ endmodule
 
 module core #(parameter BASE = 0) (input [31:0] addr, output hit);
 	assign hit = addr[31:16] == BASE[31:16];
+endmodule
+
+// The generate condition sits in a generate loop and also reads W and the loop's genvar. Only FN == 0
+// moves to a parameter, and fnsel elaborates once for FN 0 and once for the rest.
+module fnsel #(parameter FN = 0, parameter W = 4) (input [3:0] a, output [3:0] y, output [7:0] tag);
+	for (genvar j = 0; j < 4; j++) begin : g
+		if (W == 4 && FN == 0 && j < 2) begin : g_first
+			assign y[j] = ~a[j];
+		end else begin : g_rest
+			assign y[j] = a[j];
+		end
+	end
+	assign tag = FN;
+endmodule
+
+// outer passes K on to fnsel's FN, so fnsel's new parameter is set from K, which therefore has to stay
+// a parameter
+module outer #(parameter K = 0) (input [3:0] a, output [3:0] y, output [7:0] tag);
+	fnsel #(.FN(K)) u_sel (.a(a), .y(y), .tag(tag));
+endmodule
+
+// A generate case isn't split, so FN stays a parameter
+module fncase #(parameter FN = 0) (output [7:0] y);
+	case (FN)
+		0: begin : g_zero
+			assign y = 8'h11;
+		end
+		default: begin : g_other
+			assign y = FN;
+		end
+	endcase
+endmodule
+
+// FN's overrides are sums, which the comparison would evaluate at its own width rather than FN's, so FN
+// stays a parameter
+module fnsum #(parameter FN = 0) (output [7:0] y);
+	if (FN == 1) begin : g_one
+		assign y = 8'h22;
+	end else begin : g_other
+		assign y = FN;
+	end
 endmodule
 
 // Non-ANSI ports, overridden and connected by position. u_lone takes IDX's default.
@@ -135,7 +177,9 @@ module top (
 	output [16*64-1:0] my, output [63:0] my1, output [15:0] chit, output [15:0] cfirst,
 	output [19*16-1:0] nid, output [18:0] nhit, output [19*16-1:0] ncid, output [19*16-1:0] nrid,
 	output [16:0] ly, output [17*72-1:0] cy, output [17*16-1:0] ny, output [16:0] sy,
-	output [16:0] oy, output [17*16-1:0] fy
+	output [16:0] oy, output [17*16-1:0] fy,
+	output [16*4-1:0] sely, output [16*8-1:0] seltag, output [16*4-1:0] outy, output [16*8-1:0] outtag,
+	output [16*8-1:0] casey, output [16*8-1:0] sumy
 );
 	for (genvar i = 0; i < 16; i++) begin : g
 		bank #(.FN(i), .BASE(16'h1000 + i * 16'h100), .MODE(i % 2)) u_bank (
@@ -160,6 +204,10 @@ module top (
 		scmp #(.V(i)) u_scmp (.a(wdata), .y(sy[i]));
 		ones #(.P(32'd0 + i)) u_ones (.y(oy[i]));
 		fill #(.V(i)) u_fill (.y(fy[i*16 +: 16]));
+		fnsel #(.FN(i)) u_fnsel (.a(addr[3:0]), .y(sely[i*4 +: 4]), .tag(seltag[i*8 +: 8]));
+		outer #(.K(i + 16)) u_outer (.a(addr[7:4]), .y(outy[i*4 +: 4]), .tag(outtag[i*8 +: 8]));
+		fncase #(.FN(i)) u_fncase (.y(casey[i*8 +: 8]));
+		fnsum #(.FN(i + 1)) u_fnsum (.y(sumy[i*8 +: 8]));
 	end
 	node #(.ID(8'd200)) u_node8 (.sel(addr[15:0]), .id(nid[16*16 +: 16]), .hit(nhit[16]),
 		.cid(ncid[16*16 +: 16]), .rid(nrid[16*16 +: 16]));

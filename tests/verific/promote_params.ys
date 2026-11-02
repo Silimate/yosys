@@ -28,14 +28,19 @@ logger -expect log "Keeping parameter V of module neg: its values don't share on
 logger -expect log "Keeping parameter V of module scmp: its values don't share one known width and sign\." 1
 logger -expect log "Keeping parameter P of module ones: its values don't share one known width and sign\." 1
 logger -expect log "Keeping parameter V of module fill: its values don't share one known width and sign\." 1
-logger -expect log "Keeping parameter FN of module shell: it is read in a generate condition\." 1
-logger -expect log "Keeping parameter BASE of module shell: promoting it would leave 16 of the module's 16 copies\." 1
+logger -expect log "Keeping parameter K of module outer: it sets parameter FN of module fnsel, which a generate condition reads\." 1
+logger -expect log "Keeping parameter FN of module fncase: it is read in a generate condition\." 1
+logger -expect log "Keeping parameter FN of module fnsum: it is read in a generate condition\." 1
 logger -expect log "Promoted parameter\(s\) BASE, FN of module bank \(16 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) K of module leaf \(8 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) K of module pair \(2 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) P of module wide \(16 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) IDX of module match \(16 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) BASE of module core \(16 copies\) to input ports\." 1
+logger -expect log "Moved the generate condition\(s\) of module shell that read FN onto parameter\(s\) FN\$cond0\." 1
+logger -expect log "Promoted parameter\(s\) BASE, FN of module shell \(16 copies\) to input ports\." 1
+logger -expect log "Moved the generate condition\(s\) of module fnsel that read FN onto parameter\(s\) FN\$cond0\." 1
+logger -expect log "Promoted parameter\(s\) FN of module fnsel \(32 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) V of module mixed \(17 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) ID of module node \(19 copies\) to input ports\." 1
 logger -expect log "Promoted parameter\(s\) ID of module nleaf \(19 copies\) to input ports\." 1
@@ -49,7 +54,11 @@ select -assert-mod-count 1 wide*
 select -assert-mod-count 1 match*
 select -assert-mod-count 16 rbank*
 select -assert-mod-count 1 mixed*
-select -assert-mod-count 16 shell*
+select -assert-mod-count 2 shell*
+select -assert-mod-count 2 fnsel*
+select -assert-mod-count 16 outer*
+select -assert-mod-count 16 fncase*
+select -assert-mod-count 16 fnsum*
 select -assert-mod-count 1 core*
 select -assert-mod-count 1 node*
 select -assert-mod-count 1 nleaf*
