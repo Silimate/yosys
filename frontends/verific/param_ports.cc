@@ -925,7 +925,9 @@ int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, c
 		int bits = 0;
 		for (auto p : promote.at(m))
 			bits += GetSize(tests(p));
-		return GetSize(left) << std::min(bits, 16);
+		// Never more than the copies there are, which also keeps the caller's doubling in range
+		int64_t n = int64_t(GetSize(left)) << std::min(bits, 32);
+		return int(std::min<int64_t>(n, GetSize(copies[m])));
 	};
 
 	// Copies that disagree on an untyped parameter's width or sign still share one port when every
