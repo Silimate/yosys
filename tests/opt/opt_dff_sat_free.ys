@@ -64,6 +64,31 @@ equiv_induct equiv
 equiv_status -assert
 
 
+# an input folded constant earlier in the pass is not free: bit 0 is committed to its
+# init value 1 first, and bit 1 then loads it, so bit 1 holds 1 too
+design -reset
+read_rtlil <<EOT
+module \test_case
+  wire input 1 \clk
+  wire input 2 \en
+  attribute \init 2'11
+  wire width 2 output 3 \q
+  cell $dffe $q
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \WIDTH 2
+    connect \CLK \clk
+    connect \EN \en
+    connect \D { \q [0] 1'1 }
+    connect \Q \q
+  end
+end
+EOT
+
+opt_dff -sat
+opt_clean -purge
+select -assert-none t:$dffe
+
 # a register file written from an input: a model that loads an entry drops all its bits,
 # not one solver call per bit, which ran out of this budget. Last: -werror stays set
 design -reset
