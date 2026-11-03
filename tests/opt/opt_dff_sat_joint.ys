@@ -1,0 +1,205 @@
+# opt_dff -sat proves flops that hold each other constant: neither is inductive alone
+
+# a and b only rise together, so both stay 0
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire x,
+	input wire y,
+	output reg a,
+	output reg b
+);
+	always @(posedge clk)
+		if (rst) begin
+			a <= 1'b0;
+			b <= 1'b0;
+		end else begin
+			a <= b & x;
+			b <= a & y;
+		end
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+design -save gold
+
+opt_dff
+opt_clean -purge
+select -assert-count 2 t:$sdff
+
+design -load gold
+opt_dff -sat
+opt_clean -purge
+select -assert-none t:$sdff
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert
+
+
+# a ring from init values, beside a flop that toggles: the ring folds, t stays
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire en,
+	output reg [2:0] c,
+	output reg t
+);
+	initial c = 3'b000;
+	initial t = 1'b0;
+	always @(posedge clk) begin
+		c <= {c[1], c[0], c[2] & en};
+		t <= ~t;
+	end
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+design -save gold
+
+opt_dff -sat
+opt_clean -purge
+select -assert-count 1 t:$dff
+select -assert-count 1 t:$dff r:WIDTH=1 %i
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert
+
+
+# b can rise from y, so a, which only holds while b does, is not constant either
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire x,
+	input wire y,
+	output reg a,
+	output reg b
+);
+	always @(posedge clk)
+		if (rst) begin
+			a <= 1'b0;
+			b <= 1'b0;
+		end else begin
+			a <= b & x;
+			b <= a | y;
+		end
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+opt_dff -sat
+opt_clean -purge
+select -assert-count 2 t:$sdff
+
+
+# one flop per solver batch: the hypothesis spans batches, so the pair still folds
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire x,
+	input wire y,
+	output reg a,
+	output reg b
+);
+	always @(posedge clk)
+		if (rst) a <= 1'b0; else a <= b & x;
+	always @(posedge clk)
+		if (rst) b <= 1'b0; else b <= a & y;
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+scratchpad -set opt_dff.sat_batch_cells 1
+opt_dff -sat
+opt_clean -purge
+select -assert-none t:$sdff
+
+
+# one flop per batch: whichever of a1 and a2 comes first is held while its b
+# still stands, and the b's later drop must undo that. Mirrored, so the order
+# the flops are visited in doesn't matter
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire x1, y1, x2, y2,
+	output reg a1, b1, b2, a2
+);
+	always @(posedge clk)
+		if (rst) a1 <= 1'b0; else a1 <= b1 & x1;
+	always @(posedge clk)
+		if (rst) b1 <= 1'b0; else b1 <= a1 | y1;
+	always @(posedge clk)
+		if (rst) b2 <= 1'b0; else b2 <= a2 | y2;
+	always @(posedge clk)
+		if (rst) a2 <= 1'b0; else a2 <= b2 & x2;
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+scratchpad -set opt_dff.sat_batch_cells 1
+opt_dff -sat
+opt_clean -purge
+select -assert-count 4 t:$sdff
+
+
+# the same, with the budget running out after the first a is held: each b's cone
+# is 64 gates, whose import (100 steps a cell) takes the joint passes past their
+# half of the budget. What they held must not be committed
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire x1, y1, x2, y2,
+	input wire [63:0] w1, w2,
+	output reg a1, b1, b2, a2
+);
+	wire [64:0] c1, c2;
+	assign c1[0] = y1;
+	assign c2[0] = y2;
+	genvar i;
+	for (i = 0; i < 64; i = i + 1) begin
+		assign c1[i+1] = c1[i] ^ w1[i];
+		assign c2[i+1] = c2[i] ^ w2[i];
+	end
+	always @(posedge clk)
+		if (rst) a1 <= 1'b0; else a1 <= b1 & x1;
+	always @(posedge clk)
+		if (rst) b1 <= 1'b0; else b1 <= a1 | c1[64];
+	always @(posedge clk)
+		if (rst) b2 <= 1'b0; else b2 <= a2 | c2[64];
+	always @(posedge clk)
+		if (rst) a2 <= 1'b0; else a2 <= b2 & x2;
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+scratchpad -set opt_dff.sat_batch_cells 1
+scratchpad -set opt_dff.sat_effort 10000
+logger -expect warning "solver effort budget for module test_case is exhausted" 1
+opt_dff -sat
+logger -check-expected
+opt_clean -purge
+select -assert-count 4 t:$sdff

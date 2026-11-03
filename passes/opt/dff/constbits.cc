@@ -30,9 +30,10 @@ struct ConstBitsContext
 
 	// opt_dff -sat rebuilds the solver in batches of at most this many imported
 	// cells, so one pathological module can't grow a single giant solver
-	static constexpr int sat_batch_cells = 10000;
+	int sat_batch_cells;
 
-	ConstBitsContext(OptDffWorker &worker) : worker(worker) { }
+	ConstBitsContext(OptDffWorker &worker) : worker(worker),
+		sat_batch_cells(worker.module->design->scratchpad_get_int("opt_dff.sat_batch_cells", 10000)) { }
 
 	// lattice join of candidate constants: Sx is the identity (unless -keepdc
 	// pins it), equal values join, Sm marks a conflict
@@ -83,7 +84,9 @@ struct ConstBitsContext
 	// one suspected-constant ff bit: q (output of cell at bit idx) looks stuck
 	// at val, and sat must show that every target feeds val back into the bit
 	struct ConstObligation {
-		enum Status { Pending, Proven, Dropped };
+		// Held: proven assuming every candidate still standing holds too, which
+		// a later batch's drop can undo
+		enum Status { Pending, Proven, Held, Dropped };
 
 		Cell *cell;
 		int idx;
@@ -94,6 +97,7 @@ struct ConstBitsContext
 
 		int q_lit = -1;              // valid within the current batch
 		int differ_lit = -1;         // some target differs from the candidate value
+		int act_lit = -1;            // differ_lit counts in a joint sweep's query while set
 	};
 
 	// the solver model captures (differ, q) of every pending obligation so one
@@ -109,13 +113,18 @@ struct ConstBitsContext
 			obs.push_back(&ob);
 		}
 
-		// drop every obligation whose q holds its constant while some target differs
-		void drop_disproven(const std::vector<bool> &model) const {
+		// drop every obligation whose q holds its constant while some target
+		// differs, and return the ones not dropped before
+		std::vector<ConstObligation *> drop_disproven(const std::vector<bool> &model) const {
+			std::vector<ConstObligation *> dropped;
 			for (int k = 0; k < GetSize(obs); k++) {
 				bool want = (obs[k]->val == State::S1);
-				if (model[2*k + 1] == want && model[2*k])
+				if (model[2*k + 1] == want && model[2*k] && obs[k]->status != ConstObligation::Dropped) {
 					obs[k]->status = ConstObligation::Dropped;
+					dropped.push_back(obs[k]);
+				}
 			}
+			return dropped;
 		}
 	};
 
@@ -326,15 +335,97 @@ struct ConstBitsContext
 		}
 	}
 
-	// sat: prove or drop the pending obligations in place
+	// one literal for every candidate still standing holding its value. As one
+	// assumption per candidate, each would be its own MiniSat decision level
+	int joint_hypo(QuickConeSat &qcsat, std::vector<ConstObligation> &obligations)
+	{
+		std::vector<int> holds;
+		for (auto &ob : obligations)
+			if (ob.status != ConstObligation::Dropped)
+				holds.push_back(qcsat.ez->IFF(qcsat.importSigBit(ob.q), qcsat.ez->value(ob.val == State::S1)));
+		return qcsat.ez->expression(ezSAT::OpAnd, holds);
+	}
+
+	// assume every candidate still standing holds and ask whether any pending one in
+	// the batch can move. One query covers the batch (one per candidate would repeat
+	// per dependency level): each model drops what it moves, and unsat holds the
+	// rest. A drop only retires its activation literal, and the stale hypothesis is
+	// rebuilt to confirm an unsat. Returns false once the budget is down to reserve
+	bool sweep_joint_batch(QuickConeSat &qcsat, std::vector<ConstObligation> &obligations,
+			int batch_begin, int batch_end, int64_t reserve)
+	{
+		ConstWatchList watches;
+		std::vector<int> moves;
+		for (int obi = batch_begin; obi < batch_end; obi++) {
+			auto &ob = obligations[obi];
+			if (ob.status != ConstObligation::Pending)
+				continue;
+			ob.act_lit = qcsat.ez->literal();
+			qcsat.ez->freeze(ob.act_lit);
+			watches.watch(ob);
+			moves.push_back(qcsat.ez->AND(ob.act_lit, ob.differ_lit));
+		}
+		if (moves.empty())
+			return true;
+
+		int any = qcsat.ez->expression(ezSAT::OpOr, moves);
+		int hypo = joint_hypo(qcsat, obligations);
+		bool stale = false;
+		while (true) {
+			int64_t cap = 0;
+			if (worker.sat_budget.enabled() && (cap = worker.sat_budget.remaining - reserve) <= 0)
+				return false;
+			std::vector<bool> model;
+			auto res = worker.sat_budget.solve(qcsat, cap, watches.exprs, model, {hypo, any});
+			if (res == SatEffortBudget::Result::LimitReached)
+				return false;
+			if (res == SatEffortBudget::Result::Unsat && stale) {
+				hypo = joint_hypo(qcsat, obligations);
+				stale = false;
+			} else if (res == SatEffortBudget::Result::Unsat) {
+				for (int obi = batch_begin; obi < batch_end; obi++)
+					if (obligations[obi].status == ConstObligation::Pending)
+						obligations[obi].status = ConstObligation::Held;
+				return true;
+			} else {
+				for (auto ob : watches.drop_disproven(model))
+					qcsat.ez->assume(qcsat.ez->NOT(ob->act_lit));
+				stale = true;
+			}
+		}
+	}
+
+	// prove or drop the pending obligations batch by batch, stopping early on an
+	// exhausted budget; returns the number of batches. A joint sweep down to
+	// reserve clears joint, and that batch goes on per bit in the same solver, so
+	// its imports are paid once, as do the batches after it
+	int sweep_batches(std::vector<ConstObligation> &obligations, int64_t screen_cap, int64_t reserve, bool &joint)
+	{
+		ModWalker &modwalker = worker.get_modwalker();
+		int batches = 0;
+		for (int batch_begin = 0; batch_begin < GetSize(obligations) && !worker.warn_if_budget_spent(); batches++) {
+			QuickConeSat qcsat(modwalker);
+			int batch_end = build_const_batch(qcsat, obligations, batch_begin);
+			if (joint && !sweep_joint_batch(qcsat, obligations, batch_begin, batch_end, reserve))
+				joint = false;
+			if (!joint)
+				sweep_const_batch(qcsat, obligations, batch_begin, batch_end, screen_cap);
+			batch_begin = batch_end;
+		}
+		return batches;
+	}
+
+	// sat: prove or drop the pending obligations in place. Joint passes assume every
+	// candidate still standing, like eqbits' classes, which also proves flops that
+	// hold each other constant. Their proofs stand only once a pass completes, so they
+	// get half the budget; if they run out, the per-bit pass, whose proofs stand
+	// alone, takes the rest. Joint counterexamples hold per bit too, so drops stay
 	void solve_const_obligations(std::vector<ConstObligation> &obligations)
 	{
 		log_assert(worker.opt.sat);
 		int64_t num_queries = GetSize(obligations);
 		if (num_queries == 0)
 			return;
-
-		ModWalker &modwalker = worker.get_modwalker();
 
 		// screening cap
 		int64_t screen_cap = 0;
@@ -343,14 +434,30 @@ struct ConstBitsContext
 			screen_cap = max((int64_t)20000, min((int64_t)200000, worker.sat_budget.total / (4 * num_queries)));
 		}
 
-		// NOTE: each obligation is proven independently, so processing obligations in
-		// batches and stopping early on an exhausted budget should be safe
-		for (int batch_begin = 0; batch_begin < GetSize(obligations) && !worker.warn_if_budget_spent(); ) {
-			QuickConeSat qcsat(modwalker);
-			int batch_end = build_const_batch(qcsat, obligations, batch_begin);
-			sweep_const_batch(qcsat, obligations, batch_begin, batch_end, screen_cap);
-			batch_begin = batch_end;
+		auto standing = [&]() {
+			int n = 0;
+			for (auto &ob : obligations)
+				n += ob.status != ConstObligation::Dropped;
+			return n;
+		};
+		int64_t reserve = worker.sat_budget.remaining / 2;
+		bool joint = true;
+		for (bool again = true; again; ) {
+			int before = standing();
+			int batches = sweep_batches(obligations, screen_cap, reserve, joint);
+			// a pending candidate's batch ran out of budget before its sweep, and a
+			// later batch's drop weakens the hypothesis an earlier batch held under
+			for (auto &ob : obligations)
+				joint = joint && ob.status != ConstObligation::Pending;
+			again = joint && batches > 1 && standing() < before;
+			for (auto &ob : obligations)
+				if (ob.status == ConstObligation::Held)
+					ob.status = joint && !again ? ConstObligation::Proven : ConstObligation::Pending;
 		}
+
+		// what an unfinished joint pass held goes per bit too
+		if (!joint)
+			sweep_batches(obligations, screen_cap, 0, joint);
 	}
 
 	bool run_constbits()
