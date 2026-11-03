@@ -33,9 +33,12 @@ struct BitSim {
 	uint64_t rng_state;
 	int max_depth;
 	int evals_left;
+	// evaluate word-level logic too; random values split classes of distinct signals
+	// better, but miss that differently built enables agree
+	bool word_cells;
 
-	BitSim(Module *m, SigMap &sm, ModWalker &mw)
-		: module(m), sigmap(sm), modwalker(mw), rng_state(1337)
+	BitSim(Module *m, SigMap &sm, ModWalker &mw, bool word_cells = false)
+		: module(m), sigmap(sm), modwalker(mw), rng_state(1337), word_cells(word_cells)
 	{
 		max_depth = module->design->scratchpad_get_int("opt_dff.sim_depth", 10000);
 		evals_left = module->design->scratchpad_get_int("opt_dff.sim_evals", 1000000);
@@ -96,6 +99,14 @@ struct BitSim {
 				uint64_t a = eval_bit(cell->getPort(ID::A)[driver.offset], depth+1);
 				uint64_t b = eval_bit(cell->getPort(ID::B)[driver.offset], depth+1);
 				res = (a & ~s) | (b & s);
+			} else if (word_cells && cell->type.in(ID($not), ID($and), ID($or), ID($xor), ID($xnor))) {
+				uint64_t a = eval_input(cell, ID::A, driver.offset, depth);
+				uint64_t b = cell->type == ID($not) ? 0 : eval_input(cell, ID::B, driver.offset, depth);
+				res = cell->type == ID($not) ? ~a : cell->type == ID($and) ? a & b : cell->type == ID($or) ? a | b :
+						cell->type == ID($xor) ? a ^ b : ~(a ^ b);
+			} else if (word_cells && cell->type.in(ID($reduce_and), ID($reduce_or), ID($reduce_bool), ID($reduce_xor),
+					ID($reduce_xnor), ID($logic_not), ID($logic_and), ID($logic_or), ID($eq), ID($ne))) {
+				res = driver.offset ? 0 : eval_flag(cell, depth);  // higher Y bits are zero
 			} else {
 				res = next_rand();
 			}
@@ -103,6 +114,50 @@ struct BitSim {
 
 		sim_vals[mapped] = res;
 		return res;
+	}
+
+	// bit i of a word-level cell's input, sign- or zero-extended past its width
+	uint64_t eval_input(Cell *cell, IdString port, int i, int depth) {
+		const SigSpec &sig = cell->getPort(port);
+		if (i < GetSize(sig))
+			return eval_bit(sig[i], depth+1);
+		bool is_signed = cell->getParam(port == ID::A ? ID::A_SIGNED : ID::B_SIGNED).as_bool();
+		return is_signed && !sig.empty() ? eval_bit(sig.msb(), depth+1) : 0;
+	}
+
+	// the 1-bit result of a reduction, logic or equality cell
+	uint64_t eval_flag(Cell *cell, int depth) {
+		auto any = [&](IdString port) {
+			uint64_t r = 0;
+			for (auto bit : cell->getPort(port))
+				r |= eval_bit(bit, depth+1);
+			return r;
+		};
+		IdString type = cell->type;
+		if (type.in(ID($eq), ID($ne))) {
+			uint64_t diff = 0;
+			int width = std::max(GetSize(cell->getPort(ID::A)), GetSize(cell->getPort(ID::B)));
+			for (int i = 0; i < width; i++)
+				diff |= eval_input(cell, ID::A, i, depth) ^ eval_input(cell, ID::B, i, depth);
+			return type == ID($eq) ? ~diff : diff;
+		}
+		if (type.in(ID($reduce_xor), ID($reduce_xnor))) {
+			uint64_t r = 0;
+			for (auto bit : cell->getPort(ID::A))
+				r ^= eval_bit(bit, depth+1);
+			return type == ID($reduce_xor) ? r : ~r;
+		}
+		if (type == ID($reduce_and)) {
+			uint64_t r = ~0ULL;
+			for (auto bit : cell->getPort(ID::A))
+				r &= eval_bit(bit, depth+1);
+			return r;
+		}
+		if (type.in(ID($reduce_or), ID($reduce_bool)))
+			return any(ID::A);
+		if (type == ID($logic_not))
+			return ~any(ID::A);
+		return type == ID($logic_and) ? any(ID::A) & any(ID::B) : any(ID::A) | any(ID::B);
 	}
 };
 
@@ -115,7 +170,14 @@ struct EqBitsContext
 {
 	OptDffWorker &worker;
 
-	EqBitsContext(OptDffWorker &worker) : worker(worker) { }
+	// The first pass, mixes off, only classes flops whose enable and sync reset are mapped
+	// alike, and compares their D. The second takes classes that mix mappings, which need
+	// the whole next state, and keeps the small ones: random simulation rarely fires the
+	// decoded enables of a register bank, so it can't split a big one, and SAT pays
+	bool mixes;
+	static constexpr int max_mixed_class = 32;
+
+	EqBitsContext(OptDffWorker &worker, bool mixes) : worker(worker), mixes(mixes) { }
 
 	struct EqBit {
 		Cell *cell;
@@ -130,29 +192,25 @@ struct EqBitsContext
 			InitOne     = 1u << 0,
 			InitX       = 1u << 1,
 			PolClk      = 1u << 2,
-			PolCe       = 1u << 3,
-			PolSrst     = 1u << 4,
-			PolArst     = 1u << 5,
-			PolAload    = 1u << 6,
-			PolClr      = 1u << 7,
-			PolSet      = 1u << 8,
-			CeOverSrst  = 1u << 9,
+			PolArst     = 1u << 3,
+			PolAload    = 1u << 4,
+			PolClr      = 1u << 5,
+			PolSet      = 1u << 6,
 		};
 
-		SigBit clk, ce, srst, arst, aload, clr, set;
+		// the enable and sync reset are keyed apart (CtrlKey), which the mixing pass leaves out
+		SigBit clk, arst, aload, clr, set;
 		IdString cell_type;  // for SR
 		uint16_t flags;
 
 		bool operator==(const SigKey &o) const {
-			return flags == o.flags && clk == o.clk && ce == o.ce && srst == o.srst && arst == o.arst
+			return flags == o.flags && clk == o.clk && arst == o.arst
 				&& aload == o.aload && clr == o.clr && set == o.set && cell_type == o.cell_type;
 		}
 
 		Hasher hash_into(Hasher h) const {
 			h.eat(flags);
 			h.eat(clk);
-			h.eat(ce);
-			h.eat(srst);
 			h.eat(arst);
 			h.eat(aload);
 			h.eat(clr);
@@ -162,8 +220,12 @@ struct EqBitsContext
 		}
 	};
 
+	// how a bit's enable and sync reset are mapped, which the class key leaves out
+	using CtrlKey = std::tuple<SigBit, SigBit, int>;
+
 	struct EqCandidates {
 		std::vector<EqBit> bits;
+		std::vector<CtrlKey> ctrls;
 		dict<Cell *, FfData> ffs;
 		std::vector<std::vector<int>> classes;
 	};
@@ -207,15 +269,6 @@ struct EqBitsContext
 					k.clk = ff.sig_clk;
 					if (ff.pol_clk) k.flags |= SigKey::PolClk;
 				}
-				if (ff.has_ce) {
-					k.ce = ff.sig_ce;
-					if (ff.pol_ce) k.flags |= SigKey::PolCe;
-				}
-				if (ff.has_srst) {
-					k.srst = ff.sig_srst;
-					if (ff.pol_srst) k.flags |= SigKey::PolSrst;
-					if (ff.ce_over_srst) k.flags |= SigKey::CeOverSrst;
-				}
 				if (ff.has_arst) {
 					k.arst = ff.sig_arst;
 					if (ff.pol_arst) k.flags |= SigKey::PolArst;
@@ -233,16 +286,20 @@ struct EqBitsContext
 				}
 
 				cand.bits.push_back({cell, i, ff.sig_q[i]});
+				// polarities are only set for controls the flop has
+				bool ce = ff.has_ce, srst = ff.has_srst;
+				cand.ctrls.push_back({ce ? SigBit(ff.sig_ce) : SigBit(), srst ? SigBit(ff.sig_srst) : SigBit(),
+						ce + 2 * (ce && ff.pol_ce) + 4 * srst + 8 * (srst && ff.pol_srst) + 16 * (ce && srst && ff.ce_over_srst)});
 				keys.push_back(k);
 			}
 		}
 
-		dict<SigKey, std::vector<int>> buckets;
+		dict<std::pair<SigKey, CtrlKey>, std::vector<int>> buckets;
 		for (int i = 0; i < GetSize(cand.bits); i++)
-			buckets[keys[i]].push_back(i);
+			buckets[{keys[i], mixes ? CtrlKey() : cand.ctrls[i]}].push_back(i);
 
 		for (auto &kv : buckets)
-			if (GetSize(kv.second) >= 2)
+			if (GetSize(kv.second) >= 2 && (!mixes || (GetSize(kv.second) <= max_mixed_class && mixed(cand, kv.second))))
 				cand.classes.push_back(std::move(kv.second));
 
 		return cand;
@@ -250,7 +307,8 @@ struct EqBitsContext
 
 	void filter_classes_sim(EqCandidates &cand)
 	{
-		BitSim sim(worker.module, worker.sigmap, worker.get_modwalker());
+		// mixed classes need their enables evaluated, which takes word-level logic
+		BitSim sim(worker.module, worker.sigmap, worker.get_modwalker(), mixes);
 
 		// Assume same class
 		for (auto &cls : cand.classes) {
@@ -267,6 +325,25 @@ struct EqBitsContext
 				const EqBit &eb = cand.bits[idx];
 				const FfData &ff = cand.ffs.at(eb.cell);
 				uint64_t n_val = sim.eval_bit(ff.sig_d[eb.idx]);
+
+				// flops mapped alike compare D, which splits more; mixed ones need the enable
+				// and sync reset by priority (a $sdffce resets only while enabled)
+				auto sync_reset = [&](uint64_t n) {
+					uint64_t srst = sim.eval_bit(ff.sig_srst);
+					if (!ff.pol_srst) srst = ~srst;
+					uint64_t srst_val = (ff.val_srst[eb.idx] == State::S1) ? ~0ULL : 0ULL;
+					return (n & ~srst) | (srst_val & srst);
+				};
+				bool srst_in_ce = mixes && ff.has_srst && ff.has_ce && ff.ce_over_srst;
+				if (srst_in_ce)
+					n_val = sync_reset(n_val);
+				if (mixes && ff.has_ce) {
+					uint64_t ce = sim.eval_bit(ff.sig_ce);
+					if (!ff.pol_ce) ce = ~ce;
+					n_val = (n_val & ce) | (sim.eval_bit(eb.q) & ~ce);
+				}
+				if (ff.has_srst && !srst_in_ce)
+					n_val = sync_reset(n_val);
 
 				if (ff.has_aload) {
 					uint64_t al = sim.eval_bit(ff.sig_aload);
@@ -287,12 +364,6 @@ struct EqBitsContext
 					if (!ff.pol_set) set = ~set;
 					n_val = ~clr & (set | n_val);
 				}
-				if (ff.has_srst) {
-					uint64_t srst = sim.eval_bit(ff.sig_srst);
-					if (!ff.pol_srst) srst = ~srst;
-					uint64_t srst_val = (ff.val_srst[eb.idx] == State::S1) ? ~0ULL : 0ULL;
-					n_val = (n_val & ~srst) | (srst_val & srst);
-				}
 
 				sim_buckets[n_val].push_back(idx);
 			}
@@ -303,6 +374,15 @@ struct EqBitsContext
 		}
 
 		cand.classes = std::move(refined_classes);
+	}
+
+	// whether a class holds flops mapped with different enables or sync resets
+	static bool mixed(const EqCandidates &cand, const std::vector<int> &cls)
+	{
+		for (int idx : cls)
+			if (cand.ctrls[idx] != cand.ctrls[cls[0]])
+				return true;
+		return false;
 	}
 
 	void drop_all_classes(EqCandidates &cand)
@@ -319,6 +399,11 @@ struct EqBitsContext
 		QuickConeSat qcsat(worker.get_modwalker());
 		std::vector<int> q_lit(bits.size(), -1);
 		std::vector<int> n_lit(bits.size(), -1);
+		// Mixing, n_lit is the whole next state, so it has the bit's own Q in it. s_lit has
+		// one shared literal for every bit's Q instead: two bits whose ones match agree
+		// whenever their Qs do, so the pair needs no query
+		std::vector<int> s_lit(bits.size(), -1);
+		int hold = mixes ? qcsat.ez->literal() : 0;
 
 		// Build the next-state function n_lit[idx] of every candidate bit by
 		// folding the FF's control logic on top of the D input (-> next value)
@@ -333,32 +418,48 @@ struct EqBitsContext
 				const EqBit &eb = bits[idx];
 				const FfData &ff = cand.ffs.at(eb.cell);
 				q_lit[idx] = qcsat.importSigBit(eb.q);
-				int n = qcsat.importSigBit(ff.sig_d[eb.idx]);
 
-				if (ff.has_aload) {
-					int al = qcsat.importSigBit(ff.sig_aload);
-					if (!ff.pol_aload) al = qcsat.ez->NOT(al);
-					n = qcsat.ez->ITE(al, qcsat.importSigBit(ff.sig_ad[eb.idx]), n);
-				}
-				if (ff.has_arst) {
-					int ar = qcsat.importSigBit(ff.sig_arst);
-					if (!ff.pol_arst) ar = qcsat.ez->NOT(ar);
-					n = qcsat.ez->ITE(ar, qcsat.ez->value(ff.val_arst[eb.idx] == State::S1), n);
-				}
-				if (ff.has_sr) {
-					int clr = qcsat.importSigBit(ff.sig_clr[eb.idx]);
-					if (!ff.pol_clr) clr = qcsat.ez->NOT(clr);
-					int set = qcsat.importSigBit(ff.sig_set[eb.idx]);
-					if (!ff.pol_set) set = qcsat.ez->NOT(set);
-					n = qcsat.ez->AND(qcsat.ez->NOT(clr), qcsat.ez->OR(set, n));
-				}
-				if (ff.has_srst) {
-					int srst = qcsat.importSigBit(ff.sig_srst);
-					if (!ff.pol_srst) srst = qcsat.ez->NOT(srst);
-					n = qcsat.ez->ITE(srst, qcsat.ez->value(ff.val_srst[eb.idx] == State::S1), n);
-				}
+				auto next_state = [&](int q) {
+					int n = qcsat.importSigBit(ff.sig_d[eb.idx]);
 
-				n_lit[idx] = n;
+					// the enable and sync reset by priority: a $sdffce resets only while enabled
+					auto sync_reset = [&](int n) {
+						int srst = qcsat.importSigBit(ff.sig_srst);
+						if (!ff.pol_srst) srst = qcsat.ez->NOT(srst);
+						return qcsat.ez->ITE(srst, qcsat.ez->value(ff.val_srst[eb.idx] == State::S1), n);
+					};
+					bool srst_in_ce = mixes && ff.has_srst && ff.has_ce && ff.ce_over_srst;
+					if (srst_in_ce)
+						n = sync_reset(n);
+					if (mixes && ff.has_ce) {
+						int ce = qcsat.importSigBit(ff.sig_ce);
+						if (!ff.pol_ce) ce = qcsat.ez->NOT(ce);
+						n = qcsat.ez->ITE(ce, n, q);
+					}
+					if (ff.has_srst && !srst_in_ce)
+						n = sync_reset(n);
+
+					if (ff.has_aload) {
+						int al = qcsat.importSigBit(ff.sig_aload);
+						if (!ff.pol_aload) al = qcsat.ez->NOT(al);
+						n = qcsat.ez->ITE(al, qcsat.importSigBit(ff.sig_ad[eb.idx]), n);
+					}
+					if (ff.has_arst) {
+						int ar = qcsat.importSigBit(ff.sig_arst);
+						if (!ff.pol_arst) ar = qcsat.ez->NOT(ar);
+						n = qcsat.ez->ITE(ar, qcsat.ez->value(ff.val_arst[eb.idx] == State::S1), n);
+					}
+					if (ff.has_sr) {
+						int clr = qcsat.importSigBit(ff.sig_clr[eb.idx]);
+						if (!ff.pol_clr) clr = qcsat.ez->NOT(clr);
+						int set = qcsat.importSigBit(ff.sig_set[eb.idx]);
+						if (!ff.pol_set) set = qcsat.ez->NOT(set);
+						n = qcsat.ez->AND(qcsat.ez->NOT(clr), qcsat.ez->OR(set, n));
+					}
+					return n;
+				};
+				n_lit[idx] = next_state(q_lit[idx]);
+				s_lit[idx] = mixes ? next_state(hold) : n_lit[idx];
 			}
 			qcsat.prepare();
 			cells_charged = worker.sat_budget.charge_import(qcsat, cells_charged);
@@ -407,7 +508,7 @@ struct EqBitsContext
 			// class at once
 			int rep = cls[0];
 			for (int i = 1; i < GetSize(cls); i++) {
-				if (n_lit[rep] == n_lit[cls[i]])
+				if (s_lit[rep] == s_lit[cls[i]])
 					continue;
 
 				if (worker.warn_if_budget_spent())
@@ -515,7 +616,11 @@ YOSYS_NAMESPACE_BEGIN
 
 bool OptDffWorker::run_eqbits()
 {
-	return EqBitsContext(*this).run_eqbits();
+	bool changed = EqBitsContext(*this, false).run_eqbits();
+	if (changed)
+		refresh_after_edits();
+	bool mixed = EqBitsContext(*this, true).run_eqbits();
+	return changed || mixed;
 }
 
 YOSYS_NAMESPACE_END

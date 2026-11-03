@@ -1,0 +1,183 @@
+# opt_dff -sat merges equivalent flops whatever their enable and sync reset look like
+
+# b holds through a, never itself, so it keeps a different enable from a's, but under a == b
+# both load d when e is on and hold otherwise. c is the same through word-level and/or. u
+# loads the same way but powers up at 1, so it stays apart
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire e,
+	input wire x,
+	input wire d,
+	output reg a,
+	output reg b,
+	output reg c,
+	output reg u
+);
+	initial a = 1'b0;
+	initial b = 1'b0;
+	initial c = 1'b0;
+	initial u = 1'b1;
+	always @(posedge clk) begin
+		if (e) a <= d;
+		b <= e ? d : (x ? a : b);
+		c <= e ? d : (a & ~x | c & x);
+		u <= e ? d : (x ? a : u);
+	end
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+design -save gold
+
+opt_dff
+opt_clean -purge
+select -assert-count 4 t:$dffe t:$dff %u
+
+design -load gold
+opt_dff -sat
+opt_clean -purge
+select -assert-count 2 t:$dffe t:$dff %u
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert
+
+# and from the power-up values, which induction alone doesn't check
+design -load gold
+design -copy-from gate -as gate test_case
+miter -equiv -flatten -make_assert test_case gate miter
+hierarchy -top miter
+sat -verify -prove-asserts -seq 8 miter
+
+
+# the same next state mapped as $sdffe, $sdff with the enable as a mux, and $dff with both as
+# muxes merges. s1 resets only while enabled ($sdffce) and s2 resets to 1, so both stay
+design -reset
+read_rtlil <<EOT
+module \test_case
+  wire input 1 \clk
+  wire input 2 \e
+  wire input 3 \r
+  wire input 4 \d
+  attribute \init 1'0
+  wire output 5 \m1
+  attribute \init 1'0
+  wire output 6 \m2
+  attribute \init 1'0
+  wire output 7 \m3
+  attribute \init 1'0
+  wire output 8 \s1
+  attribute \init 1'0
+  wire output 9 \s2
+  wire \h2
+  wire \h3
+  wire \d3
+  wire \h4
+  cell $mux $h2
+    parameter \WIDTH 1
+    connect \A \m2
+    connect \B \d
+    connect \S \e
+    connect \Y \h2
+  end
+  cell $mux $h3
+    parameter \WIDTH 1
+    connect \A \m3
+    connect \B \d
+    connect \S \e
+    connect \Y \h3
+  end
+  cell $mux $d3
+    parameter \WIDTH 1
+    connect \A \h3
+    connect \B 1'0
+    connect \S \r
+    connect \Y \d3
+  end
+  cell $mux $h4
+    parameter \WIDTH 1
+    connect \A \s2
+    connect \B \d
+    connect \S \e
+    connect \Y \h4
+  end
+  cell $sdffe $m1
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \e
+    connect \SRST \r
+    connect \D \d
+    connect \Q \m1
+  end
+  cell $sdff $m2
+    parameter \CLK_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \SRST \r
+    connect \D \h2
+    connect \Q \m2
+  end
+  cell $dff $m3
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \d3
+    connect \Q \m3
+  end
+  cell $sdffce $s1
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \e
+    connect \SRST \r
+    connect \D \d
+    connect \Q \s1
+  end
+  cell $sdff $s2
+    parameter \CLK_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \SRST \r
+    connect \D \h4
+    connect \Q \s2
+  end
+end
+EOT
+
+design -save gold
+
+opt_dff -sat -nodffe -nosdff
+opt_clean -purge
+select -assert-count 3 t:$sdffe t:$sdffce t:$sdff t:$dff %u %u %u
+select -assert-count 1 c:$s1
+select -assert-count 1 c:$s2
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert
+
+design -load gold
+design -copy-from gate -as gate test_case
+miter -equiv -flatten -make_assert test_case gate miter
+hierarchy -top miter
+sat -verify -prove-asserts -seq 8 miter
