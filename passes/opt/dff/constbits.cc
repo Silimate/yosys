@@ -482,6 +482,43 @@ struct ConstBitsContext
 			sweep_batches(obligations, screen_cap, 0, joint);
 	}
 
+	// a bit with no power-up value that left its reset value may hold the other
+	// one, if undefined power-up values may take a value no reset gives them.
+	// Both can't share a hypothesis, so a second round, assuming the bits proven
+	// so far, retries what was dropped with those flipped; returns what it retried
+	std::vector<ConstObligation> retry_flipped(const std::vector<ConstObligation> &obligations)
+	{
+		std::vector<ConstObligation> retried;
+		bool flipped = false;
+		dict<Cell *, FfData> ffs;
+		for (auto &ob : obligations) {
+			if (ob.status != ConstObligation::Dropped)
+				continue;
+			auto it = ffs.find(ob.cell);
+			if (it == ffs.end())
+				it = ffs.emplace(ob.cell, FfData(&worker.initvals, ob.cell)).first;
+			ConstCandidate cand = fold_const_inputs(it->second, ob.idx, true);
+			ConstObligation other;
+			if (cand.val != State::Sm && make_obligation(ob.cell, it->second, ob.idx, cand, other)) {
+				retried.push_back(std::move(other));
+				flipped = true;
+			} else {
+				retried.push_back(ob);
+				retried.back().status = ConstObligation::Pending;
+			}
+		}
+		if (!flipped)
+			return {};
+
+		int n = GetSize(retried);
+		for (auto &ob : obligations)
+			if (ob.status == ConstObligation::Proven)
+				retried.push_back(ob);
+		solve_const_obligations(retried);
+		retried.resize(n);
+		return retried;
+	}
+
 	bool run_constbits()
 	{
 		dict<Cell *, pool<int>> const_bits;
@@ -490,42 +527,13 @@ struct ConstBitsContext
 
 		if (worker.opt.sat) {
 			solve_const_obligations(obligations);
-
-			// a bit with no power-up value that left its reset value may hold the
-			// other one, if undefined power-up values may take a value no reset
-			// gives them. Both can't share a hypothesis, so a second round, assuming
-			// the bits proven so far, retries what was dropped with those flipped
-			bool any_init = worker.module->design->scratchpad_get_bool("opt_dff.undef_init_any");
-			std::vector<ConstObligation> others;
-			for (auto &ob : obligations)
-				if (ob.status == ConstObligation::Proven)
-					others.push_back(ob);
-			int facts = GetSize(others);
-			bool flipped = false;
-			dict<Cell *, FfData> ffs;
-			for (auto &ob : obligations) {
-				if (!any_init || ob.status != ConstObligation::Dropped)
-					continue;
-				FfData &ff = ffs.emplace(ob.cell, FfData(&worker.initvals, ob.cell)).first->second;
-				ConstCandidate cand = fold_const_inputs(ff, ob.idx, true);
-				ConstObligation other;
-				if (cand.val != State::Sm && make_obligation(ob.cell, ff, ob.idx, cand, other)) {
-					others.push_back(std::move(other));
-					flipped = true;
-				} else {
-					others.push_back(ob);
-					others.back().status = ConstObligation::Pending;
-				}
+			if (worker.module->design->scratchpad_get_bool("opt_dff.undef_init_any")) {
+				std::vector<ConstObligation> retried = retry_flipped(obligations);
+				obligations.insert(obligations.end(), retried.begin(), retried.end());
 			}
-			if (flipped)
-				solve_const_obligations(others);
-
 			for (auto &ob : obligations)
 				if (ob.status == ConstObligation::Proven)
 					commit_const(const_bits, ob.cell, ob.idx, ob.q, ob.val);
-			for (int k = facts; k < GetSize(others); k++)
-				if (others[k].status == ConstObligation::Proven)
-					commit_const(const_bits, others[k].cell, others[k].idx, others[k].q, others[k].val);
 		}
 
 		for (auto &[cell, drop] : const_bits)
