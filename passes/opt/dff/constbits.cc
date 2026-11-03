@@ -30,9 +30,10 @@ struct ConstBitsContext
 
 	// opt_dff -sat rebuilds the solver in batches of at most this many imported
 	// cells, so one pathological module can't grow a single giant solver
-	static constexpr int sat_batch_cells = 10000;
+	int sat_batch_cells;
 
-	ConstBitsContext(OptDffWorker &worker) : worker(worker) { }
+	ConstBitsContext(OptDffWorker &worker) : worker(worker),
+		sat_batch_cells(worker.module->design->scratchpad_get_int("opt_dff.sat_batch_cells", 10000)) { }
 
 	// lattice join of candidate constants: Sx is the identity (unless -keepdc
 	// pins it), equal values join, Sm marks a conflict
@@ -395,18 +396,20 @@ struct ConstBitsContext
 	}
 
 	// prove or drop the pending obligations batch by batch, stopping early on an
-	// exhausted budget or, for a joint sweep, at reserve; returns the number of batches
-	int sweep_batches(std::vector<ConstObligation> &obligations, int64_t screen_cap, int64_t reserve, bool joint)
+	// exhausted budget; returns the number of batches. A joint sweep down to
+	// reserve clears joint, and that batch goes on per bit in the same solver, so
+	// its imports are paid once, as do the batches after it
+	int sweep_batches(std::vector<ConstObligation> &obligations, int64_t screen_cap, int64_t reserve, bool &joint)
 	{
 		ModWalker &modwalker = worker.get_modwalker();
 		int batches = 0;
 		for (int batch_begin = 0; batch_begin < GetSize(obligations) && !worker.warn_if_budget_spent(); batches++) {
 			QuickConeSat qcsat(modwalker);
 			int batch_end = build_const_batch(qcsat, obligations, batch_begin);
+			if (joint && !sweep_joint_batch(qcsat, obligations, batch_begin, batch_end, reserve))
+				joint = false;
 			if (!joint)
 				sweep_const_batch(qcsat, obligations, batch_begin, batch_end, screen_cap);
-			else if (!sweep_joint_batch(qcsat, obligations, batch_begin, batch_end, reserve))
-				break;
 			batch_begin = batch_end;
 		}
 		return batches;
@@ -438,21 +441,23 @@ struct ConstBitsContext
 			return n;
 		};
 		int64_t reserve = worker.sat_budget.remaining / 2;
+		bool joint = true;
 		for (bool again = true; again; ) {
 			int before = standing();
-			int batches = sweep_batches(obligations, screen_cap, reserve, true);
-			// only running out of budget leaves a candidate pending, and a later
-			// batch's drop weakens the hypothesis an earlier batch held under
-			bool spent = false;
+			int batches = sweep_batches(obligations, screen_cap, reserve, joint);
+			// a pending candidate's batch ran out of budget before its sweep, and a
+			// later batch's drop weakens the hypothesis an earlier batch held under
 			for (auto &ob : obligations)
-				spent = spent || ob.status == ConstObligation::Pending;
-			again = !spent && batches > 1 && standing() < before;
+				joint = joint && ob.status != ConstObligation::Pending;
+			again = joint && batches > 1 && standing() < before;
 			for (auto &ob : obligations)
 				if (ob.status == ConstObligation::Held)
-					ob.status = spent || again ? ConstObligation::Pending : ConstObligation::Proven;
+					ob.status = joint && !again ? ConstObligation::Proven : ConstObligation::Pending;
 		}
 
-		sweep_batches(obligations, screen_cap, 0, false);
+		// what an unfinished joint pass held goes per bit too
+		if (!joint)
+			sweep_batches(obligations, screen_cap, 0, joint);
 	}
 
 	bool run_constbits()

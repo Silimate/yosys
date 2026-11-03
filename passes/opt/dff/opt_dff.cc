@@ -89,6 +89,8 @@ struct OptDffPass : public Pass {
 		log("        when 'opt_dff.sat_effort_pool' is set, every module in every later\n");
 		log("        -sat call also draws from that one design-wide pool, which is written\n");
 		log("        back after each call; once it reaches 0, -sat skips its proofs.\n");
+		log("        constant proofs rebuild the solver once it has imported\n");
+		log("        'opt_dff.sat_batch_cells' cells (default 10000).\n");
 		log("\n");
 		log("    -keepdc\n");
 		log("        some optimizations change the behavior of the circuit with respect to\n");
