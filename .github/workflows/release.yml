@@ -59,46 +59,13 @@ jobs:
           name: wheel-linux
           path: dist/*.whl
 
-  macos:
-    name: macOS arm64 wheel
-    needs: set-version
-    runs-on: macos-15
-    env:
-      PYOSYS_VERSION_OVERRIDE: ${{ needs.set-version.outputs.version }}
-      MACOSX_DEPLOYMENT_TARGET: "15.0" # the Homebrew libraries bundled into the wheel need macOS 15
-      _PYTHON_HOST_PLATFORM: macosx-15.0-arm64 # Python is universal2, but the wheel is arm64 only
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0 # yosys version string counts commits since the last tag
-          submodules: recursive
-          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
-      - name: Install dependencies
-        run: |
-          brew install bison flex gperf tcl-tk@8 libffi dwarfutils libelf ccache llvm
-          echo "PKG_CONFIG_PATH=$(brew --prefix tcl-tk@8)/lib/pkgconfig" >> $GITHUB_ENV # keg-only, so CMake finds it for the sdc pass
-          printf '%s\n' $(brew --prefix bison)/bin $(brew --prefix flex)/bin $(brew --prefix llvm)/bin >> $GITHUB_PATH
-          python3 -m pip install wheel packaging 'pybind11>=3,<4' 'cxxheaderparser>=1.4' delocate
-      - uses: actions/cache@v6
-        with:
-          path: .ccache
-          key: ccache-macos-${{ github.sha }}
-          restore-keys: ccache-macos-
-      - run: .github/workflows/wheels/build.sh
-      - run: delocate-wheel -v -w dist wheelhouse/*.whl # bundle the Homebrew libraries into the wheel
-      - run: python3 .github/workflows/wheels/silimate_check_release.py dist # the bundled wheel still runs Tcl
-      - uses: actions/upload-artifact@v7
-        with:
-          name: wheel-macos
-          path: dist/*.whl
-
   release:
     name: Create GitHub releases
-    needs: [set-version, linux, macos]
+    needs: [set-version, linux]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # starts release-macos.yml
     steps:
       - uses: actions/checkout@v7
         with:
@@ -123,7 +90,7 @@ jobs:
           | File | Platform |
           |------|----------|
           | \`silimate_pyosys-*-manylinux2014*.whl\` | Linux x86-64 (manylinux2014, glibc 2.17+) |
-          | \`silimate_pyosys-*-macosx_*_arm64.whl\` | macOS Apple Silicon |
+          | \`silimate_pyosys-*-macosx_*_arm64.whl\` | macOS Apple Silicon (added when its build finishes) |
 
           ### Installation
           \`\`\`bash
@@ -139,3 +106,10 @@ jobs:
           git tag -f latest && git push -f origin latest
           gh release delete latest --yes || true
           gh release create latest dist/*.whl --target $(git rev-parse HEAD) --title "Latest Build ($DATE)" --notes-file release_notes.md --prerelease
+      # macOS runners can queue for half an hour, so the macOS wheel is built in a workflow of its
+      # own and added to this release when it is done; the next release need not wait for it
+      - name: Start the macOS wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.set-version.outputs.version }}
+        run: gh workflow run release-macos.yml -R "$GITHUB_REPOSITORY" --ref main -f version="$VERSION" -f sha="$GITHUB_SHA"

@@ -1,0 +1,67 @@
+name: Release (pyosys macOS wheel)
+
+# Started by release.yml once a version's Linux wheel is published, and adds the macOS wheel to
+# that release. Run it by hand to rebuild one.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version the Linux wheel was released as (e.g. 0.69.post133+sm)
+        required: true
+      sha:
+        description: Yosys commit that release was built from
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }} # one build at a time; a newer version waiting replaces an older one
+
+jobs:
+  macos:
+    name: macOS arm64 wheel
+    runs-on: macos-15
+    env:
+      PYOSYS_VERSION_OVERRIDE: ${{ inputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "15.0" # the Homebrew libraries bundled into the wheel need macOS 15
+      _PYTHON_HOST_PLATFORM: macosx-15.0-arm64 # Python is universal2, but the wheel is arm64 only
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0 # yosys version string counts commits since the last tag
+          submodules: recursive
+          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        run: |
+          brew install bison flex gperf tcl-tk@8 libffi dwarfutils libelf ccache llvm
+          echo "PKG_CONFIG_PATH=$(brew --prefix tcl-tk@8)/lib/pkgconfig" >> $GITHUB_ENV # keg-only, so CMake finds it for the sdc pass
+          printf '%s\n' $(brew --prefix bison)/bin $(brew --prefix flex)/bin $(brew --prefix llvm)/bin >> $GITHUB_PATH
+          python3 -m pip install wheel packaging 'pybind11>=3,<4' 'cxxheaderparser>=1.4' delocate
+      - uses: actions/cache@v6
+        with:
+          path: .ccache
+          key: ccache-macos-${{ inputs.sha }}
+          restore-keys: ccache-macos-
+      - run: .github/workflows/wheels/build.sh
+      - run: delocate-wheel -v -w dist wheelhouse/*.whl # bundle the Homebrew libraries into the wheel
+      - run: python3 .github/workflows/wheels/silimate_check_release.py dist # the bundled wheel still runs Tcl
+      - name: Add to the release
+        env:
+          GH_TOKEN: ${{ secrets.YOSYS_WHEELS_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release upload "v$VERSION" dist/*.whl -R silimate/yosys-wheels --clobber
+          # An upload fires no release event, so the wheels repo's upload.yml, which copies a release's
+          # wheels to the download server's index, would never see this one. Editing the notes does
+          gh release view "v$VERSION" -R silimate/yosys-wheels --json body --jq .body | sed '/^macOS wheel added/d' > notes.md
+          echo "macOS wheel added $(date -u +%FT%TZ)." >> notes.md
+          gh release edit "v$VERSION" -R silimate/yosys-wheels --notes-file notes.md
+          # latest moves on with every Linux release: add the wheel only while it is still this version's
+          if gh release view latest -R silimate/yosys-wheels --json assets --jq '.assets[].name' | grep -qF -- "-$VERSION-"; then
+            gh release upload latest dist/*.whl -R silimate/yosys-wheels --clobber
+          fi
