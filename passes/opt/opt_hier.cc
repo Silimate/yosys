@@ -106,6 +106,9 @@ struct ModuleIndex {
 
 		bool changed = false;
 		for (auto &[port_name, value] : instantiation->connections_) {
+			// `.port()` reads in as a zero-width connection: the same as leaving it out
+			if (value.empty())
+				continue;
 			Wire *port = module->wire(port_name);
 			if (!port || (!port->port_input && !port->port_output) || port->width != value.size()) {
 				log_error("Port %s connected on instance %s not found in module %s"
@@ -172,7 +175,8 @@ struct ModuleIndex {
 			SigSpec new_tie;
 
 			for (auto port_bit : class_) {
-				if (instantiation->connections_.count(port_bit.wire->name)) {
+				if (instantiation->connections_.count(port_bit.wire->name)
+						&& !instantiation->connections_.at(port_bit.wire->name).empty()) {
 					SigBit bit = instantiation->connections_.at(port_bit.wire->name)[port_bit.offset];
 					if (parent.used.check(bit)) {
 						if (!new_tie.empty()) {
@@ -295,6 +299,8 @@ struct UsageData {
 		dict<SigBit, SigBit> inputs;
 
 		for (auto &[port_name, value] : instance->connections_) {
+			if (value.empty())
+				continue;
 			Wire *port = module->wire(port_name);
 			if (!port || (!port->port_input && !port->port_output) || port->width != value.size()) {
 				log_error("Port %s connected on instance %s not found in module %s"

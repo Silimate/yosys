@@ -1,0 +1,18 @@
+# A `.port()` connection reads in as a zero-width connection, which means the same as
+# leaving the port out: `q` is unused, and `a` is left out of the tie-together with `b`.
+read_verilog <<EOT
+module leaf(input clk, input d, output reg q, output a, output b);
+	always @(posedge clk) q <= d;
+	assign a = d;
+	assign b = d;
+endmodule
+module top(input clk, input d, output y);
+	leaf u(.clk(clk), .d(d), .q(), .a(), .b(y));
+endmodule
+EOT
+hierarchy -top top
+proc
+opt_hier
+opt_clean
+select -assert-none leaf/t:$dff
+select -assert-count 1 top/u
