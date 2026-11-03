@@ -85,3 +85,44 @@ select -assert-none fast/t:*dff*
 scratchpad -assert opt_hier.saturated true
 scratchpad -assert-unset opt_dff.changed
 design -reset
+
+# A round leaves the logic behind an output it disconnects in place until opt_clean, and
+# opt_dff only merges a reset mux into a register that is its sole reader. Here `n` reads
+# `nxt`, so `p` gets its reset, and with it a value to fold to, only after that cleanup.
+read_verilog <<EOT
+module leaf(input clk, input rst, input irq, input x, output reg p, output n);
+	wire nxt = rst ? 1'b0 : p | irq;
+	assign n = nxt ^ x;
+	always @(posedge clk) p <= nxt;
+endmodule
+module top(input clk, input rst, input x, output y);
+	leaf u(.clk(clk), .rst(rst), .irq(1'b0), .x(x), .p(y));
+endmodule
+EOT
+hierarchy -top top
+proc
+design -save start
+opt_hier -max_iter 0 -sat
+select -assert-none leaf/t:*dff*
+design -load start
+opt_hier -max_iter 0
+select -assert-none leaf/t:*dff*
+design -reset
+
+# The same holds within the fold loop: folding `a` leaves `nxt ^ x` with no reader, and
+# until it is dropped, `b` can't merge the reset mux `nxt` and fold in the next repeat.
+read_verilog <<EOT
+module leaf(input clk, input rst, input en, input x, output reg a, output reg b);
+	wire nxt = rst ? 1'b0 : b | en;
+	always @(posedge clk) a <= rst ? 1'b0 : a & (nxt ^ x);
+	always @(posedge clk) b <= nxt;
+endmodule
+module top(input clk, input rst, input x, output ya, output yb);
+	leaf u(.clk(clk), .rst(rst), .en(1'b0), .x(x), .a(ya), .b(yb));
+endmodule
+EOT
+hierarchy -top top
+proc
+opt_hier -max_iter 0 -sat
+select -assert-none leaf/t:*dff*
+design -reset
