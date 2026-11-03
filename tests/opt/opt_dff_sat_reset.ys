@@ -166,3 +166,121 @@ design -copy-from gate -as gate test_case
 equiv_make test_case gate equiv
 equiv_induct equiv
 equiv_status -assert
+
+
+# with opt_dff.undef_init_any, a flop with no power-up value that leaves its reset value may
+# hold the other one: f1 can rise to 1 and then its enable, which its reset needs, is off, and g,
+# which holds 0 only while f1 holds 1, folds with it. f2's enable can be on at 1, f3's reset wins
+# over its enable ($sdffe), and f4 powers up at 0, so all three stay. Without the option, no
+# reset gives f1 that 1, so it and g stay too
+design -reset
+read_rtlil <<EOT
+module \test_case
+  wire input 1 \clk
+  wire input 2 \s
+  wire input 3 \e
+  wire input 4 \d
+  wire output 5 \f1
+  wire output 6 \f2
+  wire output 7 \f3
+  attribute \init 1'0
+  wire output 8 \f4
+  attribute \init 1'0
+  wire output 9 \g
+  wire \nf1
+  wire \gd
+  cell $not $nf1
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \f1
+    connect \Y \nf1
+  end
+  cell $and $gd
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \nf1
+    connect \B \e
+    connect \Y \gd
+  end
+  cell $dff $g
+    parameter \CLK_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \D \gd
+    connect \Q \g
+  end
+  cell $sdffce $f1
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 0
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \f1
+    connect \SRST \s
+    connect \D \d
+    connect \Q \f1
+  end
+  cell $sdffce $f2
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \e
+    connect \SRST \s
+    connect \D \d
+    connect \Q \f2
+  end
+  cell $sdffe $f3
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 0
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \f3
+    connect \SRST \s
+    connect \D \d
+    connect \Q \f3
+  end
+  cell $sdffce $f4
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 0
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \f4
+    connect \SRST \s
+    connect \D \d
+    connect \Q \f4
+  end
+end
+EOT
+
+design -save gold
+
+opt_dff -sat
+opt_clean -purge
+select -assert-count 4 t:$sdffe t:$sdffce %u
+select -assert-count 1 c:$g
+
+design -load gold
+scratchpad -set opt_dff.undef_init_any 1
+opt_dff -sat
+opt_clean -purge
+select -assert-count 3 t:$sdffe t:$sdffce %u
+select -assert-none c:$f1 c:$g
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert

@@ -90,7 +90,10 @@ struct OptDffPass : public Pass {
 		log("        -sat call also draws from that one design-wide pool, which is written\n");
 		log("        back after each call; once it reaches 0, -sat skips its proofs.\n");
 		log("        constant proofs rebuild the solver once it has imported\n");
-		log("        'opt_dff.sat_batch_cells' cells (default 10000).\n");
+		log("        'opt_dff.sat_batch_cells' cells (default 10000). with the scratchpad\n");
+		log("        option 'opt_dff.undef_init_any' set, a bit with no power-up value that\n");
+		log("        can't stay at its reset value may fold to the other value, which no\n");
+		log("        reset gives it.\n");
 		log("\n");
 		log("    -keepdc\n");
 		log("        some optimizations change the behavior of the circuit with respect to\n");

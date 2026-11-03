@@ -205,14 +205,21 @@ struct ConstBitsContext
 	// fold every constant input into the candidate from check_constbit, so a
 	// wire input that sigmaps to a constant counts as constant too. A constant D
 	// or srst value that contradicts the candidate stays a target when ce or srst
-	// gate it, since sat may show it never loads while q holds the candidate
-	ConstCandidate fold_const_inputs(FfData &ff, int i)
+	// gate it, since sat may show it never loads while q holds the candidate.
+	// With other, a bit with no power-up value takes the value opposite its reset
+	ConstCandidate fold_const_inputs(FfData &ff, int i, bool other = false)
 	{
 		ConstCandidate cand;
 
 		State val = check_constbit(ff, i);
 		if (val == State::Sm)
 			return cand;
+		if (other) {
+			State srst = ff.has_srst ? ff.val_srst[i] : State::Sx;
+			if (val != State::Sx || (srst != State::S0 && srst != State::S1))
+				return cand;
+			val = srst == State::S1 ? State::S0 : State::S1;
+		}
 
 		if (ff.has_srst && combine_const(val, ff.val_srst[i]) == State::Sm) {
 			// the reset takes effect while srst is active, and with ce too if ce wins
@@ -284,26 +291,26 @@ struct ConstBitsContext
 					continue;
 				}
 
-				if (!worker.opt.sat)
-					continue;
-
 				ConstObligation ob;
-				ob.cell = cell;
-				ob.idx = i;
-				ob.val = cand.val;
-				ob.q = ff.sig_q[i];
-
-				bool feasible = true;
-				for (auto &target : cand.targets)
-					feasible = feasible && add_const_target(ob, target);
-				if (!feasible)
-					continue;
-
-				obligations.push_back(std::move(ob));
+				if (worker.opt.sat && make_obligation(cell, ff, i, cand, ob))
+					obligations.push_back(std::move(ob));
 			}
 		}
 
 		return obligations;
+	}
+
+	// the obligation that bit i of cell holds cand.val, false if it can't be proven
+	bool make_obligation(Cell *cell, FfData &ff, int i, const ConstCandidate &cand, ConstObligation &ob)
+	{
+		ob.cell = cell;
+		ob.idx = i;
+		ob.val = cand.val;
+		ob.q = ff.sig_q[i];
+		for (auto &target : cand.targets)
+			if (!add_const_target(ob, target))
+				return false;
+		return true;
 	}
 
 	int build_const_batch(QuickConeSat &qcsat, std::vector<ConstObligation> &obligations, int batch_begin)
@@ -498,6 +505,43 @@ struct ConstBitsContext
 			sweep_batches(obligations, screen_cap, 0, joint);
 	}
 
+	// a bit with no power-up value that left its reset value may hold the other
+	// one, if undefined power-up values may take a value no reset gives them.
+	// Both can't share a hypothesis, so a second round, assuming the bits proven
+	// so far, retries what was dropped with those flipped; returns what it retried
+	std::vector<ConstObligation> retry_flipped(const std::vector<ConstObligation> &obligations)
+	{
+		std::vector<ConstObligation> retried;
+		bool flipped = false;
+		dict<Cell *, FfData> ffs;
+		for (auto &ob : obligations) {
+			if (ob.status != ConstObligation::Dropped)
+				continue;
+			auto it = ffs.find(ob.cell);
+			if (it == ffs.end())
+				it = ffs.emplace(ob.cell, FfData(&worker.initvals, ob.cell)).first;
+			ConstCandidate cand = fold_const_inputs(it->second, ob.idx, true);
+			ConstObligation other;
+			if (cand.val != State::Sm && make_obligation(ob.cell, it->second, ob.idx, cand, other)) {
+				retried.push_back(std::move(other));
+				flipped = true;
+			} else {
+				retried.push_back(ob);
+				retried.back().status = ConstObligation::Pending;
+			}
+		}
+		if (!flipped)
+			return {};
+
+		int n = GetSize(retried);
+		for (auto &ob : obligations)
+			if (ob.status == ConstObligation::Proven)
+				retried.push_back(ob);
+		solve_const_obligations(retried);
+		retried.resize(n);
+		return retried;
+	}
+
 	bool run_constbits()
 	{
 		dict<Cell *, pool<int>> const_bits;
@@ -506,6 +550,10 @@ struct ConstBitsContext
 
 		if (worker.opt.sat) {
 			solve_const_obligations(obligations);
+			if (worker.module->design->scratchpad_get_bool("opt_dff.undef_init_any")) {
+				std::vector<ConstObligation> retried = retry_flipped(obligations);
+				obligations.insert(obligations.end(), retried.begin(), retried.end());
+			}
 			for (auto &ob : obligations)
 				if (ob.status == ConstObligation::Proven)
 					commit_const(const_bits, ob.cell, ob.idx, ob.q, ob.val);
