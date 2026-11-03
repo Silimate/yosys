@@ -1,0 +1,168 @@
+# opt_dff -sat only needs the sync reset value to match the candidate while the reset takes effect
+
+# q1-q2 power up at 1 and their reset to 0 can't take effect while they hold 1: q1's enable,
+# which its reset needs ($sdffce), is off then, and q2's reset reads ~q2. q3's reset is an input,
+# q4's enable can be on while it holds 1, and q5's reset wins over its enable ($sdffe), so all
+# three stay
+design -reset
+read_rtlil <<EOT
+module \test_case
+  wire input 1 \clk
+  wire input 2 \s
+  wire input 3 \e
+  wire input 4 \d
+  attribute \init 1'1
+  wire output 5 \q1
+  attribute \init 1'1
+  wire output 6 \q2
+  attribute \init 1'1
+  wire output 7 \q3
+  attribute \init 1'1
+  wire output 8 \q4
+  attribute \init 1'1
+  wire output 9 \q5
+  wire \nq2
+  wire \r2
+  cell $not $nq2
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \q2
+    connect \Y \nq2
+  end
+  cell $and $r2
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \nq2
+    connect \B \s
+    connect \Y \r2
+  end
+  cell $sdffce $q1
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 0
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \q1
+    connect \SRST \s
+    connect \D \d
+    connect \Q \q1
+  end
+  cell $sdffe $q2
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \e
+    connect \SRST \r2
+    connect \D 1'1
+    connect \Q \q2
+  end
+  cell $sdffe $q3
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \e
+    connect \SRST \s
+    connect \D 1'1
+    connect \Q \q3
+  end
+  cell $sdffce $q4
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \e
+    connect \SRST \s
+    connect \D 1'1
+    connect \Q \q4
+  end
+  cell $sdffe $q5
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 0
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \q5
+    connect \SRST \s
+    connect \D \d
+    connect \Q \q5
+  end
+end
+EOT
+
+design -save gold
+
+opt_dff
+opt_clean -purge
+select -assert-count 5 t:$sdffe t:$sdffce %u
+
+design -load gold
+opt_dff -sat
+opt_clean -purge
+select -assert-count 3 t:$sdffe t:$sdffce %u
+select -assert-count 1 c:$q3
+select -assert-count 1 c:$q4
+select -assert-count 1 c:$q5
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert
+
+
+# the same from RTL: a flag powered up set, whose reset only applies while its enable,
+# which needs the flag clear, is on
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire g,
+	input wire set,
+	output reg f
+);
+	initial f = 1'b1;
+	always @(posedge clk)
+		if (!f && g) begin
+			if (rst)
+				f <= 1'b0;
+			else
+				f <= set;
+		end
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+design -save gold
+
+opt_dff
+opt_clean -purge
+select -assert-count 1 t:$sdffce
+
+design -load gold
+opt_dff -sat
+opt_clean -purge
+select -assert-none t:$sdffce t:$sdffe t:$sdff t:$dffe t:$dff %u %u %u %u
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert

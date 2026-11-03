@@ -44,16 +44,14 @@ struct ConstBitsContext
 		return State::Sm;
 	}
 
-	// candidate stuck-at value of ff bit i, joined over every non-D way the bit
-	// can acquire a value: init, arst, srst and sr (a clr/set that can ever
-	// fire forces 0/1)
+	// candidate stuck-at value of ff bit i, joined over init, arst and sr (a
+	// clr/set that can ever fire forces 0/1); fold_const_inputs adds srst
 	// returns S0/S1 as the candidate, Sx if unconstrained, Sm on conflict
 	// the candidate doubles as the induction base case
 	State check_constbit(FfData &ff, int i)
 	{
 		State val = ff.val_init[i];
 		if (ff.has_arst) val = combine_const(val, ff.val_arst[i]);
-		if (ff.has_srst) val = combine_const(val, ff.val_srst[i]);
 		if (ff.has_sr) {
 			if (!worker.is_inactive(worker.sigmap(ff.sig_clr[i]), ff.pol_clr))
 				val = combine_const(val, State::S0);
@@ -65,7 +63,8 @@ struct ConstBitsContext
 	}
 
 	// an input that must be shown to feed the candidate value back into the bit
-	// whenever it loads: D only while ce is active and srst is not, AD always
+	// whenever it loads: D only while ce is active and srst is not, AD always,
+	// and the srst value while the reset takes effect
 	struct ConstTarget {
 		SigBit sig;
 		SigBit ce = State::S1, srst = State::S0;
@@ -205,8 +204,8 @@ struct ConstBitsContext
 
 	// fold every constant input into the candidate from check_constbit, so a
 	// wire input that sigmaps to a constant counts as constant too. A constant D
-	// that contradicts the candidate stays a target when ce or srst gate it, since
-	// sat may show it never loads while q holds the candidate
+	// or srst value that contradicts the candidate stays a target when ce or srst
+	// gate it, since sat may show it never loads while q holds the candidate
 	ConstCandidate fold_const_inputs(FfData &ff, int i)
 	{
 		ConstCandidate cand;
@@ -214,6 +213,22 @@ struct ConstBitsContext
 		State val = check_constbit(ff, i);
 		if (val == State::Sm)
 			return cand;
+
+		if (ff.has_srst && combine_const(val, ff.val_srst[i]) == State::Sm) {
+			// the reset takes effect while srst is active, and with ce too if ce wins
+			ConstTarget target;
+			target.sig = ff.val_srst[i];
+			target.gated = true;
+			if (ff.has_ce && ff.ce_over_srst) {
+				target.ce = worker.sigmap(ff.sig_ce[0]);
+				target.pol_ce = ff.pol_ce;
+			}
+			target.srst = worker.sigmap(ff.sig_srst[0]);
+			target.pol_srst = !ff.pol_srst;  // loads is ce and not srst
+			cand.targets.push_back(target);
+		} else if (ff.has_srst) {
+			val = combine_const(val, ff.val_srst[i]);
+		}
 
 		bool has_d = ff.has_clk || ff.has_gclk;
 		SigBit d = has_d ? worker.sigmap(ff.sig_d[i]) : SigBit();
