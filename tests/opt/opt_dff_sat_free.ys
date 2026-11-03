@@ -1,0 +1,148 @@
+# opt_dff -sat lets an undriven D differ whenever its bit loads, unless the input is in
+# the cone of the load condition itself
+
+# an input that gates its own load is not free: q1 (D = EN = d1) and q2 (EN = d2 & en)
+# hold their reset value of 1, since D only loads while it is 1
+design -reset
+read_rtlil <<EOT
+module \test_case
+  wire input 1 \clk
+  wire input 2 \rst
+  wire input 3 \d1
+  wire input 4 \d2
+  wire input 5 \en
+  wire \g
+  wire output 6 \q1
+  wire output 7 \q2
+  cell $and $g
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \d2
+    connect \B \en
+    connect \Y \g
+  end
+  cell $sdffe $q1
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \d1
+    connect \SRST \rst
+    connect \D \d1
+    connect \Q \q1
+  end
+  cell $sdffe $q2
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \g
+    connect \SRST \rst
+    connect \D \d2
+    connect \Q \q2
+  end
+end
+EOT
+
+design -save gold
+opt_dff -sat
+opt_clean -purge
+select -assert-none t:$sdffe
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert
+
+
+# a onehot input is not free: q3 loads bus[0] only while bus[1] is set, and the two
+# bits are never both set, so q3 holds its init value 0
+design -reset
+read_rtlil <<EOT
+module \test_case
+  wire input 1 \clk
+  attribute \onehot 1
+  wire width 2 input 2 \bus
+  attribute \init 1'0
+  wire output 3 \q3
+  cell $dffe $q3
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \bus [1]
+    connect \D \bus [0]
+    connect \Q \q3
+  end
+end
+EOT
+
+opt_dff -sat
+opt_clean -purge
+select -assert-none t:$dffe
+
+# an input folded constant earlier in the pass is not free: bit 0 is committed to its
+# init value 1 first, and bit 1 then loads it, so bit 1 holds 1 too
+design -reset
+read_rtlil <<EOT
+module \test_case
+  wire input 1 \clk
+  wire input 2 \en
+  attribute \init 2'11
+  wire width 2 output 3 \q
+  cell $dffe $q
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \WIDTH 2
+    connect \CLK \clk
+    connect \EN \en
+    connect \D { \q [0] 1'1 }
+    connect \Q \q
+  end
+end
+EOT
+
+opt_dff -sat
+opt_clean -purge
+select -assert-none t:$dffe
+
+# a register file written from an input: a model that loads an entry drops all its bits,
+# not one solver call per bit, which ran out of this budget. Last: -werror stays set
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire we,
+	input wire [4:0] wa,
+	input wire [4:0] ra,
+	input wire [31:0] din,
+	output wire [31:0] dout
+);
+	reg [1023:0] r;
+	genvar j;
+	for (j = 0; j < 32; j = j + 1)
+		always @(posedge clk, posedge rst)
+			if (rst)
+				r[j*32 +: 32] <= 32'b0;
+			else if (we && wa == j)
+				r[j*32 +: 32] <= din;
+	assign dout = r[ra*32 +: 32];
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+scratchpad -set opt_dff.sat_effort 500000
+logger -werror "solver effort budget"
+opt_dff -sat
+select -assert-count 32 t:$adffe

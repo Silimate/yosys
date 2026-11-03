@@ -149,6 +149,25 @@ struct ConstBitsContext
 		return true;
 	}
 
+	// an undriven input that is neither its own ce nor srst, not on a onehot wire (whose
+	// bits the solver ties together), and that no imported cell reads is outside the cone
+	// of its load condition, so it can take any value there. Map through the walker, as
+	// the solver does: it also sees bits committed constant
+	bool free_input(QuickConeSat &qcsat, const ConstTarget &target)
+	{
+		SigMap &sigmap = qcsat.modwalker.sigmap;
+		SigBit sig = sigmap(target.sig);
+		if (!sig.wire || sig == sigmap(target.ce) || sig == sigmap(target.srst) ||
+				sig.wire->get_bool_attribute(ID::onehot) || qcsat.modwalker.has_drivers(sig))
+			return false;
+		auto it = qcsat.modwalker.signal_consumers.find(sig);
+		if (it != qcsat.modwalker.signal_consumers.end())
+			for (auto &pbit : it->second)
+				if (qcsat.imported_cells.count(pbit.cell))
+					return false;
+		return true;
+	}
+
 	// literal for sig being at level pol, constant for a constant sig
 	int import_level(QuickConeSat &qcsat, SigBit sig, bool pol)
 	{
@@ -291,7 +310,11 @@ struct ConstBitsContext
 			for (auto &target : ob.targets) {
 				int loads = qcsat.ez->AND(import_level(qcsat, target.ce, target.pol_ce),
 						qcsat.ez->NOT(import_level(qcsat, target.srst, target.pol_srst)));
-				int ne = qcsat.ez->NOT(qcsat.ez->IFF(import_level(qcsat, target.sig, true), vlit));
+				// a free input differs whenever it loads, so a model drops every bit loading with
+				// it, not only the ones its arbitrary input values happen to move
+				qcsat.prepare();
+				int ne = free_input(qcsat, target) ? qcsat.ez->CONST_TRUE :
+						qcsat.ez->NOT(qcsat.ez->IFF(import_level(qcsat, target.sig, true), vlit));
 				differ.push_back(qcsat.ez->AND(loads, ne));
 			}
 			ob.differ_lit = qcsat.ez->expression(ezSAT::OpOr, differ);
