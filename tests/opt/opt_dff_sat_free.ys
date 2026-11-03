@@ -64,6 +64,32 @@ equiv_induct equiv
 equiv_status -assert
 
 
+# a onehot input is not free: q3 loads bus[0] only while bus[1] is set, and the two
+# bits are never both set, so q3 holds its init value 0
+design -reset
+read_rtlil <<EOT
+module \test_case
+  wire input 1 \clk
+  attribute \onehot 1
+  wire width 2 input 2 \bus
+  attribute \init 1'0
+  wire output 3 \q3
+  cell $dffe $q3
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \bus [1]
+    connect \D \bus [0]
+    connect \Q \q3
+  end
+end
+EOT
+
+opt_dff -sat
+opt_clean -purge
+select -assert-none t:$dffe
+
 # an input folded constant earlier in the pass is not free: bit 0 is committed to its
 # init value 1 first, and bit 1 then loads it, so bit 1 holds 1 too
 design -reset

@@ -149,14 +149,16 @@ struct ConstBitsContext
 		return true;
 	}
 
-	// an undriven input that is neither its own ce nor srst and that no imported cell
-	// reads is outside the cone of its load condition, so it can take any value there.
-	// Map through the walker, as the solver does: it also sees bits committed constant
+	// an undriven input that is neither its own ce nor srst, not on a onehot wire (whose
+	// bits the solver ties together), and that no imported cell reads is outside the cone
+	// of its load condition, so it can take any value there. Map through the walker, as
+	// the solver does: it also sees bits committed constant
 	bool free_input(QuickConeSat &qcsat, const ConstTarget &target)
 	{
 		SigMap &sigmap = qcsat.modwalker.sigmap;
 		SigBit sig = sigmap(target.sig);
-		if (!sig.wire || sig == sigmap(target.ce) || sig == sigmap(target.srst) || qcsat.modwalker.has_drivers(sig))
+		if (!sig.wire || sig == sigmap(target.ce) || sig == sigmap(target.srst) ||
+				sig.wire->get_bool_attribute(ID::onehot) || qcsat.modwalker.has_drivers(sig))
 			return false;
 		auto it = qcsat.modwalker.signal_consumers.find(sig);
 		if (it != qcsat.modwalker.signal_consumers.end())
