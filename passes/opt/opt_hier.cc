@@ -564,11 +564,12 @@ struct OptHierPass : Pass {
 		log("        which just became constant, but also feeds its own D (a hold mux shared\n");
 		log("        with other logic, or an enable folded into the D cone), is only stuck\n");
 		log("        at that constant by induction, which plain opt_dff cannot prove.\n");
-		log("        opt_dff -sat and opt_expr repeat until opt_dff changes nothing, so the\n");
-		log("        logic and registers a folded register feeds fold before the next round\n");
-		log("        looks for constant outputs. Each repeat revisits only the modules the\n");
-		log("        one before changed. A round stops after 16 repeats and leaves the\n");
-		log("        modules still changing to the next, so -max_iter bounds the total.\n");
+		log("        opt_dff -sat, opt_expr and opt_clean repeat until opt_dff changes\n");
+		log("        nothing, so the logic and registers a folded register feeds fold\n");
+		log("        before the next round looks for constant outputs. Each repeat revisits\n");
+		log("        only the modules the one before changed. A round stops after 16\n");
+		log("        repeats and leaves the modules still changing to the next, so\n");
+		log("        -max_iter bounds the total.\n");
 		log("        Solver effort is capped by opt_dff's scratchpad options (see\n");
 		log("        'help opt_dff').\n");
 		log("\n");
@@ -650,7 +651,11 @@ struct OptHierPass : Pass {
 					rounds, GetSize(changed));
 			RTLIL::Selection sel = select_modules(d, changed);
 			std::string opt_expr_cmd = full ? "opt_expr -full" : "opt_expr";
+			std::string opt_clean_cmd = purge ? "opt_clean -purge" : "opt_clean";
 			Pass::call_on_selection(d, sel, opt_expr_cmd);
+			// opt_dff merges a reset or enable mux into a register only if nothing else
+			// reads it, so first drop logic left reading it for an output the round cut
+			Pass::call_on_selection(d, sel, opt_clean_cmd);
 			if (!sat)
 				Pass::call_on_selection(d, sel, "opt_dff");
 			// A register opt_dff just folded feeds logic the opt_expr above already passed
@@ -670,8 +675,9 @@ struct OptHierPass : Pass {
 				if (folding.empty())
 					break;
 				Pass::call_on_selection(d, select_modules(d, folding), opt_expr_cmd);
+				Pass::call_on_selection(d, select_modules(d, folding), opt_clean_cmd);
 			}
-			Pass::call_on_selection(d, sel, purge ? "opt_clean -purge" : "opt_clean");
+			Pass::call_on_selection(d, sel, opt_clean_cmd);
 		}
 
 		if (max_iter != 1) {
