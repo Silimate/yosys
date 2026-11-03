@@ -1,0 +1,77 @@
+# opt_dff -sat folds a flop stuck at its reset value whose constant D contradicts that value:
+# q sets only while already set, so it never leaves 0. p can set, and u powers up at 1 and holds
+# 1 until a reset, so both stay
+read_verilog <<EOT
+module top(input clk, rst, v, output y, z, w);
+  // sets only while already set, so it never leaves its reset value; D is still the 1 it would set
+  reg q;
+  always @(posedge clk) if (rst) q <= 1'b0; else if (q & v) q <= 1'b1;
+  // sets whenever v is high
+  reg p;
+  always @(posedge clk) if (rst) p <= 1'b0; else if (v) p <= 1'b1;
+  // stuck the same way, but powered up at 1, so it holds 1 until a reset
+  reg u = 1'b1;
+  always @(posedge clk) if (rst) u <= 1'b0; else if (u & v) u <= 1'b1;
+  assign y = q;
+  assign z = p;
+  assign w = u;
+endmodule
+EOT
+hierarchy -top top
+proc; opt
+select -assert-count 3 t:$sdffe
+design -save gold
+opt -sat
+select -assert-none w:q %ci1 t:$*dff* %i
+select -assert-count 1 w:p %ci1 t:$sdffe %i
+select -assert-none w:p a:init %i
+select -assert-count 1 w:u %ci1 t:$*dff* %i
+select -assert-count 1 w:u a:init=1'1 %i
+rename top gate
+design -copy-from gold -as gold top
+miter -equiv -flatten -make_assert gold gate miter
+hierarchy -top miter
+sat -verify -prove-asserts -seq 6 -set-init-zero miter
+
+# A power-up value on an alias of Q counts: the flag starts set and stays
+design -reset
+read_rtlil <<EOT
+module \top
+  wire input 1 \clk
+  wire input 2 \rst
+  wire input 3 \v
+  wire output 4 \y
+  wire \q
+  attribute \init 1'1
+  wire \qa
+  wire \en
+  connect \qa \q
+  connect \y \qa
+  cell $and $a
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \qa
+    connect \B \v
+    connect \Y \en
+  end
+  cell $sdffe $f
+    parameter \WIDTH 1
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    connect \CLK \clk
+    connect \SRST \rst
+    connect \EN \en
+    connect \D 1'1
+    connect \Q \q
+  end
+end
+EOT
+opt -sat
+select -assert-count 1 t:$sdffe
+select -assert-count 1 a:init=1'1
+select -assert-none a:init=1'0
