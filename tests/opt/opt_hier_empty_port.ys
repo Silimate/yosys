@@ -1,5 +1,6 @@
 # A `.port()` connection reads in as a zero-width connection, which means the same as
-# leaving the port out: `q` is unused, and `a` is left out of the tie-together with `b`.
+# leaving the port out: `q` is unused, and `a` is left out of the tie-together with `b`,
+# which still drives `y`.
 read_verilog <<EOT
 module leaf(input clk, input d, output reg q, output a, output b);
 	always @(posedge clk) q <= d;
@@ -16,3 +17,5 @@ opt_hier
 opt_clean
 select -assert-none leaf/t:$dff
 select -assert-count 1 top/u
+flatten
+sat -verify -prove y d
