@@ -63,13 +63,21 @@ struct ConstBitsContext
 		return val;
 	}
 
+	// an input that must be shown to feed the candidate value back into the bit
+	// whenever it loads: D only while ce is active and srst is not, AD always
+	struct ConstTarget {
+		SigBit sig;
+		SigBit ce = State::S1, srst = State::S0;
+		bool pol_ce = true, pol_srst = true;
+		bool gated = false;          // ce or srst can keep sig from loading
+	};
+
 	// candidate constant of one ff bit, with every constant input already folded in
 	struct ConstCandidate {
 		State val = State::Sm;
-		SigBit d;
-		SigBit ad;
+		std::vector<ConstTarget> targets;
 
-		bool needs_proof() const { return d.wire || ad.wire; }
+		bool needs_proof() const { return !targets.empty(); }
 	};
 
 	// one suspected-constant ff bit: q (output of cell at bit idx) looks stuck
@@ -81,7 +89,7 @@ struct ConstBitsContext
 		int idx;
 		State val;
 		SigBit q;
-		std::vector<SigBit> targets; // non-const inputs (D, AD), must be shown to be eq
+		std::vector<ConstTarget> targets;
 		Status status = Pending;
 
 		int q_lit = -1;              // valid within the current batch
@@ -120,16 +128,23 @@ struct ConstBitsContext
 		const_bits[cell].insert(idx);
 	}
 
-	// a wire input can only be proven against a definite candidate value that
-	// is actually driven somewhere in the design
-	bool add_const_target(ConstObligation &ob, SigBit sig)
+	// an input can only be proven against a definite candidate value, and an
+	// undriven one only when ce or srst may keep it from ever loading
+	bool add_const_target(ConstObligation &ob, const ConstTarget &target)
 	{
 		if (ob.val != State::S0 && ob.val != State::S1)
 			return false;
-		if (!worker.get_modwalker().has_drivers(sig))
+		if (!target.gated && !worker.get_modwalker().has_drivers(target.sig))
 			return false;
-		ob.targets.push_back(sig);
+		ob.targets.push_back(target);
 		return true;
+	}
+
+	// literal for sig being at level pol, constant for a constant sig
+	int import_level(QuickConeSat &qcsat, SigBit sig, bool pol)
+	{
+		int lit = sig.wire ? qcsat.importSigBit(sig) : qcsat.ez->value(sig == State::S1);
+		return pol ? lit : qcsat.ez->NOT(lit);
 	}
 
 	// try to decide obligation ob under the given per-query effort cap, returns
@@ -161,7 +176,9 @@ struct ConstBitsContext
 	}
 
 	// fold every constant input into the candidate from check_constbit, so a
-	// wire input that sigmaps to a constant counts as constant too
+	// wire input that sigmaps to a constant counts as constant too. A constant D
+	// that contradicts the candidate stays a target when ce or srst gate it, since
+	// sat may show it never loads while q holds the candidate
 	ConstCandidate fold_const_inputs(FfData &ff, int i)
 	{
 		ConstCandidate cand;
@@ -175,14 +192,25 @@ struct ConstBitsContext
 		SigBit ad = ff.has_aload ? worker.sigmap(ff.sig_ad[i]) : SigBit();
 
 		if (has_d) {
-			if (d.wire)
-				cand.d = d;
+			ConstTarget target;
+			target.sig = d;
+			target.gated = ff.has_ce || ff.has_srst;
+			if (ff.has_ce) {
+				target.ce = worker.sigmap(ff.sig_ce[0]);
+				target.pol_ce = ff.pol_ce;
+			}
+			if (ff.has_srst) {
+				target.srst = worker.sigmap(ff.sig_srst[0]);
+				target.pol_srst = ff.pol_srst;
+			}
+			if (d.wire || (target.gated && combine_const(val, d.data) == State::Sm))
+				cand.targets.push_back(target);
 			else
 				val = combine_const(val, d.data);
 		}
 		if (ff.has_aload) {
 			if (ad.wire)
-				cand.ad = ad;
+				cand.targets.push_back({ad});
 			else
 				val = combine_const(val, ad.data);
 		}
@@ -223,10 +251,8 @@ struct ConstBitsContext
 				ob.q = ff.sig_q[i];
 
 				bool feasible = true;
-				if (cand.d.wire)
-					feasible = add_const_target(ob, cand.d);
-				if (feasible && cand.ad.wire)
-					feasible = add_const_target(ob, cand.ad);
+				for (auto &target : cand.targets)
+					feasible = feasible && add_const_target(ob, target);
 				if (!feasible)
 					continue;
 
@@ -253,8 +279,12 @@ struct ConstBitsContext
 			ob.q_lit = qcsat.importSigBit(ob.q);
 			int vlit = qcsat.ez->value(ob.val == State::S1);
 			std::vector<int> differ;
-			for (auto sig : ob.targets)
-				differ.push_back(qcsat.ez->NOT(qcsat.ez->IFF(qcsat.importSigBit(sig), vlit)));
+			for (auto &target : ob.targets) {
+				int loads = qcsat.ez->AND(import_level(qcsat, target.ce, target.pol_ce),
+						qcsat.ez->NOT(import_level(qcsat, target.srst, target.pol_srst)));
+				int ne = qcsat.ez->NOT(qcsat.ez->IFF(import_level(qcsat, target.sig, true), vlit));
+				differ.push_back(qcsat.ez->AND(loads, ne));
+			}
 			ob.differ_lit = qcsat.ez->expression(ezSAT::OpOr, differ);
 			qcsat.prepare();
 			cells_charged = worker.sat_budget.charge_import(qcsat, cells_charged);

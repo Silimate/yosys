@@ -1,0 +1,191 @@
+# opt_dff -sat only needs D to match the candidate while it loads: ce active and srst inactive
+
+# busy loads din only while set, so once reset it never loads again
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire din,
+	output reg busy
+);
+	always @(posedge clk)
+		if (rst)
+			busy <= 1'b0;
+		else if (busy)
+			busy <= din;
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+design -save gold
+
+opt_dff
+opt_clean -purge
+select -assert-count 1 t:$sdff t:$sdffe %u
+
+design -load gold
+opt_dff -sat
+opt_clean -purge
+select -assert-none t:$sdff t:$sdffe %u
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert
+
+
+# the enable can fire while din differs from the reset value: kept
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire en,
+	input wire din,
+	output reg q
+);
+	always @(posedge clk)
+		if (rst)
+			q <= 1'b0;
+		else if (en)
+			q <= din;
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+opt_dff -sat
+opt_clean -purge
+select -assert-count 1 t:$sdffe
+
+
+# a constant D that contradicts the reset value, under an enable that can fire: kept
+design -reset
+read_verilog -sv <<EOT
+module test_case (
+	input wire clk,
+	input wire rst,
+	input wire en,
+	output reg q
+);
+	always @(posedge clk)
+		if (rst)
+			q <= 1'b0;
+		else if (en)
+			q <= 1'b1;
+endmodule
+EOT
+
+hierarchy -top test_case
+prep
+opt_dff -sat
+opt_clean -purge
+select -assert-count 1 t:$sdffe
+
+
+# a constant D that contradicts the reset value, gated so it never loads: q1-q3 fold,
+# across enable/reset polarities and both priorities; q4's srst is the other polarity.
+# q5 loads din only while it is set, and its init is 0
+design -reset
+read_rtlil <<EOT
+module \test_case
+  wire input 1 \clk
+  wire input 2 \s
+  wire \ns
+  wire output 3 \q1
+  wire output 4 \q2
+  wire output 5 \q3
+  wire output 6 \q4
+  attribute \init 1'0
+  wire output 7 \q5
+  wire input 8 \din
+  cell $not $ns
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \s
+    connect \Y \ns
+  end
+  cell $sdffe $q1
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \s
+    connect \SRST \s
+    connect \D 1'1
+    connect \Q \q1
+  end
+  cell $sdffce $q2
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 0
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 1'1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \ns
+    connect \SRST \s
+    connect \D 1'0
+    connect \Q \q2
+  end
+  cell $sdffe $q3
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 0
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \s
+    connect \SRST \ns
+    connect \D 1'1
+    connect \Q \q3
+  end
+  cell $sdffe $q4
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \SRST_POLARITY 0
+    parameter \SRST_VALUE 1'0
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \s
+    connect \SRST \s
+    connect \D 1'1
+    connect \Q \q4
+  end
+  cell $dffe $q5
+    parameter \CLK_POLARITY 1
+    parameter \EN_POLARITY 1
+    parameter \WIDTH 1
+    connect \CLK \clk
+    connect \EN \q5
+    connect \D \din
+    connect \Q \q5
+  end
+end
+EOT
+
+design -save gold
+
+opt_dff
+opt_clean -purge
+select -assert-count 4 t:$sdffe t:$sdffce %u
+select -assert-count 1 t:$dffe
+
+design -load gold
+opt_dff -sat
+opt_clean -purge
+select -assert-count 1 t:$sdffe t:$sdffce t:$dffe %u %u
+select -assert-count 1 c:$q4
+design -save gate
+
+design -load gold
+design -copy-from gate -as gate test_case
+equiv_make test_case gate equiv
+equiv_induct equiv
+equiv_status -assert
