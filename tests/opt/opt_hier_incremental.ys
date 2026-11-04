@@ -1,0 +1,53 @@
+# opt_hier revisits only the modules the last round changed and those next to them. These cases
+# need a later round to look again at a module that did not change itself.
+
+# A constant output climbs one boundary per round, so a parent that changed nothing in the last
+# round must still look at its instance of a child that did.
+read_verilog <<EOT
+module leaf(input a, input b, output y);
+	assign y = a & b;
+endmodule
+module mid(input a, input b, output y);
+	leaf l(.a(a), .b(b), .y(y));
+endmodule
+module top(input b, output y);
+	mid m(.a(1'b0), .b(b), .y(y));
+endmodule
+EOT
+hierarchy -top top
+proc
+logger -expect log "leaf const .a 0 0" 1
+opt_hier -max_iter 0 -full -purge
+scratchpad -get opt_hier.facts
+logger -check-expected
+cd top
+select -assert-none t:*
+cd
+
+# A module's last instance with a free input goes when opt_clean drops it with its unused parent
+# output; the instance left ties that input, so a later round must look at the module again.
+design -reset
+read_verilog <<EOT
+module leaf(input a, input b, output y);
+	assign y = a & b;
+endmodule
+module p1(input b, output y);
+	leaf l(.a(1'b1), .b(b), .y(y));
+endmodule
+module p2(input a, input b, output y);
+	leaf l(.a(a), .b(b), .y(y));
+endmodule
+module top(input a, input b, output y);
+	wire unused;
+	p1 u1(.b(b), .y(y));
+	p2 u2(.a(a), .b(b), .y(unused));
+endmodule
+EOT
+hierarchy -top top
+proc
+logger -expect log "leaf const .a 0 1" 1
+opt_hier -max_iter 0 -full -purge
+scratchpad -get opt_hier.facts
+logger -check-expected
+cd p2
+select -assert-none t:leaf
