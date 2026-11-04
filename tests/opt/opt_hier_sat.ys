@@ -71,12 +71,15 @@ design -reset
 # first repeat, while `slow` folds one stage of a 20-stage line per repeat, more than one
 # round's 16 take. So the loop optimizes `fast` once after its fold and never again, and
 # only `slow` carries into round 2, which also rewrites `top` to take `fast`'s constant
-# output. opt_hier_sat_record.tcl checks a caller's opt_dff.changed record on it.
+# output. `fast` is cleaned after the round's opt_expr and after its fold's, and not again
+# at the end of the round. opt_hier_sat_record.tcl checks a caller's opt_dff.changed
+# record on it.
 read_verilog hier_sat_narrow.v
 hierarchy -top top
 proc
 logger -expect log "Round 1 rewrote 2 module" 1
 logger -expect log "Optimizing module fast\." 2
+logger -expect log "Finding unused cells or wires in module .fast\.\." 2
 logger -expect log "Round 2 rewrote 2 module" 1
 opt_hier -max_iter 0 -sat
 logger -check-expected
