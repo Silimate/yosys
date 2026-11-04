@@ -439,20 +439,62 @@ struct UsageData {
 	}
 };
 
+// What one round leaves the next: each module's index and its instances of other modules.
+struct RoundState {
+	dict<IdString, ModuleIndex> indices;
+	dict<Module *, std::vector<Cell *>> instances;
+	// The types of those instances, kept apart because opt_clean may since have removed one
+	dict<Module *, pool<IdString>> instance_types;
+
+	void index(RTLIL::Design *d, Module *module)
+	{
+		log_debug("Building index for %s\n", module);
+		indices.erase(module->name);
+		indices.emplace(module->name, ModuleIndex(module));
+		auto &cells = instances[module];
+		auto &types = instance_types[module];
+		cells.clear();
+		types.clear();
+		for (auto cell : module->cells())
+			if (d->module(cell->type) != nullptr) {
+				cells.push_back(cell);
+				types.insert(cell->type);
+			}
+	}
+};
+
 // Carry unused signals, constants and tie-togethers across one module boundary, and
 // return the modules that were rewritten. Every module is indexed as it stands when
 // the round starts, so a fact pushed into a module only moves on in the next round.
-static pool<Module *> run_round(RTLIL::Design *d)
+//
+// *dirty* holds the modules that changed since the last round, or is null on the first.
+// Every other module is as the last round left it, having found nothing to do there, so
+// it keeps its index, and it finds nothing again unless a parent of it changed (new usage
+// data) or a child did (a new index to apply). Skipping those takes no new names, so the
+// result is the same as indexing and visiting every module in every round.
+static pool<Module *> run_round(RTLIL::Design *d, RoundState &st, const pool<Module *> *dirty)
 {
-	dict<IdString, ModuleIndex> indices;
-	for (auto module : d->modules()) {
-		log_debug("Building index for %s\n", module);
-		indices.emplace(module->name, ModuleIndex(module));
+	// The children of a changed module, as it instantiated them before and after the change
+	pool<IdString> new_usage;
+	for (auto module : dirty ? std::vector<Module *>(dirty->begin(), dirty->end()) : d->modules()) {
+		if (dirty)
+			for (auto type : st.instance_types.at(module))
+				new_usage.insert(type);
+		st.index(d, module);
+		for (auto type : st.instance_types.at(module))
+			new_usage.insert(type);
 	}
+	auto changed_since = [&](IdString name) {
+		Module *module = d->module(name);
+		return !dirty || (module != nullptr && dirty->count(module));
+	};
 
+	auto selected = d->selected_modules(RTLIL::SELECT_WHOLE_ONLY, RTLIL::SB_UNBOXED_CMDERR);
 	dict<IdString, UsageData> usage_datas;
-	for (auto module : d->selected_modules(RTLIL::SELECT_WHOLE_ONLY, RTLIL::SB_UNBOXED_CMDERR)) {
+	for (auto module : selected) {
 		if (module->get_bool_attribute(ID::top) || is_dw_module(module))
+			continue;
+		if (!changed_since(module->name) && !new_usage.count(module->name))
 			continue;
 
 		log_debug("Starting usage data for %s\n", module);
@@ -460,38 +502,47 @@ static pool<Module *> run_round(RTLIL::Design *d)
 	}
 
 	for (auto module : d->modules()) {
-		for (auto cell : module->cells()) {
+		for (auto cell : st.instances.at(module)) {
 			if (usage_datas.count(cell->type)) {
 				log_debug("Account for instance %s of %s in %s\n", cell, cell->type.unescape(), module);
-				usage_datas.at(cell->type).refine(cell, indices.at(module->name));
+				usage_datas.at(cell->type).refine(cell, st.indices.at(module->name));
 			}
 		}
 	}
 
 	pool<Module *> changed;
-	for (auto module : d->selected_modules(RTLIL::SELECT_WHOLE_ONLY, RTLIL::SB_UNBOXED_CMDERR)) {
+	for (auto module : selected) {
 		if (is_dw_module(module)) {
 			log_debug("Skipping DW module %s\n", log_id(module));
 			continue;
 		}
 
-		ModuleIndex &parent_index = indices.at(module->name);
+		ModuleIndex &parent_index = st.indices.at(module->name);
 
 		// Rewrites the module's own body: constants and ties substituted for its
 		// inputs, unused outputs disconnected.
+		bool rewritten = false;
 		if (usage_datas.count(module->name)) {
 			log_debug("Applying usage data changes to %s\n", module);
-			if (usage_datas.at(module->name).apply_changes(parent_index))
+			if (usage_datas.at(module->name).apply_changes(parent_index)) {
 				changed.insert(module);
+				rewritten = true;
+			}
 		}
 
 		// Rewrites this module around each instance: a child's constant outputs
 		// connected in, unused child inputs disconnected.
-		for (auto cell : module->cells()) {
+		auto &cells = st.instances.at(module);
+		bool fresh = rewritten || changed_since(module->name);
+		for (auto cell : cells)
+			fresh = fresh || changed_since(cell->type);
+		if (!fresh)
+			continue;
+		for (auto cell : cells) {
 			Module *child = d->module(cell->type);
-			if (child != nullptr && !is_dw_module(child) && indices.count(cell->type)) {
+			if (child != nullptr && !is_dw_module(child) && st.indices.count(cell->type)) {
 				log_debug("Applying changes to instance %s of %s in %s\n", cell, cell->type.unescape(), module);
-				if (indices.at(cell->type).apply_changes(parent_index, cell))
+				if (st.indices.at(cell->type).apply_changes(parent_index, cell))
 					changed.insert(module);
 			}
 		}
@@ -632,8 +683,13 @@ struct OptHierPass : Pass {
 		bool saturated = false;
 		// modules whose fold loop hit its cap with work left, owed another round's cleanup
 		pool<Module *> unfinished;
+		RoundState state;
+		// what the last round and the optimization after it touched
+		pool<Module *> dirty;
+		bool first = true;
 		while (true) {
-			pool<Module *> changed = run_round(d);
+			pool<Module *> changed = run_round(d, state, first ? nullptr : &dirty);
+			first = false;
 			changed.insert(unfinished.begin(), unfinished.end());
 			unfinished.clear();
 			if (changed.empty()) {
@@ -680,6 +736,7 @@ struct OptHierPass : Pass {
 				Pass::call_on_selection(d, select_modules(d, folding), opt_expr_cmd);
 				Pass::call_on_selection(d, select_modules(d, folding), opt_clean_cmd);
 			}
+			dirty = std::move(changed);
 		}
 
 		if (max_iter != 1) {
