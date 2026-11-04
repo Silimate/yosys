@@ -1,0 +1,43 @@
+# opt_dff splits a register by enable; each part keeps the rtl_bind and rtl_bind_status
+# entries of its own Q bits, merged back into ranges.
+read_verilog <<EOT
+module top(input clk, input e0, input e1, input [5:0] d, output reg [5:0] q);
+	always @(posedge clk) begin
+		if (e0) q[2:0] <= d[2:0];
+		if (e1) q[5:3] <= d[5:3];
+	end
+endmodule
+EOT
+proc
+opt_clean
+select -assert-count 1 t:$dff
+# a/8[2:3] continues into a/8[4] across tokens; b is unbound at Q[3]
+setattr -set rtl_bind "a/8[2:3] a/8[4] - b/4[0:1]" t:$dff
+setattr -set rtl_bind_status "bound*3 absent bound*2" t:$dff
+opt_dff
+select -assert-count 2 t:$dffe
+# `?` stands in for the brackets and spaces, which a select pattern cannot spell
+select -assert-count 1 t:$dffe a:rtl_bind=a/8?2:4? %i
+select -assert-count 1 t:$dffe a:rtl_bind=-?b/4?0:1? %i
+select -assert-count 1 t:$dffe a:rtl_bind_status=bound*3 %i
+select -assert-count 1 t:$dffe a:rtl_bind_status=absent?bound*2 %i
+
+# An attribute that does not match the register's width is dropped rather than sliced
+design -reset
+read_verilog <<EOT
+module top(input clk, input e0, input e1, input [1:0] d, output reg [1:0] q);
+	always @(posedge clk) begin
+		if (e0) q[0] <= d[0];
+		if (e1) q[1] <= d[1];
+	end
+endmodule
+EOT
+proc
+opt_clean
+setattr -set rtl_bind "a/8[0:2]" t:$dff
+setattr -set rtl_bind_status "bound unplaced" t:$dff
+opt_dff
+select -assert-count 2 t:$dffe
+select -assert-none a:rtl_bind
+select -assert-count 1 t:$dffe a:rtl_bind_status=bound %i
+select -assert-count 1 t:$dffe a:rtl_bind_status=unplaced %i
