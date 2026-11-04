@@ -656,15 +656,18 @@ struct OptHierPass : Pass {
 			// opt_dff merges a reset or enable mux into a register only if nothing else
 			// reads it, so first drop logic left reading it for an output the round cut
 			Pass::call_on_selection(d, sel, opt_clean_cmd);
-			if (!sat)
+			if (!sat) {
 				Pass::call_on_selection(d, sel, "opt_dff");
+				Pass::call_on_selection(d, sel, opt_clean_cmd);
+			}
 			// A register opt_dff just folded feeds logic the opt_expr above already passed
 			// over, and that logic can hold another register's D. Both must fold before the
 			// next round, or it sees no constant output and stops. Modules don't affect each
 			// other until the next round, so a module opt_dff left alone has nothing new for
 			// opt_expr or the next opt_dff, and each repeat revisits only the modules the one
 			// before changed. The cap bounds a round's cost; the modules still changing at it
-			// carry on in the next round, so -max_iter bounds it.
+			// carry on in the next round, so -max_iter bounds it. Each module is cleaned
+			// right after the last pass that changed it, so the round needs no final clean.
 			pool<Module *> folding = changed;
 			for (int fold = 0; sat; fold++) {
 				if (fold == max_sat_folds) {
@@ -677,7 +680,6 @@ struct OptHierPass : Pass {
 				Pass::call_on_selection(d, select_modules(d, folding), opt_expr_cmd);
 				Pass::call_on_selection(d, select_modules(d, folding), opt_clean_cmd);
 			}
-			Pass::call_on_selection(d, sel, opt_clean_cmd);
 		}
 
 		if (max_iter != 1) {
