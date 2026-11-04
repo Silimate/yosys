@@ -411,32 +411,50 @@ bool rtl_bind_status_runs(std::string_view value, std::vector<std::pair<std::str
 	return true;
 }
 
-// For each of `bits`, the run of `counts` it falls in and its offset there
-std::vector<std::pair<int, int>> locate_bits(const std::vector<int> &counts, int width, const std::vector<int> &bits)
-{
-	std::vector<int64_t> starts;
-	int64_t total = 0;
-	for (int count : counts) {
-		starts.push_back(total);
-		total += count;
-	}
-	std::vector<std::pair<int, int>> located;
-	located.reserve(bits.size());
-	for (int b : bits) {
-		log_assert(b >= 0 && b < width);
-		int run = std::upper_bound(starts.begin(), starts.end(), int64_t(b)) - starts.begin() - 1;
-		located.push_back({run, int(b - starts[run])});
-	}
-	return located;
-}
+// An attribute value parsed into runs of Q bits, kept for the next slice: opt_dff slices one
+// register once for each enable it splits off, and a register can be a whole memory wide
+template<typename Run>
+struct ParsedRuns {
+	bool parsed = false;
+	std::string value;
+	std::vector<Run> runs;
+	std::vector<int64_t> starts; // the Q bit each run starts at
+	int64_t total = 0; // Q bits in all, 0 for a malformed value
 
-int64_t total_count(const std::vector<int> &counts)
-{
-	int64_t total = 0;
-	for (int count : counts)
-		total += count;
-	return total;
-}
+	template<typename Parse, typename Count>
+	void update(const Const &attr, Parse parse, Count count)
+	{
+		std::string decoded = attr.decode_string();
+		if (parsed && decoded == value)
+			return;
+		parsed = true;
+		value = std::move(decoded);
+		runs.clear();
+		starts.clear();
+		total = 0;
+		if (!parse(value, runs)) {
+			runs.clear();
+			return;
+		}
+		for (auto &run : runs) {
+			starts.push_back(total);
+			total += count(run);
+		}
+	}
+
+	// For each of `bits`, its run and its offset there
+	std::vector<std::pair<int, int>> locate(int width, const std::vector<int> &bits) const
+	{
+		std::vector<std::pair<int, int>> located;
+		located.reserve(bits.size());
+		for (int b : bits) {
+			log_assert(b >= 0 && b < width);
+			int run = std::upper_bound(starts.begin(), starts.end(), int64_t(b)) - starts.begin() - 1;
+			located.push_back({run, int(b - starts[run])});
+		}
+		return located;
+	}
+};
 
 } // namespace
 
@@ -516,23 +534,22 @@ std::string YOSYS_NAMESPACE_PREFIX rtl_bind_status_compress(const std::vector<st
 }
 
 // Keep only some of a width-bit cell's rtl_bind and rtl_bind_status entries (the Q bits in `bits`).
-// Each is read as runs rather than expanded to one entry per bit: a register can be a whole memory
-// wide, and opt_dff slices it once per enable it finds.
+// Each is read as runs rather than expanded to one entry per bit.
 void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, const std::vector<int> &bits)
 {
+	static thread_local ParsedRuns<RtlBindRun> bind;
+	static thread_local ParsedRuns<std::pair<std::string_view, int>> status;
+
 	auto it = attributes.find(ID(rtl_bind));
 	if (it != attributes.end()) {
-		std::string value = it->second.decode_string();
-		std::vector<RtlBindRun> runs;
-		std::vector<int> counts;
-		if (rtl_bind_runs(value, runs))
-			for (auto &run : runs)
-				counts.push_back(run.count);
-		if (total_count(counts) != width) {
+		bind.update(it->second, rtl_bind_runs, [](const RtlBindRun &run) { return run.count; });
+		if (bind.total != width) {
 			attributes.erase(it); // string does not match this cell; drop it rather than lie
 		} else {
 			// parent Q bit b becomes the next bit of the slice; written as rtl_bind_compress writes
-			auto kept = locate_bits(counts, width, bits);
+			auto &runs = bind.runs;
+			auto kept = bind.locate(width, bits);
+			auto bit_of = [&](size_t k) { return runs[kept[k].first].first + kept[k].second; };
 			std::string out;
 			for (size_t i = 0; i < kept.size();) {
 				if (!out.empty())
@@ -543,7 +560,6 @@ void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attribute
 					i++;
 					continue;
 				}
-				auto bit_of = [&](size_t k) { return runs[kept[k].first].first + kept[k].second; };
 				size_t j = i + 1;
 				while (j < kept.size() && !runs[kept[j].first].obj.empty() && runs[kept[j].first].obj == run.obj &&
 						runs[kept[j].first].width == run.width && bit_of(j) == bit_of(j - 1) + 1)
@@ -560,23 +576,18 @@ void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attribute
 
 	it = attributes.find(ID(rtl_bind_status));
 	if (it != attributes.end()) {
-		std::string value = it->second.decode_string();
-		std::vector<std::pair<std::string_view, int>> runs;
-		std::vector<int> counts;
-		if (rtl_bind_status_runs(value, runs))
-			for (auto &run : runs)
-				counts.push_back(run.second);
-		if (total_count(counts) != width) {
+		status.update(it->second, rtl_bind_status_runs, [](const std::pair<std::string_view, int> &run) { return run.second; });
+		if (status.total != width) {
 			attributes.erase(it);
 		} else {
-			auto kept = locate_bits(counts, width, bits);
+			auto kept = status.locate(width, bits);
 			std::string out;
 			for (size_t i = 0, j; i < kept.size(); i = j) {
-				std::string_view status = runs[kept[i].first].first;
-				for (j = i + 1; j < kept.size() && runs[kept[j].first].first == status; j++);
+				std::string_view word = status.runs[kept[i].first].first;
+				for (j = i + 1; j < kept.size() && status.runs[kept[j].first].first == word; j++);
 				if (!out.empty())
 					out += ' ';
-				out += status;
+				out += word;
 				if (j - i > 1)
 					out += "*" + std::to_string(j - i);
 			}
