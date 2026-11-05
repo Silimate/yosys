@@ -66,7 +66,9 @@ jobs:
       CC: clang
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # SILIMATE: macOS builds and tests nightly in test-macos.yml rather than on every
+        # pull request and push, to stay under the GitHub-hosted macOS concurrency limit.
+        os: [ubuntu-latest]
       fail-fast: false
     steps:
       - name: Checkout Yosys
@@ -135,7 +137,8 @@ jobs:
       CC: clang
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # SILIMATE: macOS runs nightly in test-macos.yml, as in build-yosys.
+        os: [ubuntu-latest]
       fail-fast: false
     steps:
       - name: Checkout Yosys
