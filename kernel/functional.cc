@@ -64,7 +64,7 @@ const char *fn_to_string(Fn fn) {
 	case Fn::memory_read: return "memory_read";
 	case Fn::memory_write: return "memory_write";
 	}
-	log_error("fn_to_string: unknown Functional::Fn value %d", (int)fn);
+	log_error("fn_to_string: unknown Functional::Fn value %d\n", (int)fn);
 }
 
 vector<IRInput const*> IR::inputs(IdString kind) const {
@@ -302,6 +302,8 @@ public:
 			return factory.bitwise_not(a);
 		}else if(cellType == ID($pos)){
 			return factory.extend(inputs.at(ID(A)), y_width, a_signed);
+		}else if(cellType == ID($barrier)){
+			return inputs.at(ID(A));
 		}else if(cellType == ID($neg)){
 			Node a = factory.extend(inputs.at(ID(A)), y_width, a_signed);
 			return factory.unary_minus(a);

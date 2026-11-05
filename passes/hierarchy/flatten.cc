@@ -20,6 +20,7 @@
 #include "kernel/yosys.h"
 #include "kernel/utils.h"
 #include "kernel/sigtools.h"
+#include "kernel/ffinit.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -68,6 +69,8 @@ struct FlattenWorker
 	bool create_scopeinfo = true;
 	bool create_scopename = false;
 	std::string separator = ".";
+	bool barriers = false;
+	bool added_barriers = false;
 
 	template<class T>
 	void map_attributes(RTLIL::Cell *cell, T *object, IdString orig_object_name)
@@ -255,7 +258,30 @@ struct FlattenWorker
 				log_error("Cell port %s.%s.%s is driving constant bits: %s <= %s\n",
 					module, cell, port_it.first.unescape(), log_signal(new_conn.first), log_signal(new_conn.second));
 
-			module->connect(new_conn);
+			if (barriers && !(tpl_wire->port_input && tpl_wire->port_output)) {
+				// Drive public output wires with barriers and the rest with
+				// connections
+				RTLIL::SigSig skip_conn, barrier_conn;
+
+				for (int i = 0; i < GetSize(new_conn.first); i++) {
+					const auto lhs = new_conn.first[i], rhs = new_conn.second[i];
+					log_assert(lhs.is_wire());
+					auto& sigsig = !lhs.wire->name.isPublic() || lhs.wire->port_input ? skip_conn : barrier_conn;
+					sigsig.first.append(lhs);
+					sigsig.second.append(rhs);
+				}
+
+				if (!skip_conn.first.empty())
+					module->connect(skip_conn);
+
+				if (!barrier_conn.first.empty()) {
+					module->addBarrier(NEW_ID, barrier_conn.second, barrier_conn.first);
+					added_barriers = true;
+				}
+			} else {
+				module->connect(new_conn);
+			}
+
 			sigmap.add(new_conn.first, new_conn.second);
 		}
 
@@ -295,6 +321,7 @@ struct FlattenWorker
 
 		SigMap sigmap(module);
 		std::vector<RTLIL::Cell*> worklist = module->selected_cells();
+		added_barriers = false;
 		while (!worklist.empty())
 		{
 			RTLIL::Cell *cell = worklist.back();
@@ -318,6 +345,12 @@ struct FlattenWorker
 			// added during flattening are black boxes, and flattening is finished in one pass. However, when flattening
 			// individual modules, this isn't the case, and the newly added cells might have to be flattened further.
 			flatten_cell(design, module, cell, tpl, sigmap, worklist, separator);
+		}
+
+		if (added_barriers) {
+			SigMap init_sigmap(module);
+			FfInitVals initvals(&init_sigmap, module);
+			initvals.move_barrier_inits(module);
 		}
 	}
 };
@@ -361,6 +394,10 @@ struct FlattenPass : public Pass {
 		log("        Don't remove unused submodules, leave a flattened version of each\n");
 		log("        submodule in the design.\n");
 		log("\n");
+		log("    -barriers\n");
+		log("        Introduce an optimization barrier (a $barrier cell) when a flattened\n");
+		log("        module drives a public wire (experimental).\n");
+		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
@@ -394,6 +431,11 @@ struct FlattenPass : public Pass {
 			}
 			if (args[argidx] == "-nocleanup") {
 				cleanup = false;
+				continue;
+			}
+			if (args[argidx] == "-barriers") {
+				worker.barriers = true;
+				log_experimental("flatten -barriers");
 				continue;
 			}
 			break;

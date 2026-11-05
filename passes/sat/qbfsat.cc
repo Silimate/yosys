@@ -182,10 +182,10 @@ void assume_miter_outputs(RTLIL::Module *module, bool assume_neg) {
 	if (wires_to_assume.size() == 0)
 		return;
 	else {
-		log("Adding $assume cell for output(s): ");
+		std::string message = "Adding $assume cell for output(s): ";
 		for (auto w : wires_to_assume)
-			log("\"%s\" ", w->name);
-		log("\n");
+			message += stringf("\"%s\" ", w->name);
+		log("%s\n", message);
 	}
 
 	if (assume_neg) {
@@ -331,6 +331,7 @@ QbfSolutionType qbf_solve(RTLIL::Module *mod, const QbfSolveOptions &opt) {
 				RTLIL::SigSpec::parse_sel(wire, design, module, wire_to_optimize_name.str());
 
 				ConstEval ce(module);
+				ce.model_barriers = true;
 				value = wire;
 				if (!ce.eval(value, undef))
 					log_cmd_error("Failed to evaluate signal %s: Missing value for %s.\n", log_signal(wire), log_signal(undef));
