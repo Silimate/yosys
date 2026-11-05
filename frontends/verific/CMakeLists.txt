@@ -2,7 +2,7 @@ if (NOT YOSYS_ENABLE_VERIFIC)
 	# Stub interface library.
 	add_library(verific INTERFACE)
 	set(verific_data_files)
-elseif (NOT TARGET verific)
+else()
 	if (NOT YOSYS_VERIFIC_COMPONENTS)
 		get_verific_components(YOSYS_VERIFIC_COMPONENTS)
 	endif()

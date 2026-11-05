@@ -1,0 +1,9 @@
+# Multi-port RAMs follow the dual-port rules: an array is a RAM only if every access is
+# indexed. The whole-array reset keeps top's mem a plain array (unpatched, Verific extracts a
+# RAM that fails to import), while plain_ram is still extracted
+verific -cfg veri_extract_multiport_rams 1
+verific -cfg veri_allow_ram_reset 1
+verific -sv multiport_ram_rules.sv
+verific -import top plain_ram
+select -assert-none top/t:$memwr
+select -assert-count 1 plain_ram/t:$memwr

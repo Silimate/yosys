@@ -1,0 +1,7 @@
+# File-list paths that do not exist are looked up in the include directories given so far,
+# so +incdir+nested resolves inside incdir, and the sources inside both
+logger -expect log "VERI-5000" 4
+verific -F flist/incdir.f
+logger -check-expected
+verific -import inc_top
+select -assert-mod-count 3 inc_top inc_leaf inc_leaf2

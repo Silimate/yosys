@@ -1,0 +1,5 @@
+# translate_off/on is ignored in DesignWare (DW*) files only
+verific -vlog2k DW_translate_off.v translate_off.v
+verific -import DW_translate_off translate_off
+select -assert-count 1 DW_translate_off/t:$not
+select -assert-none translate_off/t:$not

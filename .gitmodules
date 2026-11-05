@@ -1,6 +1,6 @@
 [submodule "verific"]
 	path = verific
-	url = git@github.com:silimate/verific.git
+	url = git@github.com:Silimate/verific-new.git
 [submodule "abc"]
 	path = abc
 	url = git@github.com:Silimate/abc.git

@@ -1,0 +1,6 @@
+# No plusargs exist at elaboration: both calls evaluate to 0 with a warning
+logger -expect warning "VERI-5001" 2
+verific -sv plusargs.sv
+verific -import top
+logger -check-expected
+sat -verify -prove o 2 -prove f 0 top
