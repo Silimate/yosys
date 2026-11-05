@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v7
       - id: version
         run: |
-          python3 -m pip install githubkit
+          python3 -m pip install githubkit "hishel<2"
           echo "version=$(python3 .github/workflows/wheels/silimate_get_version.py --github-token $GH_TOKEN silimate/yosys-wheels)" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ secrets.YOSYS_WHEELS_TOKEN }}
