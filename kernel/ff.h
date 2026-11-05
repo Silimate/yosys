@@ -162,6 +162,11 @@ std::string rtl_bind_status_compress(const std::vector<std::string> &bits);
 // dropping either one that does not match the cell
 void slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, const std::vector<int> &bits);
 void slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, int lsb, int msb);
+// The same, reading the cell's attributes `from` and writing a slice's `to` (which may be `from`):
+// `to` gets the narrowed value, or loses the attribute where the cell's does not match it. A slice
+// then need not copy a long attribute before narrowing it, as splitcells would for every bit.
+void slice_rtl_bind_attr(const dict<IdString, Const> &from, dict<IdString, Const> &to, int width, const std::vector<int> &bits);
+void slice_rtl_bind_attr(const dict<IdString, Const> &from, dict<IdString, Const> &to, int width, int lsb, int msb);
 
 struct FfData : FfTypeData {
 	Module *module;

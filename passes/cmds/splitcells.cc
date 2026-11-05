@@ -25,6 +25,49 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+// SILIMATE: what every slice of a cell copies from it: its type, connections, parameters and
+// attributes, but with the ports, parameters and attributes that get cut left empty, to be set
+// from the slice's own bits. Copying them at full width into each slice and then cutting them
+// down (addCell(name, cell)) cost the cell's width per slice, so blasting a register took time
+// quadratic in its width, and the long `rtl_bind` each slice copied and dropped fragmented the
+// heap: 26 KB per bit of a memory register. Keys stay where they are in the cell, so slices come
+// out as before.
+struct SliceTemplate
+{
+	dict<IdString, SigSpec> connections;
+	dict<IdString, Const> parameters;
+	dict<IdString, Const> attributes;
+
+	template<typename Keys, typename Value>
+	static void clear(dict<IdString, Value> &values, const Keys &keys)
+	{
+		for (IdString key : keys) {
+			auto it = values.find(key);
+			if (it != values.end())
+				it->second = Value();
+		}
+	}
+
+	template<typename Ports, typename Params, typename Attrs>
+	SliceTemplate(const Cell *cell, const Ports &cut_ports, const Params &cut_params, const Attrs &cut_attrs) :
+			connections(cell->connections_), parameters(cell->parameters), attributes(cell->attributes)
+	{
+		clear(connections, cut_ports);
+		clear(parameters, cut_params);
+		clear(attributes, cut_attrs);
+	}
+
+	// Same as module->addCell(name, cell), but with the cut ports, parameters and attributes empty
+	Cell *add(Module *module, IdString name, const Cell *cell) const
+	{
+		Cell *slice = module->addCell(name, cell->type);
+		slice->connections_ = connections;
+		slice->parameters = parameters;
+		slice->attributes = attributes;
+		return slice;
+	}
+};
+
 struct SplitcellsWorker
 {
 	Module *module;
@@ -96,6 +139,7 @@ struct SplitcellsWorker
 			slices.push_back(GetSize(outsig));
 
 			log_debug("Splitting %s cell %s/%s into %d slices:\n", cell->type.unescape(), module, cell, GetSize(slices)-1);
+			SliceTemplate slice_template(cell, std::vector<IdString>{ID::A, ID::B, ID::Y}, std::vector<IdString>{}, std::vector<IdString>{}); // SILIMATE
 			for (int i = 1; i < GetSize(slices); i++)
 			{
 				int slice_msb = slices[i]-1;
@@ -105,9 +149,9 @@ struct SplitcellsWorker
 						stringf("%c%d%c", format[0], slice_lsb, format[1]) :
 						stringf("%c%d%c%d%c", format[0], slice_msb, format[2], slice_lsb, format[1])));
 
-				Cell *slice = module->addCell(slice_name, cell);
+				Cell *slice = slice_template.add(module, slice_name, cell); // SILIMATE
 
-				auto slice_signal = [&](SigSpec old_sig) -> SigSpec {
+				auto slice_signal = [&](const SigSpec &old_sig) -> SigSpec {
 					SigSpec new_sig;
 					for (int offset = slice_lsb; offset < GetSize(old_sig); offset += GetSize(outsig)) {
 						int length = std::min(GetSize(old_sig)-offset, slice_msb-slice_lsb+1);
@@ -116,17 +160,18 @@ struct SplitcellsWorker
 					return new_sig;
 				};
 
-				slice->setPort(ID::A, slice_signal(slice->getPort(ID::A)));
+				// SILIMATE: cut from the cell's ports, not from full-width copies in the slice
+				slice->setPort(ID::A, slice_signal(cell->getPort(ID::A)));
 				if (slice->hasParam(ID::A_WIDTH))
 					slice->setParam(ID::A_WIDTH, GetSize(slice->getPort(ID::A)));
 
 				if (slice->hasPort(ID::B)) {
-					slice->setPort(ID::B, slice_signal(slice->getPort(ID::B)));
+					slice->setPort(ID::B, slice_signal(cell->getPort(ID::B)));
 					if (slice->hasParam(ID::B_WIDTH))
 						slice->setParam(ID::B_WIDTH, GetSize(slice->getPort(ID::B)));
 				}
 
-				slice->setPort(ID::Y, slice_signal(slice->getPort(ID::Y)));
+				slice->setPort(ID::Y, slice_signal(cell->getPort(ID::Y)));
 				if (slice->hasParam(ID::Y_WIDTH))
 					slice->setParam(ID::Y_WIDTH, GetSize(slice->getPort(ID::Y)));
 				if (slice->hasParam(ID::WIDTH))
@@ -166,6 +211,7 @@ struct SplitcellsWorker
 			slices.push_back(GetSize(outsig));
 
 			log_debug("Splitting %s cell %s/%s into %d slices:\n", cell->type.unescape(), module, cell, GetSize(slices)-1);
+			SliceTemplate slice_template(cell, splitports, splitparams, std::vector<IdString>{ID(rtl_bind), ID(rtl_bind_status)}); // SILIMATE
 			for (int i = 1; i < GetSize(slices); i++)
 			{
 				int slice_msb = slices[i]-1;
@@ -174,28 +220,21 @@ struct SplitcellsWorker
 				IdString slice_name = module->uniquify(ff_slice_name(cell->name.str(),
 						cell->getPort(ID::Q), slice_lsb, slice_msb, format, blast));
 
-				Cell *slice = module->addCell(slice_name, cell);
+				Cell *slice = slice_template.add(module, slice_name, cell); // SILIMATE
 
-				for (IdString portname : splitports) {
-					if (slice->hasPort(portname)) {
-						SigSpec sig = slice->getPort(portname);
-						sig = sig.extract(slice_lsb, slice_msb-slice_lsb+1);
-						slice->setPort(portname, sig);
-					}
-				}
+				// SILIMATE: cut from the cell's ports and parameters, not from full-width copies in the slice
+				for (IdString portname : splitports)
+					if (cell->hasPort(portname))
+						slice->setPort(portname, cell->getPort(portname).extract(slice_lsb, slice_msb-slice_lsb+1));
 
-				for (IdString paramname : splitparams) {
-					if (slice->hasParam(paramname)) {
-						Const val = slice->getParam(paramname);
-						val = val.extract(slice_lsb, slice_msb-slice_lsb+1);
-						slice->setParam(paramname, val);
-					}
-				}
+				for (IdString paramname : splitparams)
+					if (cell->hasParam(paramname))
+						slice->setParam(paramname, cell->getParam(paramname).extract(slice_lsb, slice_msb-slice_lsb+1));
 
 				slice->setParam(ID::WIDTH, GetSize(slice->getPort(ID::Q)));
 
-				// Add RTL bind attribute to the slice from a wide cell
-				slice_rtl_bind_attr(slice->attributes, GetSize(cell->getPort(ID::Q)), slice_lsb, slice_msb); // SILIMATE
+				// Add RTL bind attribute to the slice from a wide cell, read from the cell's rather than a copy
+				slice_rtl_bind_attr(cell->attributes, slice->attributes, GetSize(cell->getPort(ID::Q)), slice_lsb, slice_msb); // SILIMATE
 
 				log_debug("  slice %d: %s => %s\n", i, slice_name.unescape(), log_signal(slice->getPort(ID::Q)));
 			}
