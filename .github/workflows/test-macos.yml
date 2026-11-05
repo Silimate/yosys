@@ -1,7 +1,7 @@
 # SILIMATE: the macOS build and tests from test-build.yml, run nightly on main instead of on
 # every pull request and push. The organization shares a small pool of GitHub-hosted macOS
 # runners, and per-PR macOS jobs kept it full. A pull request that edits this workflow or the
-# build environment action runs it too, so changes to the macOS setup are tested before merge.
+# setup actions it uses runs it too, so changes to the macOS setup are tested before merge.
 name: Build and run tests (macOS nightly)
 
 on:
@@ -12,6 +12,7 @@ on:
     paths:
       - '.github/workflows/test-macos.yml'
       - '.github/actions/setup-build-env/**'
+      - '.github/actions/setup-iverilog/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
