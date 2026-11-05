@@ -334,33 +334,147 @@ FfData::FfData(FfInitVals *initvals, Cell *cell_) : FfData(cell_->module, initva
 }
 
 // SILIMATE: `rtl_bind` attribute helpers, see kernel/ff.h
-std::vector<RtlBindBit> YOSYS_NAMESPACE_PREFIX rtl_bind_expand(const std::string &value)
+
+namespace {
+
+// The whitespace-separated tokens of an attribute value, as `istringstream >>` splits them
+std::vector<std::string_view> attr_tokens(std::string_view value)
 {
-	auto number = [](const std::string &s) {
-		return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos ? atoi(s.c_str()) : -1;
+	static constexpr const char *space = " \t\n\v\f\r";
+	std::vector<std::string_view> tokens;
+	for (size_t begin = value.find_first_not_of(space); begin != std::string_view::npos;) {
+		size_t end = value.find_first_of(space, begin);
+		tokens.push_back(value.substr(begin, end == std::string_view::npos ? end : end - begin));
+		begin = end == std::string_view::npos ? end : value.find_first_not_of(space, end);
+	}
+	return tokens;
+}
+
+// One `rtl_bind` token: `count` Q bits holding bits first, first + 1, ... of obj, or one unbound
+// Q bit (`-`) when obj is empty
+struct RtlBindRun {
+	std::string_view obj;
+	int width = 0;
+	int first = 0;
+	int count = 1;
+};
+
+// The tokens of an `rtl_bind` value; false on a malformed one
+bool rtl_bind_runs(std::string_view value, std::vector<RtlBindRun> &runs)
+{
+	auto number = [](std::string_view s) {
+		return !s.empty() && s.find_first_not_of("0123456789") == std::string_view::npos ? atoi(std::string(s).c_str()) : -1;
 	};
-	std::vector<RtlBindBit> bits;
-	std::istringstream tokens(value);
-	for (std::string token; tokens >> token;) {
+	for (std::string_view token : attr_tokens(value)) {
+		RtlBindRun run;
 		if (token == "-") { // this Q bit has no bind
-			bits.emplace_back();
+			runs.push_back(run);
 			continue;
 		}
 		// token is obj/width[first] or obj/width[first:last]
 		size_t open = token.rfind('['), slash = token.rfind('/', open);
-		if (open == std::string::npos || slash == std::string::npos || slash == 0 || token.back() != ']')
-			return {}; // malformed: drop the whole attribute
-		std::string range = token.substr(open + 1, token.size() - open - 2); // inside the []
+		if (open == std::string_view::npos || slash == std::string_view::npos || slash == 0 || token.back() != ']')
+			return false;
+		std::string_view range = token.substr(open + 1, token.size() - open - 2); // inside the []
 		size_t colon = range.find(':');
-		RtlBindBit bind;
-		bind.valid = true;
-		bind.obj = token.substr(0, slash);
-		bind.width = number(token.substr(slash + 1, open - slash - 1)); // between / and [
+		run.obj = token.substr(0, slash);
+		run.width = number(token.substr(slash + 1, open - slash - 1)); // between / and [
 		int first = number(range.substr(0, colon));
-		int last = colon == std::string::npos ? first : number(range.substr(colon + 1));
-		if (bind.width < 0 || first < 0 || last < first || last >= bind.width)
-			return {};
-		for (bind.bit = first; bind.bit <= last; bind.bit++)
+		int last = colon == std::string_view::npos ? first : number(range.substr(colon + 1));
+		if (run.width < 0 || first < 0 || last < first || last >= run.width)
+			return false;
+		run.first = first;
+		run.count = last - first + 1;
+		runs.push_back(run);
+	}
+	return true;
+}
+
+// The runs of an `rtl_bind_status` value, `status*count` or `status`; false on a malformed one
+bool rtl_bind_status_runs(std::string_view value, std::vector<std::pair<std::string_view, int>> &runs)
+{
+	size_t total = 0;
+	for (std::string_view token : attr_tokens(value)) {
+		size_t star = token.find('*');
+		std::string_view status = token.substr(0, star), count = star == std::string_view::npos ? "1" : token.substr(star + 1);
+		bool known = std::any_of(std::begin(RTL_BIND_STATUS_WORDS), std::end(RTL_BIND_STATUS_WORDS),
+				[&](const char *word) { return status == word; });
+		if (!known || count.empty() || count.size() > 7 || count.find_first_not_of("0123456789") != std::string_view::npos)
+			return false;
+		// an empty run, or one longer than any cell, is malformed too and must not allocate its length
+		int n = atoi(std::string(count).c_str());
+		if (n == 0 || total + n > (1 << 20))
+			return false;
+		total += n;
+		runs.push_back({status, n});
+	}
+	return true;
+}
+
+// An attribute value parsed into runs of Q bits, kept for the next slice: opt_dff slices one
+// register once for each enable it splits off, and a register can be a whole memory wide
+template<typename Run>
+struct ParsedRuns {
+	bool parsed = false;
+	std::string value;
+	std::vector<Run> runs;
+	std::vector<int64_t> starts; // the Q bit each run starts at
+	int64_t total = 0; // Q bits in all, 0 for a malformed value
+
+	template<typename Parse, typename Count>
+	void update(const Const &attr, Parse parse, Count count)
+	{
+		std::string decoded = attr.decode_string();
+		if (parsed && decoded == value)
+			return;
+		parsed = true;
+		value = std::move(decoded);
+		runs.clear();
+		starts.clear();
+		total = 0;
+		if (!parse(value, runs)) {
+			runs.clear();
+			return;
+		}
+		for (auto &run : runs) {
+			starts.push_back(total);
+			total += count(run);
+		}
+	}
+
+	// For each of `bits`, its run and its offset there
+	std::vector<std::pair<int, int>> locate(int width, const std::vector<int> &bits) const
+	{
+		std::vector<std::pair<int, int>> located;
+		located.reserve(bits.size());
+		for (int b : bits) {
+			log_assert(b >= 0 && b < width);
+			int run = std::upper_bound(starts.begin(), starts.end(), int64_t(b)) - starts.begin() - 1;
+			located.push_back({run, int(b - starts[run])});
+		}
+		return located;
+	}
+};
+
+} // namespace
+
+std::vector<RtlBindBit> YOSYS_NAMESPACE_PREFIX rtl_bind_expand(const std::string &value)
+{
+	std::vector<RtlBindRun> runs;
+	if (!rtl_bind_runs(value, runs))
+		return {}; // malformed: drop the whole attribute
+	std::vector<RtlBindBit> bits;
+	for (auto &run : runs) {
+		RtlBindBit bind;
+		if (run.obj.empty()) {
+			bits.push_back(bind);
+			continue;
+		}
+		bind.valid = true;
+		bind.obj = std::string(run.obj);
+		bind.width = run.width;
+		int last = run.first + run.count - 1;
+		for (bind.bit = run.first; bind.bit <= last; bind.bit++)
 			bits.push_back(bind); // one entry per bit in the range
 	}
 	return bits;
@@ -395,21 +509,12 @@ std::string YOSYS_NAMESPACE_PREFIX rtl_bind_compress(const std::vector<RtlBindBi
 // `rtl_bind_status` runs, one word per Q bit: "bound*2 absent" -> bound, bound, absent
 std::vector<std::string> YOSYS_NAMESPACE_PREFIX rtl_bind_status_expand(const std::string &value)
 {
+	std::vector<std::pair<std::string_view, int>> runs;
+	if (!rtl_bind_status_runs(value, runs))
+		return {}; // malformed: drop the whole attribute
 	std::vector<std::string> bits;
-	std::istringstream tokens(value);
-	for (std::string token; tokens >> token;) {
-		size_t star = token.find('*');
-		std::string status = token.substr(0, star), count = star == std::string::npos ? "1" : token.substr(star + 1);
-		bool known = std::any_of(std::begin(RTL_BIND_STATUS_WORDS), std::end(RTL_BIND_STATUS_WORDS),
-				[&](const char *word) { return status == word; });
-		if (!known || count.empty() || count.size() > 7 || count.find_first_not_of("0123456789") != std::string::npos)
-			return {}; // malformed: drop the whole attribute
-		// an empty run, or one longer than any cell, is malformed too and must not allocate its length
-		int n = atoi(count.c_str());
-		if (n == 0 || bits.size() + n > (1 << 20))
-			return {};
-		bits.insert(bits.end(), n, status);
-	}
+	for (auto &[status, n] : runs)
+		bits.insert(bits.end(), n, std::string(status));
 	return bits;
 }
 
@@ -428,36 +533,65 @@ std::string YOSYS_NAMESPACE_PREFIX rtl_bind_status_compress(const std::vector<st
 	return out;
 }
 
-// Keep only some of a width-bit cell's rtl_bind and rtl_bind_status entries (the Q bits in `bits`)
+// Keep only some of a width-bit cell's rtl_bind and rtl_bind_status entries (the Q bits in `bits`).
+// Each is read as runs rather than expanded to one entry per bit.
 void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, const std::vector<int> &bits)
 {
+	static thread_local ParsedRuns<RtlBindRun> bind;
+	static thread_local ParsedRuns<std::pair<std::string_view, int>> status;
+
 	auto it = attributes.find(ID(rtl_bind));
 	if (it != attributes.end()) {
-		std::vector<RtlBindBit> all = rtl_bind_expand(it->second.decode_string());
-		if (GetSize(all) != width) {
+		bind.update(it->second, rtl_bind_runs, [](const RtlBindRun &run) { return run.count; });
+		if (bind.total != width) {
 			attributes.erase(it); // string does not match this cell; drop it rather than lie
 		} else {
-			std::vector<RtlBindBit> kept;
-			for (int b : bits) {
-				log_assert(b >= 0 && b < width);
-				kept.push_back(all[b]); // parent Q bit b becomes the next bit of the slice
+			// parent Q bit b becomes the next bit of the slice; written as rtl_bind_compress writes
+			auto &runs = bind.runs;
+			auto kept = bind.locate(width, bits);
+			auto bit_of = [&](size_t k) { return runs[kept[k].first].first + kept[k].second; };
+			std::string out;
+			for (size_t i = 0; i < kept.size();) {
+				if (!out.empty())
+					out += ' ';
+				const RtlBindRun &run = runs[kept[i].first];
+				if (run.obj.empty()) {
+					out += '-';
+					i++;
+					continue;
+				}
+				size_t j = i + 1;
+				while (j < kept.size() && !runs[kept[j].first].obj.empty() && runs[kept[j].first].obj == run.obj &&
+						runs[kept[j].first].width == run.width && bit_of(j) == bit_of(j - 1) + 1)
+					j++;
+				out += std::string(run.obj) + "/" + std::to_string(run.width) + "[" + std::to_string(bit_of(i));
+				if (j - i > 1)
+					out += ":" + std::to_string(bit_of(j - 1));
+				out += "]";
+				i = j;
 			}
-			it->second = Const(rtl_bind_compress(kept));
+			it->second = Const(out);
 		}
 	}
 
 	it = attributes.find(ID(rtl_bind_status));
 	if (it != attributes.end()) {
-		std::vector<std::string> all = rtl_bind_status_expand(it->second.decode_string());
-		if (GetSize(all) != width) {
+		status.update(it->second, rtl_bind_status_runs, [](const std::pair<std::string_view, int> &run) { return run.second; });
+		if (status.total != width) {
 			attributes.erase(it);
 		} else {
-			std::vector<std::string> kept;
-			for (int b : bits) {
-				log_assert(b >= 0 && b < width);
-				kept.push_back(all[b]);
+			auto kept = status.locate(width, bits);
+			std::string out;
+			for (size_t i = 0, j; i < kept.size(); i = j) {
+				std::string_view word = status.runs[kept[i].first].first;
+				for (j = i + 1; j < kept.size() && status.runs[kept[j].first].first == word; j++);
+				if (!out.empty())
+					out += ' ';
+				out += word;
+				if (j - i > 1)
+					out += "*" + std::to_string(j - i);
 			}
-			it->second = Const(rtl_bind_status_compress(kept));
+			it->second = Const(out);
 		}
 	}
 }
