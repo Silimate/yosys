@@ -14,3 +14,9 @@ design -reset
 verific -FF flist/ff.f
 verific -import top
 select -assert-mod-count 2 top leaf
+
+# Several nested lists matched by one wildcard in a relative -F list
+design -reset
+verific -F flist/glob.F
+verific -import top
+select -assert-mod-count 2 top leaf
