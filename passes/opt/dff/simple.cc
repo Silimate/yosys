@@ -516,7 +516,7 @@ struct SimpleContext
 
 	bool try_merge_srst(FfData &ff, Cell *cell, bool &changed)
 	{
-		std::map<ctrls_t, std::vector<int>> groups;
+		std::map<ctrls_t, std::vector<int>, sort_ctrl_by_name> groups; // SILIMATE: name order, see pattern.h
 		std::vector<int> remaining_indices;
 		Const::Builder val_srst_builder(ff.width);
 
@@ -607,7 +607,7 @@ struct SimpleContext
 
 	bool try_merge_ce(FfData &ff, Cell *cell, bool &changed)
 	{
-		std::map<std::pair<patterns_t, ctrls_t>, std::vector<int>> groups;
+		std::map<std::pair<patterns_t, ctrls_t>, std::vector<int>, sort_ctrl_by_name> groups; // SILIMATE: name order, see pattern.h
 		std::vector<int> remaining_indices;
 
 		for (int i = 0; i < ff.width; i++) {
