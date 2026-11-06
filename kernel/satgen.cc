@@ -1325,7 +1325,10 @@ bool SatGen::importCell(RTLIL::Cell *cell, int timestep)
 		return true;
 	}
 
-	if (cell->type.in(ID($_BUF_), ID($equiv)))
+	if (cell->type == ID($barrier) && !model_barriers)
+		return true;
+
+	if (cell->type.in(ID($_BUF_), ID($equiv), ID($barrier)))
 	{
 		std::vector<int> a = importDefSigSpec(cell->getPort(ID::A), timestep);
 		std::vector<int> y = importDefSigSpec(cell->getPort(ID::Y), timestep);
@@ -1395,14 +1398,14 @@ void report_missing_model(bool warn_only, RTLIL::Cell* cell)
 {
 	std::string s;
 	if (cell->is_builtin_ff())
-		s = stringf("No SAT model available for async FF cell %s (%s).  Consider running `async2sync` or `clk2fflogic` first.\n", cell, cell->type.unescape());
+		s = stringf("No SAT model available for async FF cell %s (%s).  Consider running `async2sync` or `clk2fflogic` first.", cell, cell->type.unescape());
 	else
-		s = stringf("No SAT model available for cell %s (%s).\n", cell, cell->type.unescape());
+		s = stringf("No SAT model available for cell %s (%s).", cell, cell->type.unescape());
 
 	if (warn_only) {
-		log_warning_noprefix("%s", s);
+		log_warning_noprefix("%s\n", s);
 	} else {
-		log_error("%s", s);
+		log_error("%s\n", s);
 	}
 }
 

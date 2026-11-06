@@ -1027,9 +1027,9 @@ vector<int> RTLIL::AttrObject::get_intvec_attribute(RTLIL::IdString id) const
 			errno = 0;
 			long value = strtol(s.c_str(), &end, 10);
 			if (end != s.c_str() + s.size())
-				log_cmd_error("Literal for intvec attribute has invalid format");
+				log_cmd_error("Literal for intvec attribute has invalid format\n");
 			if (errno == ERANGE || value < INT_MIN || value > INT_MAX)
-				log_cmd_error("Literal for intvec attribute is out of range");
+				log_cmd_error("Literal for intvec attribute is out of range\n");
 			data.push_back(value);
 		}
 	return data;
@@ -1589,21 +1589,28 @@ namespace {
 
 		InternalCellChecker(const RTLIL::Module *module, RTLIL::Cell *cell) : module(module), cell(cell) { }
 
-		void error(int linenr)
+		void error(int linenr, std::optional<std::string> error_msg = std::nullopt)
 		{
 			std::stringstream buf;
 			RTLIL_BACKEND::dump_cell(buf, "  ", cell);
 
-			log_error("Found error in internal cell %s%s%s (%s) at %s:%d:\n%s",
-					module ? module->name.c_str() : "", module ? "." : "",
-					cell->name.c_str(), cell->type.c_str(), __FILE__, linenr, buf.str().c_str());
+			std::string cell_loc = stringf("%s%s%s (%s) at %s:%d:\n%s", module ? module->name.c_str() : "", module ? "." : "",
+							   cell->name.c_str(), cell->type.c_str(), __FILE__, linenr, buf.str().c_str());
+
+			if (error_msg) {
+				log_error("%s in internal cell %s\n", error_msg->c_str(), cell_loc);
+			} else {
+				log_error("Found error in internal cell %s\n", cell_loc);
+			}
 		}
 
 		int param(RTLIL::IdString name)
 		{
 			auto it = cell->parameters.find(name);
-			if (it == cell->parameters.end())
-				error(__LINE__);
+			if (it == cell->parameters.end()) {
+				std::string err = stringf("Expected to find parameter %s", name.c_str());
+				error(__LINE__, err);
+			}
 			expected_params.insert(name);
 			return it->second.as_int();
 		}
@@ -1642,10 +1649,14 @@ namespace {
 		void port(RTLIL::IdString name, int width)
 		{
 			auto it = cell->connections_.find(name);
-			if (it == cell->connections_.end())
-				error(__LINE__);
-			if (GetSize(it->second) != width)
-				error(__LINE__);
+			if (it == cell->connections_.end()) {
+				std::string err = stringf("Expected to find port %s", name.c_str());
+				error(__LINE__, err);
+			}
+			if (GetSize(it->second) != width) {
+				std::string err = stringf("Expected port to have width %d", width);
+				error(__LINE__, err);
+			}
 			expected_ports.insert(name);
 		}
 
@@ -1673,7 +1684,7 @@ namespace {
 					cell->type.begins_with("$verific$") || cell->type.begins_with("$array:") || cell->type.begins_with("$extern:"))
 				return;
 
-			if (cell->type == ID($buf)) {
+			if (cell->type.in(ID($buf), ID($barrier))) {
 				port(ID::A, param(ID::WIDTH));
 				port(ID::Y, param(ID::WIDTH));
 				check_expected();
@@ -3274,7 +3285,8 @@ DEF_METHOD(LogicNot,   1, ID($logic_not))
 		add ## _func(name, sig_a, sig_y, is_signed, src);   \
 		return sig_y;                                       \
 	} // SILIMATE: Improve the naming
-DEF_METHOD(Buf, sig_a.size(), ID($buf))
+DEF_METHOD(Buf,     sig_a.size(), ID($buf))
+DEF_METHOD(Barrier, sig_a.size(), ID($barrier))
 #undef DEF_METHOD
 
 #define DEF_METHOD(_func, _y_size, _type) \
@@ -4476,7 +4488,7 @@ void RTLIL::Cell::fixup_parameters(bool set_a_signed, bool set_b_signed)
 			type.begins_with("$verific$") || type.begins_with("$array:") || type.begins_with("$extern:"))
 		return;
 
-	if (type == ID($buf) || type == ID($mux) || type == ID($pmux) || type == ID($bmux) || type == ID($bwmux) || type == ID($bweqx)) {
+	if (type == ID($buf) || type == ID($barrier) || type == ID($mux) || type == ID($pmux) || type == ID($bmux) || type == ID($bwmux) || type == ID($bweqx)) {
 		parameters[ID::WIDTH] = GetSize(connections_[ID::Y]);
 		if (type.in(ID($pmux), ID($bmux)))
 			parameters[ID::S_WIDTH] = GetSize(connections_[ID::S]);

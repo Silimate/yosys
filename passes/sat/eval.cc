@@ -55,6 +55,8 @@ struct BruteForceEquivChecker
 		}
 
 		ConstEval ce1(mod1), ce2(mod2);
+		ce1.model_barriers = true;
+		ce2.model_barriers = true;
 		ce1.set(mod1_inputs, inputs.as_const());
 		ce2.set(mod2_inputs, inputs.as_const());
 
@@ -146,6 +148,7 @@ struct VlogHammerReporter
 		SigMap sigmap(module);
 		SatGen satgen(ez.get(), &sigmap);
 		satgen.model_undef = model_undef;
+		satgen.model_barriers = true;
 
 		for (auto c : module->cells())
 			if (!satgen.importCell(c))
@@ -249,6 +252,7 @@ struct VlogHammerReporter
 				RTLIL::Module *module = modules[mod];
 				std::string module_name = module_names[mod].c_str();
 				ConstEval ce(module);
+				ce.model_barriers = true;
 
 				std::vector<RTLIL::State> bits(patterns[idx].begin(), patterns[idx].begin() + total_input_width);
 				for (int i = 0; i < int(inputs.size()); i++) {
@@ -450,6 +454,7 @@ struct EvalPass : public Pass {
 			log_cmd_error("Can't perform EVAL on an empty selection!\n");
 
 		ConstEval ce(module);
+		ce.model_barriers = true;
 
 		for (auto &it : sets) {
 			RTLIL::SigSpec lhs, rhs;
@@ -572,19 +577,21 @@ struct EvalPass : public Pass {
 			log("\n");
 			bool first = true;
 			for (auto &row : tab) {
+				std::string message;
 				for (size_t i = 0; i < row.size(); i++) {
 					int k = int(i) < tab_sep_colidx ? tab_sep_colidx - i - 1 : i;
-					log(" %s%*s", k == tab_sep_colidx ? "| " : "", tab_column_width[k], row[k]);
+					message += stringf(" %s%*s", k == tab_sep_colidx ? "| " : "", tab_column_width[k], row[k]);
 				}
-				log("\n");
+				log("%s\n", message);
 				if (first) {
+					message = "";
 					for (size_t i = 0; i < row.size(); i++) {
 						int k = int(i) < tab_sep_colidx ? tab_sep_colidx - i - 1 : i;
-						log(" %s", k == tab_sep_colidx ? "| " : "");
+						message += stringf(" %s", k == tab_sep_colidx ? "| " : "");
 						for (int j = 0; j < tab_column_width[k]; j++)
-							log("-");
+							message += "-";
 					}
-					log("\n");
+					log("%s\n", message);
 					first = false;
 				}
 			}
@@ -592,7 +599,8 @@ struct EvalPass : public Pass {
 			log("\n");
 			if (undef.size() > 0) {
 				undef.sort_and_unify();
-				log("Assumed undef (x) value for the following signals: %s\n\n", log_signal(undef));
+				log("Assumed undef (x) value for the following signals: %s\n", log_signal(undef));
+				log("\n");
 			}
 		}
 	}

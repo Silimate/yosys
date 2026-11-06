@@ -33,8 +33,8 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-#define BITWISE_OPS ID($buf), ID($not), ID($mux), ID($and), ID($or), ID($xor), ID($xnor), ID($fa), \
-					ID($bwmux)
+#define BITWISE_OPS ID($buf), ID($barrier), ID($not), ID($mux), ID($and), ID($or), ID($xor), ID($xnor), \
+					ID($fa), ID($bwmux)
 
 #define REDUCE_OPS ID($reduce_and), ID($reduce_or), ID($reduce_xor), ID($reduce_xnor), ID($reduce_bool)
 
@@ -115,6 +115,13 @@ struct Index {
 	bool inline_whiteboxes = false;
 	bool allow_blackboxes = false;
 
+	bool is_known_op(Cell *cell)
+	{
+		if (cell->type == ID($barrier))
+			return !allow_blackboxes;
+		return known_ops(cell->type);
+	}
+
 	int index_module(RTLIL::Module *m)
 	{
 		ModuleInfo &info = modules[m];
@@ -129,7 +136,7 @@ struct Index {
 		int pos = index_wires(info, m);
 
 		for (auto cell : m->cells()) {
-			if (known_ops(cell->type) || cell->type.in(ID($scopeinfo), ID($specify2), ID($specify3), ID($specrule), ID($input_port)))
+			if (is_known_op(cell) || cell->type.in(ID($scopeinfo), ID($specify2), ID($specify3), ID($specrule), ID($input_port)))
 				continue;
 
 			Module *submodule = cell_def(m->design, cell);
@@ -395,7 +402,7 @@ struct Index {
 	struct ShiftDesc {
 		SigSpec aport;
 		SigSpec bport;
-		int width; // width of the vector being shifted 
+		int width; // width of the vector being shifted
 		Lit pad;
 		Lit fill;
 		bool left;
@@ -611,7 +618,7 @@ struct Index {
 					a = CFALSE;
 			}
 
-			if (cell->type.in(ID($buf), ID($pos), ID($_BUF_))) {
+			if (cell->type.in(ID($buf), ID($barrier), ID($pos), ID($_BUF_))) {
 				return a;
 			} else if (cell->type.in(ID($not), ID($_NOT_))) {
 				return NOT(a);
@@ -865,7 +872,7 @@ struct Index {
 			// an output of a cell
 			Cell *driver = bit.wire->driverCell();
 
-			if (known_ops(driver->type)) {
+			if (is_known_op(driver)) {
 				ret = impl_op(cursor, driver, bit.wire->driverPort(), bit.offset);
 			} else {
 				Module *def = cursor.enter(*this, driver);
@@ -1211,7 +1218,7 @@ struct XAigerAnalysis : Index<XAigerAnalysis, int, 0, 0> {
 		}
 
 		for (auto w : top->wires()) {
-			if (w->port_output) {
+			if (w->port_output || (!w->port_input && w->get_bool_attribute(ID::keep))) {
 				for (auto bit : SigSpec(w))
 					(void) eval_po(bit);
 			}
@@ -1807,7 +1814,7 @@ struct Aiger2Backend : Backend {
 		log("\n");
 		log("This command is able to ingest all combinational cells except for:\n");
 		log("\n");
-		log("    ");
+		std::string message;
 		int col = 0;
 		for (size_t i = 0; i < StaticCellTypes::builder.count; i++) {
 			auto &cell = StaticCellTypes::builder.cells[i];
@@ -1819,17 +1826,19 @@ struct Aiger2Backend : Backend {
 				continue;
 			std::string name = cell.type.unescape();
 			if (col + name.size() + 2 > 72) {
-				log("\n    ");
+				log("    %s\n", message);
+				message = "";
 				col = 0;
 			}
 			col += name.size() + 2;
-			log("%s, ", name.c_str());
+			message += stringf("%s, ", name.c_str());
 		}
-		log("\n");
+		if (!message.empty())
+			log("    %s\n", message);
 		log("\n");
 		log("And all combinational gates except for:\n");
 		log("\n");
-		log("    ");
+		message = "";
 		col = 0;
 		for (size_t i = 0; i < StaticCellTypes::builder.count; i++) {
 			auto &cell = StaticCellTypes::builder.cells[i];
@@ -1841,12 +1850,15 @@ struct Aiger2Backend : Backend {
 				continue;
 			std::string name = cell.type.unescape();
 			if (col + name.size() + 2 > 72) {
-				log("\n    ");
+				log("    %s\n", message);
+				message = "";
 				col = 0;
 			}
 			col += name.size() + 2;
-			log("%s, ", name.c_str());
+			message += stringf("%s, ", name.c_str());
 		}
+		if (!message.empty())
+			log("    %s\n", message);
 		log("\n");
 	}
 
@@ -1865,7 +1877,7 @@ struct Aiger2Backend : Backend {
 			else
 				break;
 		}
-		extra_args(f, filename, args, argidx);
+		extra_args(f, filename, args, argidx, true);
 
 		Module *top = design->top_module();
 
@@ -1886,10 +1898,7 @@ struct Aiger2Backend : Backend {
 } Aiger2Backend;
 
 struct XAiger2Backend : Backend {
-	XAiger2Backend() : Backend("xaiger2", "(experimental) write module to XAIGER file")
-	{
-		experimental();
-	}
+	XAiger2Backend() : Backend("xaiger2", "write module to XAIGER file") { }
 
 	void help() override
 	{
@@ -1941,7 +1950,7 @@ struct XAiger2Backend : Backend {
 			else
 				break;
 		}
-		extra_args(f, filename, args, argidx);
+		extra_args(f, filename, args, argidx, true);
 
 		Module *top = design->top_module();
 

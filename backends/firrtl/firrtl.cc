@@ -966,7 +966,7 @@ struct FirrtlWorker
 				register_reverse_wire_map(y_id, cell->getPort(ID::Y));
 				continue;
 			}
-			if (cell->type == ID($pos)) {
+			if (cell->type.in(ID($pos), ID($buf), ID($barrier))) {
 				// assign y = a;
 //				printCell(cell);
 				string a_expr = make_expr(cell->getPort(ID::A));
@@ -975,7 +975,8 @@ struct FirrtlWorker
 				if (a_width < y_width) {
 					a_expr = stringf("pad(%s, %d)", a_expr, y_width);
 				}
-				wire_decls.push_back(stringf("%swire %s: UInt<%d>\n", indent, y_id, y_width));
+				// $buf and $barrier have no Y_WIDTH
+				wire_decls.push_back(stringf("%swire %s: UInt<%d>\n", indent, y_id, GetSize(cell->getPort(ID::Y))));
 				cell_exprs.push_back(stringf("%s%s <= %s\n", indent, y_id, a_expr));
 				register_reverse_wire_map(y_id, cell->getPort(ID::Y));
 				continue;
@@ -1216,6 +1217,7 @@ struct FirrtlBackend : public Backend {
 		extra_args(f, filename, args, argidx);
 
 		log_header(design, "Executing FIRRTL backend.\n");
+		log_deprecated("write_firrtl", "0.72");
 		log_push();
 
 		Pass::call(design, "pmuxtree");

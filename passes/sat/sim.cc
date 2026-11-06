@@ -789,6 +789,11 @@ struct SimInstance
 			return;
 		}
 
+		if (cell->type == ID($barrier)) {
+			set_state(cell->getPort(ID::Y), get_state(cell->getPort(ID::A)));
+			return;
+		}
+
 		if (cell->type == ID($print))
 			return;
 
@@ -1738,20 +1743,26 @@ struct SimWorker : SimShared
 		for (auto t : tops) {
 			while (1)
 			{
-				if (debug)
-					log("\n-- ph1 --\n");
+				if (debug) {
+					log("\n");
+					log("-- ph1 --\n");
+				}
 
 				t->update_ph1();
 
-				if (debug)
-					log("\n-- ph2 --\n");
+				if (debug) {
+					log("\n");
+					log("-- ph2 --\n");
+				}
 
 				if (!t->update_ph2(gclk))
 					break;
 			}
 
-			if (debug)
-				log("\n-- ph3 --\n");
+			if (debug) {
+				log("\n");
+				log("-- ph3 --\n");
+			}
 
 			t->update_ph3(gclk);
 		}
@@ -1763,20 +1774,26 @@ struct SimWorker : SimShared
 		for (auto t : tops) {
 			while (1)
 			{
-				if (debug)
-					log("\n-- ph1 (settle) --\n");
+				if (debug) {
+					log("\n");
+					log("-- ph1 (settle) --\n");
+				}
 
 				t->update_ph1();
 
-				if (debug)
-					log("\n-- ph2 (settle) --\n");
+				if (debug) {
+					log("\n");
+					log("-- ph2 (settle) --\n");
+				}
 
 				if (!t->update_ph2(false, true))
 					break;
 			}
 
-			if (debug)
-				log("\n-- ph3 (settle) --\n");
+			if (debug) {
+				log("\n");
+				log("-- ph3 (settle) --\n");
+			}
 			t->update_ph3(false);
 		}
 	}
@@ -1786,20 +1803,26 @@ struct SimWorker : SimShared
 		for (auto t : tops) {
 			while (1)
 			{
-				if (debug)
-					log("\n-- ph1 (initialize) --\n");
+				if (debug) {
+					log("\n");
+					log("-- ph1 (initialize) --\n");
+				}
 
 				t->update_ph1();
 
-				if (debug)
-					log("\n-- ph2 (initialize) --\n");
+				if (debug) {
+					log("\n");
+					log("-- ph2 (initialize) --\n");
+				}
 
 				if (!t->update_ph2(false, true))
 					break;
 			}
 
-			if (debug)
-				log("\n-- ph3 (initialize) --\n");
+			if (debug) {
+				log("\n");
+				log("-- ph3 (initialize) --\n");
+			}
 			t->update_ph3(true);
 		}
 	}
@@ -1824,8 +1847,10 @@ struct SimWorker : SimShared
 		top = tops.front();
 		register_signals();
 
-		if (debug)
-			log("\n===== 0 =====\n");
+		if (debug) {
+			log("\n");
+			log("===== 0 =====\n");
+		}
 		else if (verbose)
 			log("Simulating cycle 0.\n");
 
@@ -1843,8 +1868,10 @@ struct SimWorker : SimShared
 
 		for (int cycle = 0; cycle < numcycles; cycle++)
 		{
-			if (debug)
-				log("\n===== %d =====\n", int(cycle_width*cycle + cycle_width/2));
+			if (debug) {
+				log("\n");
+				log("===== %d =====\n", int(cycle_width*cycle + cycle_width/2));
+			}
 			else if (verbose)
 				log("Simulating cycle %d.\n", (cycle*2)+1);
 			set_inports(clock, State::S0);
@@ -1856,8 +1883,10 @@ struct SimWorker : SimShared
 			if (cycle == 0)
 				top->set_initstate_outputs(State::S0);
 
-			if (debug)
-				log("\n===== %d =====\n", int(cycle_width*cycle + cycle_width));
+			if (debug) {
+				log("\n");
+				log("===== %d =====\n", int(cycle_width*cycle + cycle_width));
+			}
 			else if (verbose)
 				log("Simulating cycle %d.\n", (cycle*2)+2);
 
@@ -2321,10 +2350,10 @@ struct SimWorker : SimShared
 		bool initial = true;
 		int cycle = 0;
 		uint64_t last_time = startCount;
-		log("Co-simulation from %lu%s to %lu%s", (unsigned long)startCount, fst->getTimescaleString(), (unsigned long)stopCount, fst->getTimescaleString());
+		std::string message = stringf("Co-simulation from %lu%s to %lu%s", (unsigned long)startCount, fst->getTimescaleString(), (unsigned long)stopCount, fst->getTimescaleString());
 		if (cycles_set)
-			log(" for %d clock cycle(s)",numcycles);
-		log("\n");
+			message += stringf(" for %d clock cycle(s)",numcycles);
+		log("%s\n", message);
 		bool all_samples = fst_clock.empty();
 		unsigned int end_cycle = cycles_set ? numcycles*2 : INT_MAX;
 
@@ -3035,10 +3064,10 @@ struct SimWorker : SimShared
 		}
 
 		int cycle = 0;
-		log("Generate testbench data from %lu%s to %lu%s", (unsigned long)startCount, fst->getTimescaleString(), (unsigned long)stopCount, fst->getTimescaleString());
+		std::string message = stringf("Generate testbench data from %lu%s to %lu%s", (unsigned long)startCount, fst->getTimescaleString(), (unsigned long)stopCount, fst->getTimescaleString());
 		if (cycles_set)
-			log(" for %d clock cycle(s)",numcycles);
-		log("\n");
+			message += stringf(" for %d clock cycle(s)",numcycles);
+		log("%s\n", message);
 
 		std::stringstream f;
 		f << stringf("`timescale 1%s/1%s\n", fst->getTimescaleString(),fst->getTimescaleString());

@@ -295,10 +295,10 @@ bool group_cell_inputs(RTLIL::Module *module, RTLIL::Cell *cell, bool commutativ
 
 		module->connect(new_conn);
 
-		log_debug("  New cell `%s': A=%s", c, log_signal(new_a));
+		std::string message = stringf("  New cell `%s': A=%s", c, log_signal(new_a));
 		if (b_name == ID::B)
-			log_debug(", B=%s", log_signal(new_b));
-		log_debug("\n");
+			message += stringf(", B=%s", log_signal(new_b));
+		log_debug("%s\n", message);
 	}
 
 	module->remove(cell);
@@ -1887,7 +1887,7 @@ skip_identity:
 							cell->setPort(ID::Y, flooring);
 
 							SigSpec a_sign = sig_a[sig_a.size()-1];
-							SigSpec rem_nonzero = module->ReduceOr(NEW_ID2_SUFFIX("rem_nonzero"), sig_a.extract(0, exp)); // SILIMATE: Improve the naming
+							SigSpec rem_nonzero = module->ReduceOr(NEW_ID2_SUFFIX("rem_nonzero"), sig_a.extract(0, std::min(exp, GetSize(sig_a)))); // SILIMATE: Improve the naming
 							SigSpec should_add = module->And(NEW_ID2_SUFFIX("should_add"), a_sign, rem_nonzero); // SILIMATE: Improve the naming
 							module->addAdd(NEW_ID2_SUFFIX("add"), flooring, should_add, sig_y); // SILIMATE: Improve the naming
 						}
@@ -1905,10 +1905,10 @@ skip_identity:
 						// the sign bits are those of A (except when R=0)
 						if (is_truncating && a_signed && GetSize(sig_a) != 0 && exp != 0)
 						{
-							SigSpec truncating = sig_a.extract(0, exp);
+							SigSpec truncating = sig_a.extract(0, std::min(exp, GetSize(sig_a)));
 
 							SigSpec a_sign = sig_a[sig_a.size()-1];
-							SigSpec rem_nonzero = module->ReduceOr(NEW_ID2_SUFFIX("rem_nonzero"), sig_a.extract(0, exp), false, cell->get_src_attribute()); // SILIMATE: Improve the naming
+							SigSpec rem_nonzero = module->ReduceOr(NEW_ID2_SUFFIX("rem_nonzero"), truncating, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
 							SigSpec extend_bit = module->And(NEW_ID2_SUFFIX("extend_bit"), a_sign, rem_nonzero, false, cell->get_src_attribute()); // SILIMATE: Improve the naming
 
 							truncating.append(extend_bit);
