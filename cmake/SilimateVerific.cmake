@@ -43,9 +43,16 @@ if (YOSYS_ENABLE_VERIFIC)
 		list(APPEND YOSYS_VERIFIC_COMPONENTS extensions)
 	endif()
 
+	# This drop's Verilog parser includes and calls its VHDL one, so vhdl is compiled whenever verilog
+	# is; WITH_VERIFIC_VHDL only turns on the frontend's VHDL support
+	set(verific_source_components ${YOSYS_VERIFIC_COMPONENTS})
+	if ("verilog" IN_LIST verific_source_components AND NOT "vhdl" IN_LIST verific_source_components)
+		list(APPEND verific_source_components vhdl)
+	endif()
+
 	# Prepare verific interface library as in YosysVerific.cmake
 	add_library(verific INTERFACE)
-	get_verific_options(verific_include_dirs verific_libraries ${YOSYS_VERIFIC_COMPONENTS})
+	get_verific_options(verific_include_dirs verific_libraries ${verific_source_components})
 	target_include_directories(verific INTERFACE
 		${verific_include_dirs}
 	)
@@ -82,7 +89,7 @@ if (YOSYS_ENABLE_VERIFIC)
 	# Compiled from Verific's source; its flex and bison outputs are checked in. Headers are installed
 	# for code that calls Verific's API: each compiled package's and, with SystemVerilog, the std
 	# package's source
-	foreach (component ${YOSYS_VERIFIC_COMPONENTS})
+	foreach (component ${verific_source_components})
 		file(GLOB component_sources ${YOSYS_VERIFIC_DIR}/${component}/*.cpp)
 		list(APPEND verific_sources ${component_sources})
 		file(GLOB component_headers RELATIVE ${YOSYS_VERIFIC_DIR} ${YOSYS_VERIFIC_DIR}/${component}/*.h)
