@@ -2,7 +2,7 @@ if (NOT YOSYS_ENABLE_VERIFIC)
 	# Stub interface library.
 	add_library(verific INTERFACE)
 	set(verific_data_files)
-else()
+elseif (NOT TARGET verific)
 	if (NOT YOSYS_VERIFIC_COMPONENTS)
 		get_verific_components(YOSYS_VERIFIC_COMPONENTS)
 	endif()
@@ -45,6 +45,14 @@ else()
 			endforeach()
 		endforeach()
 	endif()
+endif()
+
+# silimate: installed for code that calls the importer directly
+if (YOSYS_ENABLE_VERIFIC)
+	list(APPEND verific_data_files
+		include/frontends/verific/verific.h verific.h
+		include/frontends/verific/rtl_bind.h rtl_bind.h
+	)
 endif()
 
 yosys_frontend(verific

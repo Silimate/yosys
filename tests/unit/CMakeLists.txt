@@ -24,6 +24,7 @@ endfunction()
 if (GTest_FOUND)
 	add_custom_target(yosys-gtest-all)
 
+	add_subdirectory(frontends)
 	add_subdirectory(kernel)
 	add_subdirectory(opt)
 	add_subdirectory(techmap)
