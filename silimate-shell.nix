@@ -21,7 +21,6 @@ pkgs.mkShell {
 		gawk
 		gperf
 		autoconf
-		libdwarf # provides libdwarf.so
 		doxygen
 		cudd
 		zlib
@@ -30,8 +29,6 @@ pkgs.mkShell {
 		gtkwave # vcd2fst
 		(python3.withPackages(ps: with ps; [pip wheel pybind11 cxxheaderparser]))
 		gtest
-	] ++ lib.optionals stdenv.isLinux [
-		elfutils # provides libdw.so (not to be confused with libdwarf.so)
 	];
 
 	CMAKE_CXX_COMPILER_LAUNCHER = "ccache";
@@ -41,8 +38,5 @@ pkgs.mkShell {
 		"-DCMAKE_BUILD_TYPE=Debug"
 		"-DCMAKE_CXX_FLAGS=-O0"
 		"-DYOSYS_WITH_PYTHON:BOOL=ON"
-		"-DLIBDWARF_INCLUDE_DIR=${lib.getInclude libdwarf}/include"
-	] ++ lib.optionals stdenv.isLinux [
-		"-DLIBDW_LIBRARY=${lib.getLib elfutils}/lib/libdw.so"
 	];
 }
