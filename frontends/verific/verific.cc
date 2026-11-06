@@ -115,6 +115,11 @@ using namespace Verific;
 #ifdef YOSYS_ENABLE_VERIFIC
 YOSYS_NAMESPACE_BEGIN
 
+// SILIMATE: the importer's errors throw under verific_import()'s throw_errors (verific.h), up to
+// the #undef after verific_import()
+#define log_error verific_import_error
+#define log_cmd_error verific_import_cmd_error
+
 int verific_verbose;
 bool verific_import_pending;
 string verific_error_msg;
@@ -123,6 +128,7 @@ bool verific_opt; // SILIMATE: enable Verific optimizations
 bool verific_no_split_complex_ports; // SILIMATE: disable splitting of all complex ports (structs + arrays)
 bool verific_no_split_struct_ports; // SILIMATE: keep struct/record ports flat
 bool verific_no_split_array_ports; // SILIMATE: keep multi-dimensional array ports flat
+bool verific_import_throw; // SILIMATE
 
 #ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
 vector<string> verific_incdirs, verific_libdirs, verific_libexts;
@@ -2591,7 +2597,7 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 
 		if (inst->IsPrimitive())
 		{
-			if (!mode_keep)
+			if (!mode_keep && !mode_blackbox_prims)
 				log_error("%sUnsupported Verific primitive %s of type %s\n", announce_src_location(inst), inst->Name(), inst->View()->Owner()->Name());
 
 			if (!verific_sva_prims.count(inst->Type()))
@@ -2617,7 +2623,7 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 		RTLIL::Cell *cell = module->addCell(inst_name, inst_type);
 		import_attributes(cell->attributes, inst);
 
-		if (inst->IsPrimitive() && mode_keep)
+		if (inst->IsPrimitive() && (mode_keep || mode_blackbox_prims))
 			cell->attributes[ID::keep] = 1;
 
 		dict<IdString, vector<SigBit>> cell_port_conns;
@@ -3020,6 +3026,8 @@ Cell *VerificClocking::addAldff(IdString name, RTLIL::SigSpec sig_aload, RTLIL::
 struct VerificExtNets
 {
 	int portname_cnt = 0;
+	bool route_all_refs = false; // SILIMATE: VerificImportOptions::route_all_refs
+	pool<Netlist*> visited; // SILIMATE
 
 	// a map from Net to the same Net one level up in the design hierarchy
 	std::map<Net*, Net*> net_level_up_drive_up;
@@ -3095,15 +3103,15 @@ struct VerificExtNets
 	// Handles the case where a net belongs to an external package or global scope
 	// (i.e., there is no common ancestor in the design hierarchy). Creates a fresh
 	// local net in `nl` and disconnects it from the original package/global net.
-	// For input ports the new net will be undriven; for output ports, writes will
-	// not be propagated back to the package/global object.
-	Net *localize_external_package_net(Netlist *nl, Net *net, Port *port)
+	// For reads the new net will be undriven; writes will not be propagated back
+	// to the package/global object.
+	Net *localize_external_package_net(Netlist *nl, Net *net, Port *port, bool reads)
 	{
 		string name = stringf("___extnets_%d", portname_cnt++);
 		Net *new_net = new Net(name.c_str());
 		nl->Add(new_net);
 
-		if (port->IsInput())
+		if (reads)
 			log_warning("Localizing external package/global net reference '%s.%s' on %s.%s; "
 					"reads from the package/global object will return an undriven (floating) value.\n",
 					get_full_netlist_name(net->Owner()).c_str(), net->Name(),
@@ -3117,8 +3125,69 @@ struct VerificExtNets
 		return new_net;
 	}
 
+	// SILIMATE: whether every instance path up from nl passes through ancestor
+	bool all_paths_reach(Netlist *nl, Netlist *ancestor, dict<Netlist*, bool> &memo)
+	{
+		if (nl == ancestor)
+			return true;
+		if (nl->NumOfRefs() == 0)
+			return false;
+		auto it = memo.find(nl);
+		if (it != memo.end())
+			return it->second;
+		bool reach = true;
+		SetIter si;
+		Instance *inst;
+		FOREACH_SET_ITEM(nl->GetReferences(), si, &inst)
+			reach = reach && all_paths_reach(inst->Owner(), ancestor, memo);
+		return memo[nl] = reach;
+	}
+
+	// SILIMATE: a new net in nl carrying ca_net, through a port added on every instance path from
+	// ca_net's netlist down to nl
+	std::map<std::tuple<Net*, Netlist*, bool>, Net*> routed_down;
+	Net *route_down(Net *ca_net, Netlist *nl, bool drive_up)
+	{
+		if (nl == ca_net->Owner())
+			return ca_net;
+		Net *&net = routed_down[{ca_net, nl, drive_up}];
+		if (net == nullptr) {
+			string name = stringf("___extnets_%d", portname_cnt++);
+			Port *port = new Port(name.c_str(), drive_up ? DIR_OUT : DIR_IN);
+			nl->Add(port);
+			net = new Net(name.c_str());
+			nl->Add(net);
+			net->Connect(port);
+			SetIter si;
+			Instance *inst;
+			FOREACH_SET_ITEM(nl->GetReferences(), si, &inst)
+				inst->Connect(port, route_down(ca_net, inst->Owner(), drive_up));
+		}
+		return net;
+	}
+
+	// SILIMATE: route a reference from nl to net through every instance path, for when nl or one
+	// of its parents is instantiated more than once; null if no netlist above net's is on them all
+	Net *route_all_paths(Netlist *nl, Net *net, bool reads)
+	{
+		Netlist *ca_nl = net->Owner();
+		while (true) {
+			dict<Netlist*, bool> memo;
+			if (all_paths_reach(nl, ca_nl, memo))
+				return route_down(route_up(net, reads, ca_nl), nl, !reads);
+			if (ca_nl->NumOfRefs() != 1)
+				return nullptr;
+			ca_nl = ((Instance*)ca_nl->GetReferences()->GetLast())->Owner();
+		}
+	}
+
 	void run(Netlist *nl)
 	{
+		// SILIMATE: the first visit fixes nl and everything below it, so a visit through another
+		// instance path would find nothing to do
+		if (!visited.insert(nl).second)
+			return;
+
 		MapIter mi, mi2;
 		Instance *inst;
 		PortRef *pr;
@@ -3127,6 +3196,23 @@ struct VerificExtNets
 
 		FOREACH_INSTANCE_OF_NETLIST(nl, mi, inst)
 			run(inst->View());
+
+		// SILIMATE: a port that is the referenced net itself
+		if (route_all_refs) {
+			Port *port;
+			vector<Port*> ext_ports;
+			FOREACH_PORT_OF_NETLIST(nl, mi, port)
+				if (port->GetNet() && port->GetNet()->IsExternalTo(nl))
+					ext_ports.push_back(port);
+			for (auto port : ext_ports) {
+				Net *net = port->GetNet();
+				Net *new_net = route_all_paths(nl, net, !port->IsInput());
+				if (new_net == nullptr)
+					new_net = localize_external_package_net(nl, net, port, !port->IsInput());
+				net->Disconnect(port);
+				new_net->Connect(port);
+			}
+		}
 
 		FOREACH_INSTANCE_OF_NETLIST(nl, mi, inst)
 		FOREACH_PORTREF_OF_INST(inst, mi2, pr)
@@ -3148,9 +3234,15 @@ struct VerificExtNets
 			Netlist *ca_nl = find_common_ancestor(nl, ext_nl);
 
 			if (ca_nl == nullptr) {
-				Net *new_net = localize_external_package_net(nl, net, port);
-				if (verific_verbose)
-					log(" localized external package/global net: %s\n", new_net->Name());
+				Net *new_net = route_all_refs ? route_all_paths(nl, net, !port->IsOutput()) : nullptr;
+				if (new_net != nullptr) {
+					if (verific_verbose)
+						log(" routed through every instance path: %s\n", new_net->Name());
+				} else {
+					new_net = localize_external_package_net(nl, net, port, port->IsInput());
+					if (verific_verbose)
+						log(" localized external package/global net: %s\n", new_net->Name());
+				}
 				todo_connect.push_back(tuple<Instance*, Port*, Net*>(inst, port, new_net));
 				continue;
 			}
@@ -3496,6 +3588,84 @@ void verific_cleanup()
 	verific_import_pending = false;
 }
 
+// SILIMATE: exported so direct Verific API calls get the pass's settings; reruns after verific_cleanup()
+void verific_setup()
+{
+	if (!set_verific_global_flags)
+		return;
+
+	Message::SetConsoleOutput(0);
+	Message::RegisterCallBackMsg(msg_func);
+
+	// RuntimeFlags::SetVar("db_preserve_user_instances", 1);
+	// RuntimeFlags::SetVar("db_preserve_user_nets", 1);
+	// RuntimeFlags::SetVar("db_preserve_x", 1);
+
+	RuntimeFlags::SetVar("db_allow_external_nets", 1);
+	RuntimeFlags::SetVar("db_infer_wide_operators", 1);
+	RuntimeFlags::SetVar("db_infer_set_reset_registers", 0);
+
+	// Properly respect order of read and write for rams
+	RuntimeFlags::SetVar("db_change_inplace_ram_blocking_write_before_read", 1);
+
+#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
+	RuntimeFlags::SetVar("veri_extract_dualport_rams", 0);
+	// RuntimeFlags::SetVar("veri_extract_multiport_rams", 1); // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("veri_allow_any_ram_in_loop", 1);  // SILIMATE: control this externally
+	RuntimeFlags::SetVar("veri_replace_const_exprs", 1);
+	// SILIMATE: accept code other tools accept: white space after a macro's
+	// continuation backslash, and checker as a name
+	RuntimeFlags::SetVar("veri_allow_whitespace_after_backslash_in_multi_line_macro", 1);
+#ifdef SILIMATE_VERIFIC_EXTENSIONS
+	RuntimeFlags::SetVar("veri_allow_checker_as_name", 1);
+#endif
+#endif
+#ifdef VERIFIC_VHDL_SUPPORT
+	RuntimeFlags::SetVar("vhdl_extract_dualport_rams", 0);
+	// RuntimeFlags::SetVar("vhdl_extract_multiport_rams", 1); // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("vhdl_allow_any_ram_in_loop", 1);  // SILIMATE: control this externally
+	RuntimeFlags::SetVar("vhdl_replace_const_exprs", 1);
+
+	RuntimeFlags::SetVar("vhdl_support_variable_slice", 1);
+	RuntimeFlags::SetVar("vhdl_ignore_assertion_statements", 0);
+
+	// RuntimeFlags::SetVar("vhdl_preserve_assignments", 1); // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("vhdl_preserve_comments", 1);    // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("vhdl_preserve_drivers", 1);     // SILIMATE: control this externally
+#endif
+#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
+	// RuntimeFlags::SetVar("veri_preserve_assignments", 1); // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("veri_preserve_comments", 1);    // SILIMATE: control this externally
+	// RuntimeFlags::SetVar("veri_preserve_drivers", 1);     // SILIMATE: control this externally
+
+	// Workaround for VIPER #13851
+	RuntimeFlags::SetVar("veri_create_name_for_unnamed_gen_block", 1);
+
+	// WARNING: instantiating unknown module 'XYZ' (VERI-1063)
+	Message::SetMessageType("VERI-1063", VERIFIC_ERROR);
+
+	// Downgrade warnings about things that are normal
+	// VERIFIC-WARNING [VERI-1209] foo.sv:98: expression size 7 truncated to fit in target size 6
+	Message::SetMessageType("VERI-1209", VERIFIC_INFO);
+	// VERIFIC-WARNING [VERI-1142] foo.sv:55: system task 'display' is ignored for synthesis
+	Message::SetMessageType("VERI-1142", VERIFIC_INFO);
+	// VERIFIC-WARNING [VERI-2418] foo.svh:503: parameter 'all_cfgs_gp' declared inside package 'bp_common_pkg' shall be treated as localparam
+	Message::SetMessageType("VERI-2418", VERIFIC_INFO);
+
+	// https://github.com/YosysHQ/yosys/issues/1055
+	RuntimeFlags::SetVar("veri_elaborate_top_level_modules_having_interface_ports", 1) ;
+#endif
+	RuntimeFlags::SetVar("verific_produce_verbose_syntax_error_message", 1);
+
+/* SILIMATE: do not warn about initial value preservation
+#ifndef DB_PRESERVE_INITIAL_VALUE
+#  warning Verific was built without DB_PRESERVE_INITIAL_VALUE.
+#endif
+*/
+
+	set_verific_global_flags = false;
+}
+
 // SILIMATE: classify a complex portbus exactly the way Verific's Netlist::ChangePortBusStructures
 // does, so struct and multi-dimensional-array ports can be split independently. Classification is
 // purely by TypeRange, mirroring the stock splitter's predicate: a scalar is never split; a type
@@ -3642,7 +3812,8 @@ static void verific_selective_split_portbuses(Netlist *top, bool split_structs, 
 		it.first->Add(it.second);
 }
 
-std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top)
+// SILIMATE: verific_import() but for the final verific_cleanup()
+static std::string elaborate_and_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top, const VerificImportOptions &options)
 {
 	verific_sva_fsm_limit = 16;
 
@@ -3653,7 +3824,14 @@ std::string verific_import(Design *design, const std::map<std::string,std::strin
 		verific_params.Insert(i.first.c_str(), i.second.c_str());
 
 	std::set<std::string> top_mod_names;
-	if (top.empty()) {
+	if (!options.netlists.empty()) {
+		verific_error_msg.clear(); // elaboration errors were the caller's
+		for (auto nl : options.netlists) {
+			nl->AddAtt(new Att(" \\top", NULL)); // as import_tops() marks its tops
+			nl_todo.emplace(nl->CellBaseName(), nl);
+			top_mod_names.insert(nl->CellBaseName());
+		}
+	} else if (top.empty()) {
 		import_all("work", &nl_todo, &verific_params, false, "");
 	} else {
 		std::vector<std::string> tops;
@@ -3681,6 +3859,7 @@ std::string verific_import(Design *design, const std::map<std::string,std::strin
 		verific_selective_split_portbuses(nl.second, !no_split_struct, !no_split_array);
 
 	VerificExtNets worker;
+	worker.route_all_refs = options.route_all_refs;
 	for (auto nl : nl_todo)
 		worker.run(nl.second);
 
@@ -3697,18 +3876,62 @@ std::string verific_import(Design *design, const std::map<std::string,std::strin
 		}
 
 		if (nl_done.count(it->first) == 0) {
-			VerificImporter importer(false, false, false, false, false, false, false, false);
+			VerificImporter importer(false, false, options.nosva, options.sva_continue, false, false, false, false);
+			importer.mode_blackbox_prims = options.blackbox_prims;
 			nl_done[it->first] = it->second;
-			importer.import_netlist(design, nl, nl_todo, top_mod_names.count(nl->CellBaseName()));
+			// SILIMATE: an error leaves no partly imported module behind
+			try {
+				importer.import_netlist(design, nl, nl_todo, top_mod_names.count(nl->CellBaseName()));
+			} catch (VerificImportError &e) {
+				e.module = nl->CellBaseName();
+				if (!options.errors) {
+					if (importer.module)
+						design->remove(importer.module);
+					throw;
+				}
+				if (importer.module) {
+					importer.module->makeblackbox();
+					importer.module->fixup_ports();
+				}
+				options.errors->push_back(e);
+			}
 		}
 		nl_todo.erase(it);
 	}
 
-	verific_cleanup();
 	if (!verific_error_msg.empty())
 		log_error("%s\n", verific_error_msg);
 	return top;
 }
+
+// SILIMATE: with throw_errors, an error leaves Verific as a return would
+std::string verific_import(Design *design, const std::map<std::string,std::string> &parameters, std::string top, const VerificImportOptions &options)
+{
+	bool throwing = options.throw_errors || options.errors;
+	verific_import_throw = throwing;
+	try {
+		top = elaborate_and_import(design, parameters, top, options);
+	} catch (...) {
+		verific_import_throw = false;
+		if (throwing) {
+			verific_error_msg.clear();
+			if (options.keep_state)
+				verific_import_pending = false; // as on success, so hierarchy doesn't import again
+			else
+				verific_cleanup();
+		}
+		throw;
+	}
+	verific_import_throw = false;
+	if (options.keep_state)
+		verific_import_pending = false; // so hierarchy doesn't import again
+	else
+		verific_cleanup();
+	return top;
+}
+
+#undef log_error
+#undef log_cmd_error
 
 YOSYS_NAMESPACE_END
 #endif /* YOSYS_ENABLE_VERIFIC */
@@ -4157,79 +4380,7 @@ struct VerificPass : public Pass {
 
 		log_header(design, "Executing VERIFIC (loading SystemVerilog and VHDL designs using Verific).\n");
 
-		if (set_verific_global_flags)
-		{
-			Message::SetConsoleOutput(0);
-			Message::RegisterCallBackMsg(msg_func);
-
-			// RuntimeFlags::SetVar("db_preserve_user_instances", 1);
-			// RuntimeFlags::SetVar("db_preserve_user_nets", 1);
-			// RuntimeFlags::SetVar("db_preserve_x", 1);
-
-			RuntimeFlags::SetVar("db_allow_external_nets", 1);
-			RuntimeFlags::SetVar("db_infer_wide_operators", 1);
-			RuntimeFlags::SetVar("db_infer_set_reset_registers", 0);
-
-			// Properly respect order of read and write for rams
-			RuntimeFlags::SetVar("db_change_inplace_ram_blocking_write_before_read", 1);
-
-#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
-			RuntimeFlags::SetVar("veri_extract_dualport_rams", 0);
-			// RuntimeFlags::SetVar("veri_extract_multiport_rams", 1); // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("veri_allow_any_ram_in_loop", 1);  // SILIMATE: control this externally
-			RuntimeFlags::SetVar("veri_replace_const_exprs", 1);
-			// SILIMATE: accept code other tools accept: white space after a macro's
-			// continuation backslash, and checker as a name
-			RuntimeFlags::SetVar("veri_allow_whitespace_after_backslash_in_multi_line_macro", 1);
-#ifdef SILIMATE_VERIFIC_EXTENSIONS
-			RuntimeFlags::SetVar("veri_allow_checker_as_name", 1);
-#endif
-#endif
-#ifdef VERIFIC_VHDL_SUPPORT
-			RuntimeFlags::SetVar("vhdl_extract_dualport_rams", 0);
-			// RuntimeFlags::SetVar("vhdl_extract_multiport_rams", 1); // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("vhdl_allow_any_ram_in_loop", 1);  // SILIMATE: control this externally
-			RuntimeFlags::SetVar("vhdl_replace_const_exprs", 1);
-
-			RuntimeFlags::SetVar("vhdl_support_variable_slice", 1);
-			RuntimeFlags::SetVar("vhdl_ignore_assertion_statements", 0);
-
-			// RuntimeFlags::SetVar("vhdl_preserve_assignments", 1); // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("vhdl_preserve_comments", 1);    // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("vhdl_preserve_drivers", 1);     // SILIMATE: control this externally
-#endif
-#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
-			// RuntimeFlags::SetVar("veri_preserve_assignments", 1); // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("veri_preserve_comments", 1);    // SILIMATE: control this externally
-			// RuntimeFlags::SetVar("veri_preserve_drivers", 1);     // SILIMATE: control this externally
-
-			// Workaround for VIPER #13851
-			RuntimeFlags::SetVar("veri_create_name_for_unnamed_gen_block", 1);
-
-			// WARNING: instantiating unknown module 'XYZ' (VERI-1063)
-			Message::SetMessageType("VERI-1063", VERIFIC_ERROR);
-
-			// Downgrade warnings about things that are normal
-			// VERIFIC-WARNING [VERI-1209] foo.sv:98: expression size 7 truncated to fit in target size 6
-			Message::SetMessageType("VERI-1209", VERIFIC_INFO);
-			// VERIFIC-WARNING [VERI-1142] foo.sv:55: system task 'display' is ignored for synthesis
-			Message::SetMessageType("VERI-1142", VERIFIC_INFO);
-			// VERIFIC-WARNING [VERI-2418] foo.svh:503: parameter 'all_cfgs_gp' declared inside package 'bp_common_pkg' shall be treated as localparam
-			Message::SetMessageType("VERI-2418", VERIFIC_INFO);
-
-			// https://github.com/YosysHQ/yosys/issues/1055
-			RuntimeFlags::SetVar("veri_elaborate_top_level_modules_having_interface_ports", 1) ;
-#endif
-			RuntimeFlags::SetVar("verific_produce_verbose_syntax_error_message", 1);
-
-/* SILIMATE: do not warn about initial value preservation
-#ifndef DB_PRESERVE_INITIAL_VALUE
-#  warning Verific was built without DB_PRESERVE_INITIAL_VALUE.
-#endif
-*/
-
-			set_verific_global_flags = false;
-		}
+		verific_setup();
 
 		verific_verbose = 0;
 		verific_sva_fsm_limit = 16;
