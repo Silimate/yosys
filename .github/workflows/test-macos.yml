@@ -1,0 +1,76 @@
+# SILIMATE: the macOS build and tests from test-build.yml, run nightly on main instead of on
+# every pull request and push. The organization shares a small pool of GitHub-hosted macOS
+# runners, and per-PR macOS jobs kept it full. A pull request that edits this workflow or the
+# setup actions it uses runs it too, so changes to the macOS setup are tested before merge.
+name: Build and run tests (macOS nightly)
+
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/test-macos.yml'
+      - '.github/actions/setup-build-env/**'
+      - '.github/actions/setup-iverilog/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test-macos:
+    name: Build and run tests (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      CC: clang
+    steps:
+      - name: Checkout Yosys
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Setup environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          runs-on: macos-latest
+          get-build-deps: true
+          get-iverilog: true
+
+      - name: Build Verific
+        run: cd verific/tclmain && make -j$procs
+
+      # Pull request runs read main's cache but don't save, since a cache saved from a pull
+      # request is only visible to that pull request.
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: test-build-macos-latest
+          save: ${{ github.event_name != 'pull_request' }}
+          restore-keys: |
+            test-build-macos-latest
+
+      - name: Build
+        shell: bash
+        run: |
+          rm -rf build
+          cmake -B build . -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release -DYOSYS_COMPILER_LAUNCHER=ccache -DYOSYS_USE_BUNDLED_LIBS=ON
+          cmake --build build -j$procs
+          ctest --test-dir build/tests/unit
+
+      - name: Log yosys-config output
+        run: |
+          ./build/yosys-config || true
+
+      - name: Run tests
+        shell: bash
+        run: |
+          make -C tests -j$procs vanilla-test
+
+      - name: Report errors
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          find tests/**/*.err -print -exec cat {} \;
