@@ -4723,17 +4723,18 @@ struct VerificPass : public Pass {
 #endif
 					continue;
 #ifdef VERIFIC_VHDL_SUPPORT
+				// SILIMATE: only the 2008 and 2019 packages ship, so earlier dialects read the 2008 ones
 				} else if (args[argidx] == "-vhdl87") {
 					vhdl_mode = vhdl_file::VHDL_87;
-					vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_1987").c_str());
+					vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_2008").c_str());
 					continue;
 				} else if (args[argidx] == "-vhdl93") {
 					vhdl_mode = vhdl_file::VHDL_93;
-					vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_1993").c_str());
+					vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_2008").c_str());
 					continue;
 				} else if (args[argidx] == "-vhdl2k") {
 					vhdl_mode = vhdl_file::VHDL_2K;
-					vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_1993").c_str());
+					vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_2008").c_str());
 					continue;
 				} else if (args[argidx] == "-vhdl2019") {
 					vhdl_mode = vhdl_file::VHDL_2019;
@@ -4907,8 +4908,9 @@ struct VerificPass : public Pass {
 #endif
 
 #ifdef VERIFIC_VHDL_SUPPORT
+		// SILIMATE: only the 2008 and 2019 packages ship, so earlier dialects read the 2008 ones
 		if (GetSize(args) > argidx && args[argidx] == "-vhdl87") {
-			vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_1987").c_str());
+			vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_2008").c_str());
 			bool flag_lib = false;
 			argidx++;
 			while (argidx < GetSize(args)) {
@@ -4933,7 +4935,7 @@ struct VerificPass : public Pass {
 		}
 
 		if (GetSize(args) > argidx && args[argidx] == "-vhdl93") {
-			vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_1993").c_str());
+			vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_2008").c_str());
 			bool flag_lib = false;
 			argidx++;
 			while (argidx < GetSize(args)) {
@@ -4958,7 +4960,7 @@ struct VerificPass : public Pass {
 		}
 
 		if (GetSize(args) > argidx && args[argidx] == "-vhdl2k") {
-			vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_1993").c_str());
+			vhdl_file::SetDefaultLibraryPath((proc_share_dirname() + "verific/vhdl_vdbs_2008").c_str());
 			bool flag_lib = false;
 			argidx++;
 			while (argidx < GetSize(args)) {

@@ -1,0 +1,17 @@
+# Only the 2008 and 2019 VHDL packages ship, so the earlier dialects read the 2008 ones,
+# whose INTEGER stays 32-bit (2019's is 64-bit)
+verific -vhdl87 vhdl_old_dialects_87.vhd
+verific -import old87
+select -assert-count 1 o:n s:32 %i
+design -reset
+
+verific -vhdl93 vhdl_old_dialects.vhd
+verific -import old93
+select -assert-count 1 t:$add
+select -assert-count 1 o:n s:32 %i
+design -reset
+
+verific -vhdl2k vhdl_old_dialects.vhd
+verific -import old93
+select -assert-count 1 t:$add
+select -assert-count 1 o:n s:32 %i
