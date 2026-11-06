@@ -59,6 +59,7 @@ TEST_F(VerificImportTest, ThrowErrorsRemovesTheInterruptedModule)
 	EXPECT_NE(design.module(RTLIL::escape_id("top")), nullptr);
 	EXPECT_EQ(design.module(RTLIL::escape_id("bad")), nullptr);
 	EXPECT_NE(veri_file::GetModule("top"), nullptr);
+	EXPECT_FALSE(verific_import_pending);
 }
 
 TEST_F(VerificImportTest, ThrowErrorsResetsVerificUnlessKeepState)

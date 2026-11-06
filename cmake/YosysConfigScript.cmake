@@ -37,6 +37,8 @@ function(yosys_config_script scope)
 	endif()
 
 	set(CXX ${CMAKE_CXX_COMPILER})
+	# silimate: the installed Verific packages, whose headers verific.h includes by bare name
+	list(TRANSFORM verific_source_components PREPEND -I${DATDIR}/include/verific/ OUTPUT_VARIABLE verific_include_flags)
 	string(JOIN " " CXXFLAGS
 		-std=c++${CMAKE_CXX_STANDARD}
 		${CMAKE_CXX_FLAGS}
@@ -47,6 +49,7 @@ function(yosys_config_script scope)
 		"-DYOSYS_MINOR=${YOSYS_VERSION_MINOR}"
 		"-DYOSYS_COMMIT=${YOSYS_VERSION_COMMIT}"
 		-I${DATDIR}/include
+		${verific_include_flags}
 	)
 	string(JOIN " " LINKFLAGS
 		${CMAKE_SHARED_LIBRARY_CXX_FLAGS}
