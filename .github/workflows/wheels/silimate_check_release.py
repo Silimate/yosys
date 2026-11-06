@@ -75,8 +75,11 @@ def license_problems(wheel):
 		canonicalize_license_expression(meta["License-Expression"] or "")
 	except InvalidLicenseExpression as e:
 		problems.append(str(e))
+	files = meta.get_all("License-File", [])
+	if "pyosys/NOTICE" not in files:
+		problems.append("no License-File: pyosys/NOTICE")
 	licenses = metadata.removesuffix("METADATA") + "licenses/"
-	problems += [f"no {licenses}{f}" for f in meta.get_all("License-File", []) if licenses + f not in names]
+	problems += [f"no {licenses}{f}" for f in files if licenses + f not in names]
 	bundled = sorted(n.rsplit("/", 1)[1] for n in names if re.search(r"\.(dy)?libs/[^/]+$", n))
 	problems += [f"bundles {lib}, which pyosys/NOTICE doesn't cover" for lib in bundled if not lib.startswith(NOTICED_LIBS)]
 	return problems
