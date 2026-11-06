@@ -74,7 +74,8 @@ if (YOSYS_ENABLE_VERIFIC)
 
 	set(verific_data_files)
 	if ("vhdl" IN_LIST YOSYS_VERIFIC_FEATURES)
-		foreach (vdb_std 1987 1993 2008 2019)
+		# 1987 and 1993 aren't shipped: verific.cc reads those dialects against the 2008 packages
+		foreach (vdb_std 2008 2019)
 			set(vdb_std_root ${YOSYS_VERIFIC_DIR}/vhdl_packages/vdbs_${vdb_std})
 			file(GLOB_RECURSE vdb_files RELATIVE ${vdb_std_root} ${vdb_std_root}/*)
 			foreach (vdb_file ${vdb_files})
