@@ -27,6 +27,45 @@ else:
 		"-P", "cmake/GetPyosysVersion.cmake"
 	], encoding="ascii").strip()
 DIST_NAME = f"{PROJECT_NAME}-{PROJECT_VERSION}"
+# SILIMATE: everything the wheel compiles in or bundles; pyosys/NOTICE says which part is under which
+LICENSE_EXPRESSION = " AND ".join([
+	"ISC",
+	"LicenseRef-Silimate-Proprietary",
+	"LicenseRef-Verific-Proprietary",
+	"Apache-2.0",
+	"MIT",
+	"MIT-Modern-Variant",
+	"BSD-2-Clause",
+	"BSD-3-Clause",
+	"BSD-3-Clause-flex",
+	"Zlib",
+	"bzip2-1.0.6",
+	"TCL",
+	"GPL-3.0-or-later WITH Bison-exception-2.2",
+	"LicenseRef-PublicDomain",
+])
+# Source-tree paths, kept as paths under .dist-info/licenses/ (PEP 639)
+LICENSE_FILES = [
+	"COPYING",
+	"pyosys/NOTICE",
+	"verific/vhdl_packages/vhdl_2019/src/LICENSE",
+	"verific/vhdl_packages/vhdl_2019/src/AUTHORS",
+	"abc/copyright.txt",
+	"abc/src/bdd/cudd/license",
+	"abc/src/misc/zlib/license",
+	"abc/src/misc/bzlib/LICENSE",
+	"abc/src/misc/btor/LICENSE.txt",
+	"abc/src/sat/bsat/license",
+	"abc/src/sat/bsat2/LICENSE",
+	"abc/src/sat/glucose/license",
+	"abc/src/sat/glucose2/license",
+	"abc/src/sat/xsat/license",
+	"abc/src/sat/satoko/LICENSE",
+	"abc/src/sat/cadical/LICENSE",
+	"abc/src/sat/kissat/LICENSE",
+	"libs/minisat/LICENSE",
+	"libs/symfpu/LICENSE-BSD",
+]
 
 
 # https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/
@@ -142,7 +181,8 @@ def get_metadata_files():
 			("Version", PROJECT_VERSION),
 			("Summary", "Python access to libyosys"),
 			("Description-Content-Type", "text/markdown"),
-			("License-Expression", "MIT"),
+			("License-Expression", LICENSE_EXPRESSION),
+			("License-File", LICENSE_FILES),
 			("Classifier", "Programming Language :: Python :: 3"),
 			("Classifier", "Intended Audience :: Developers"),
 			("Classifier", "Operating System :: POSIX :: Linux"),
@@ -168,6 +208,8 @@ def build_wheel(wheel_dir, config_settings=None, metadata_directory=None):
 	with WheelFile(pathlib.Path(wheel_dir) / wheel_filename, "w") as wheel:
 		for filename, contents in get_metadata_files().items():
 			wheel.writestr(f"{DIST_NAME}.dist-info/{filename}", contents)
+		for path in LICENSE_FILES:
+			wheel.write(path, f"{DIST_NAME}.dist-info/licenses/{path}")
 
 		cmake_options = []
 		if config_settings is not None:

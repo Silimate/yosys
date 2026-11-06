@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Fail unless every pyosys wheel in the given directories is a Release build with Tcl.
+"""Fail unless every pyosys wheel in the given directories is a Release build with Tcl
+and accurate license metadata.
 
 pyosys/build/local_backend.py takes the CMake build type from `-C cmake=...`
 and no longer defaults it. Without it CMake builds unoptimized, and the wheel
@@ -11,8 +12,13 @@ out of each wheel's libyosys.
 A wheel built without Tcl still imports and synthesizes, but has no sdc pass, so also
 install each wheel in a fresh venv and run sdc, whose Tcl must start from the script
 library the wheel carries as share/tcl.
+
+auditwheel and delocate bundle shared libraries after the metadata is written, so check
+that pyosys/NOTICE covers each one, that every License-File is in the wheel, and that
+License-Expression parses.
 """
 
+import email
 import pathlib
 import re
 import subprocess
@@ -20,9 +26,14 @@ import sys
 import tempfile
 import zipfile
 
+from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
+
 # The build type is a single word right after the hash. Without one the compiler
 # follows instead ("..., AppleClang /usr/bin/c++ ..."), and this does not match.
 BUILD_TYPE_RE = re.compile(rb"Yosys [0-9][^\x00(]* \(git sha1 [0-9a-f]{7,40}(?:-dirty)?, ([A-Za-z]+), ")
+
+# Name prefixes of the bundled libraries pyosys/NOTICE covers
+NOTICED_LIBS = ("libffi", "libtcl")
 
 
 def build_type(wheel):
@@ -54,6 +65,23 @@ def has_tcl(wheel):
 		re.search(r"^tcl_library=\S*/pyosys/share/tcl$", out, re.M) is not None
 
 
+def license_problems(wheel):
+	with zipfile.ZipFile(wheel) as zf:
+		names = set(zf.namelist())
+		metadata = next(n for n in names if n.endswith(".dist-info/METADATA"))
+		meta = email.message_from_bytes(zf.read(metadata))
+	problems = []
+	try:
+		canonicalize_license_expression(meta["License-Expression"] or "")
+	except InvalidLicenseExpression as e:
+		problems.append(str(e))
+	licenses = metadata.removesuffix("METADATA") + "licenses/"
+	problems += [f"no {licenses}{f}" for f in meta.get_all("License-File", []) if licenses + f not in names]
+	bundled = sorted(n.rsplit("/", 1)[1] for n in names if re.search(r"\.(dy)?libs/[^/]+$", n))
+	problems += [f"bundles {lib}, which pyosys/NOTICE doesn't cover" for lib in bundled if not lib.startswith(NOTICED_LIBS)]
+	return problems
+
+
 def main(dirs):
 	wheels = [w for d in dirs for w in sorted(pathlib.Path(d).glob("*.whl"))]
 	if not wheels:
@@ -67,6 +95,7 @@ def main(dirs):
 			bad.append(f"{wheel.name} (not a Release build: pass -C cmake=-DCMAKE_BUILD_TYPE=Release)")
 		if not tcl:
 			bad.append(f"{wheel.name} (no Tcl: sdc failed or did not start Tcl from share/tcl)")
+		bad += [f"{wheel.name} ({problem})" for problem in license_problems(wheel)]
 	if bad:
 		sys.exit("bad wheels: " + ", ".join(bad))
 
