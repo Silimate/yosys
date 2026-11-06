@@ -1,0 +1,5 @@
+# checker followed by ';' or '(' names a task or function; checker <name> still declares a checker
+verific -sv checker_as_name.sv
+verific -import top
+sat -verify -prove z a top
+select -assert-count 2 top/t:$not

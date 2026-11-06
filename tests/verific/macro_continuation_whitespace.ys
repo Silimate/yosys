@@ -1,0 +1,4 @@
+# White space after a macro's continuation backslash does not end the macro
+verific -sv macro_continuation_whitespace.sv
+verific -import top
+sat -verify -prove y 3 top
