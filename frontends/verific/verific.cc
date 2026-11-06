@@ -4178,6 +4178,12 @@ struct VerificPass : public Pass {
 			// RuntimeFlags::SetVar("veri_extract_multiport_rams", 1); // SILIMATE: control this externally
 			// RuntimeFlags::SetVar("veri_allow_any_ram_in_loop", 1);  // SILIMATE: control this externally
 			RuntimeFlags::SetVar("veri_replace_const_exprs", 1);
+			// SILIMATE: accept code other tools accept: white space after a macro's
+			// continuation backslash, and checker as a name
+			RuntimeFlags::SetVar("veri_allow_whitespace_after_backslash_in_multi_line_macro", 1);
+#ifdef SILIMATE_VERIFIC_EXTENSIONS
+			RuntimeFlags::SetVar("veri_allow_checker_as_name", 1);
+#endif
 #endif
 #ifdef VERIFIC_VHDL_SUPPORT
 			RuntimeFlags::SetVar("vhdl_extract_dualport_rams", 0);

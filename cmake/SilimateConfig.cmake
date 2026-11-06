@@ -6,8 +6,6 @@ set(YOSYS_VERIFIC_DIR ${PROJECT_SOURCE_DIR}/verific)
 # Pyosys is the primary interface for the Silimate fork
 set(YOSYS_WITH_PYTHON ON CACHE BOOL "" FORCE)
 
-add_library(verific INTERFACE)
-
 # Homebrew's binutils ships libbfd but not libiberty, which backward-cpp's libbfd
 # backend links against. When binutils happens to be installed, use_homebrew()
 # puts it on the find path and backward-cpp prefers the libbfd backend, producing

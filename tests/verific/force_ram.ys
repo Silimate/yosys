@@ -1,0 +1,14 @@
+# (* force_ram *) extracts an array of structs as a RAM with multi-port extraction off
+verific -cfg veri_elaborate_multiport_rams_for_structures 1
+verific -sv force_ram.sv
+verific -import top
+select -assert-count 1 t:$memwr
+select -assert-count 1 t:$memwr r:MEMID=\forced %i
+
+# verific -force-ram does the same without the attribute
+design -reset
+verific -cfg veri_elaborate_multiport_rams_for_structures 1
+verific -sv force_ram.sv
+verific -force-ram top.plain
+verific -import top
+select -assert-count 2 t:$memwr

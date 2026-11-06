@@ -1,0 +1,5 @@
+# -sv, -makelib <lib> ... -endlib and <sm> ... </sm> are understood, not unknown options or files
+logger -expect-no-warnings
+verific -f flist/dialect.f
+verific -import top
+select -assert-mod-count 2 top leaf

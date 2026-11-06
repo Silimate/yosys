@@ -1,0 +1,22 @@
+# A .f entry in a file list is a nested -f file list
+verific -f flist/nested.f
+verific -import top
+select -assert-mod-count 2 top leaf
+
+# A .F entry is a nested -F file list, with paths relative to itself
+design -reset
+verific -f flist/nested_capital.f
+verific -import top
+select -assert-mod-count 2 top leaf
+
+# With -FF, a nested -f file list also resolves paths relative to itself
+design -reset
+verific -FF flist/ff.f
+verific -import top
+select -assert-mod-count 2 top leaf
+
+# Several nested lists matched by one wildcard in a relative -F list
+design -reset
+verific -F flist/glob.F
+verific -import top
+select -assert-mod-count 2 top leaf

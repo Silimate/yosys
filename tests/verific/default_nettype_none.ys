@@ -1,0 +1,4 @@
+# `default_nettype none still lets implicit nets elaborate, as wires
+verific -sv default_nettype_none.sv
+verific -import top
+sat -verify -prove y 1 -set a 0 top

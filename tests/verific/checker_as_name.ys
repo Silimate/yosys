@@ -1,0 +1,6 @@
+# checker is a name unless a name follows it; checker <name> still declares a checker
+verific -sv checker_as_name.sv
+verific -import top checker_var
+sat -verify -prove z a top
+select -assert-count 2 top/t:$not
+sat -verify -prove y y_ref checker_var
