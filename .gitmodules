@@ -8,9 +8,6 @@
 [submodule "cxxopts"]
 	path = libs/cxxopts
 	url = https://github.com/jarro2783/cxxopts
-[submodule "backward-cpp"]
-	path = libs/backward-cpp
-	url = git@github.com:bombela/backward-cpp.git
 [submodule "fmt"]
 	path = libs/fmt
 	url = https://github.com/fmtlib/fmt

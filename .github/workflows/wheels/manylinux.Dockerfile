@@ -1,6 +1,6 @@
 # Toolchain for the Linux wheel (release.yml builds it once and caches it on ghcr.io)
 FROM quay.io/pypa/manylinux2014_x86_64
-RUN yum install -y devtoolset-11 gperf ccache tcl-devel zlib-devel libffi-devel elfutils-devel elfutils-libelf-devel libdwarf-devel
+RUN yum install -y devtoolset-11 gperf ccache tcl-devel zlib-devel libffi-devel
 ENV PATH=/opt/rh/devtoolset-11/root/usr/bin:/opt/python/cp313-cp313/bin:$PATH
 
 # CentOS 7's bison and flex are too old for Yosys

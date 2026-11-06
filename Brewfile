@@ -16,7 +16,5 @@ brew "googletest"
 
 brew "autoconf"
 
-brew "dwarfutils"
-brew "libelf"
 
 brew "ccache"
