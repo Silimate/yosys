@@ -206,7 +206,8 @@ bool is_inlinable_cell(RTLIL::IdString type)
 		ID($_AND_), ID($_NAND_), ID($_OR_), ID($_NOR_),
 		ID($_XOR_), ID($_XNOR_), ID($_ANDNOT_), ID($_ORNOT_),
 		ID($_MUX_), ID($_NMUX_),
-		ID($_AOI3_), ID($_OAI3_), ID($_AOI4_), ID($_OAI4_));
+		ID($_AOI3_), ID($_OAI3_), ID($_AOI4_), ID($_OAI4_),
+		ID($barrier));
 }
 
 bool is_ff_cell(RTLIL::IdString type)
@@ -1317,6 +1318,9 @@ struct CxxrtlWorker {
 			f << ".bit_or(";
 			dump_sigspec_rhs(cell->getPort(ID::D), for_debug);
 			f << ")).bit_not()";
+		// Barriers
+		} else if (cell->type == ID($barrier)) {
+			dump_sigspec_rhs(cell->getPort(ID::A), for_debug);
 		} else {
 			log_assert(false);
 		}

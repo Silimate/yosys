@@ -83,7 +83,8 @@ struct EstimateSta {
 
 	void run()
 	{
-		log("\nModule %s\n", m);
+		log("\n");
+		log("Module %s\n", m);
 		if (clk.has_value())
 			log("Domain %s\n", log_signal(*clk));
 
@@ -120,7 +121,7 @@ struct EstimateSta {
 				if (!aigs.count(fingerprint)) {
 					aigs.emplace(fingerprint, Aig(cell));
 					if (aigs.at(fingerprint).name.empty()) {
-						log_error("Unsupported cell '%s' in module '%s'",
+						log_error("Unsupported cell '%s' in module '%s'\n",
 								  cell->type.unescape(), m);
 					}
 				}
@@ -216,7 +217,7 @@ struct EstimateSta {
 		}
 
 		if (!topo.sort())
-			log_error("Module '%s' contains combinational loops", m);
+			log_error("Module '%s' contains combinational loops\n", m);
 
 		// now we determine how long it takes for signals to stabilize
 
@@ -266,7 +267,8 @@ struct EstimateSta {
 			return;
 		}
 
-		log("Critical path is %ld nodes long:\n\n", crit);
+		log("Critical path is %ld nodes long:\n", crit);
+		log("\n");
 
 		// we use dict instead of pool because dict gives us
 		// some compile-time errors related to hashing

@@ -351,7 +351,7 @@ void LogManager::error_with_prefix(LogSeverity severity, LogSourceLocation src, 
 	if (severity == LogSeverity::Error)
 		suppressed();
 
-	formatted_string(severity, src, prefix, format, message);
+	logv_string(severity, src, prefix, format, message);
 	flush();
 
 	make_debug = bak_make_debug;
@@ -404,11 +404,14 @@ void LogManager::add_experimental(const std::string &str)
 	}
 }
 
-void LogManager::add_deprecated(const std::string &str)
+void LogManager::add_deprecated(const std::string &feature, const std::string &earliest_removal)
 {
-	if (deprecated.count(str) == 0) {
-		log_warning("Feature '%s' is deprecated.\n", str);
-		deprecated.insert(str);
+	if (deprecated.count(feature) == 0) {
+		if (earliest_removal.empty())
+			log_warning("Feature '%s' is deprecated.\n", feature);
+		else
+			log_warning("Feature '%s' is deprecated and may be removed as soon as Yosys %s.\n", feature, earliest_removal);
+		deprecated[feature] = earliest_removal;
 	}
 }
 

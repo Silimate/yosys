@@ -284,7 +284,7 @@ struct OptMergeThreadWorker
 				// mem can have an excessively large parameter holding the init data
 				continue;
 			}
-			if (cell->type == ID($scopeinfo))
+			if (cell->type.in(ID($scopeinfo), ID($barrier)))
 				continue;
 			if (mode_keepdc && has_dont_care_initval(cell))
 				continue;

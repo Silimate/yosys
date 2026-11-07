@@ -28,9 +28,9 @@ EOT
 # Signal pins keep ports 1 and 2, supplies are appended as inputs carrying their pg_type
 logger -expect log "wire input 1 \\A" 1
 logger -expect log "wire output 2 \\Y" 1
-logger -expect log "attribute \\pg_type \"primary_power\"" 1
+logger -expect log "attribute .pg_type .primary_power" 1
 logger -expect log "wire input 3 \\VDD" 1
-logger -expect log "attribute \\pg_type \"primary_ground\"" 1
+logger -expect log "attribute .pg_type .primary_ground" 1
 logger -expect log "wire input 4 \\VSS" 1
 logger -expect-no-warnings
 dump =MACRO

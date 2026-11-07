@@ -527,7 +527,7 @@ if (YOSYS_ENABLE_PYTHON)
 			)
 		endif()
 		if (NOT MSVC AND NOT YOSYS_WITHOUT_SLANG)
-			install(TARGETS sn 
+			install(TARGETS sn
 				DESTINATION ${pyosys_install_dir}
 			)
 		endif()

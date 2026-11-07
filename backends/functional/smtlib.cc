@@ -62,7 +62,7 @@ struct SmtSort {
 		} else if(sort.is_signal()) {
 			return list("_", "BitVec", sort.width());
 		} else {
-			log_error("unknown sort");
+			log_error("unknown sort\n");
 		}
 	}
 };
@@ -275,7 +275,7 @@ struct SmtModule {
 struct FunctionalSmtBackend : public Backend {
 	FunctionalSmtBackend() : Backend("functional_smt2", "Generate SMT-LIB from Functional IR") {}
 
-	void help() override { log("\nFunctional SMT Backend.\n\n"); }
+	void help() override { log("\n"); log("Functional SMT Backend.\n"); log("\n"); }
 
 	void execute(std::ostream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design *design) override
 	{
