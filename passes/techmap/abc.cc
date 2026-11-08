@@ -154,6 +154,9 @@ struct AbcConfig
 	int abc_max_node_retention_origins = 5; // number of node retention origins (default 5)
 	std::string signal_map_file;
 	std::string cdc_file;
+	// SILIMATE: -log, one stream for every run of the pass, each line written by one locked fprintf
+	std::string log_file;
+	FILE *log_out = nullptr;
 	dict<std::string, double> gate_delays; // SILIMATE: -gate_delays, "<gate>" or "<gate>.<pin>" -> delay
 
 	bool is_yosys_abc() const {
@@ -935,7 +938,7 @@ struct abc_output_filter
 			return;
 		}
 		if (ch == '\n') {
-			state.logs.log("ABC: %s\n", replace_tempdir(linebuf, global_tempdir_name, per_run_tempdir_name, show_tempdir));
+			emit(replace_tempdir(linebuf, global_tempdir_name, per_run_tempdir_name, show_tempdir));
 			got_cr = false, linebuf.clear();
 			return;
 		}
@@ -948,14 +951,24 @@ struct abc_output_filter
 	{
 		int pi, po;
 		if (sscanf(line.c_str(), "Start-point = pi%d.  End-point = po%d.", &pi, &po) == 2) {
-			state.logs.log("ABC: Start-point = pi%d (%s).  End-point = po%d (%s).\n",
+			emit(stringf("Start-point = pi%d (%s).  End-point = po%d (%s).",
 					pi, state.pi_map.count(pi) ? state.pi_map.at(pi).c_str() : "???",
-					po, state.po_map.count(po) ? state.po_map.at(po).c_str() : "???");
+					po, state.po_map.count(po) ? state.po_map.at(po).c_str() : "???"));
 			return;
 		}
 
 		for (char ch : line)
 			next_char(ch);
+	}
+
+	// SILIMATE: the log gets ABC's lines only once ABC exits, so -log writes each one as it comes
+	void emit(const std::string &text)
+	{
+		state.logs.log("ABC: %s\n", text);
+		if (state.config.log_out) {
+			fprintf(state.config.log_out, "%s\n", text.c_str());
+			fflush(state.config.log_out);
+		}
 	}
 };
 
@@ -2160,6 +2173,12 @@ struct AbcPass : public Pass {
 		log("        write a mapping of signals that cross clock domain boundaries.\n");
 		log("        each line lists a signal and the domain indices it bridges.\n");
 		log("\n");
+		log("    -log <file>\n");
+		log("        write ABC's output to <file> a line at a time, as ABC prints it.\n");
+		log("        the log only gets these lines once ABC exits, so a run that is\n");
+		log("        killed while ABC is running leaves them in <file> alone. A build\n");
+		log("        that links ABC into yosys writes them only once ABC returns.\n");
+		log("\n");
 		log("    -reserved_cores <num>\n");
 		log("        number of CPU cores to reserve for the main thread and other work.\n");
 		log("        Default is 4. The actual number of worker threads used is:\n");
@@ -2366,6 +2385,10 @@ struct AbcPass : public Pass {
 			}
 			if (arg == "-cdc_map" && argidx+1 < args.size()) {
 				config.cdc_file = args[++argidx];
+				continue;
+			}
+			if (arg == "-log" && argidx+1 < args.size()) {
+				config.log_file = args[++argidx];
 				continue;
 			}
 			if (arg == "-liberty_args" && argidx+1 < args.size()) {
@@ -2582,6 +2605,15 @@ struct AbcPass : public Pass {
 		}
 
 		emit_global_input_files(config);
+
+		// SILIMATE: -log, closed once the worker threads, declared after it, have joined
+		std::unique_ptr<FILE, decltype(&fclose)> log_out(nullptr, fclose);
+		if (!config.log_file.empty()) {
+			log_out.reset(fopen(config.log_file.c_str(), "wt"));
+			if (!log_out)
+				log_warning("Opening %s for writing failed: %s\n", config.log_file, strerror(errno));
+			config.log_out = log_out.get();
+		}
 
 		// SILIMATE: -max_threads (-1 = no limit, 0 = main thread only) and -reserved_cores
 		int max_threads = config.max_threads < 0 ? INT_MAX : config.max_threads;

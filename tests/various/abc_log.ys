@@ -1,0 +1,15 @@
+# -log writes ABC's output to a file, line by line as ABC prints it, as well as to the log.
+# Each module is a run of its own, and the runs share the file.
+
+read_verilog <<EOT
+module top(input a, b, c, output y);
+  assign y = a & b | c;
+endmodule
+module other(input a, b, output y);
+  assign y = a ^ b;
+endmodule
+EOT
+techmap
+abc -log abc_log.out
+!test "$(grep -cxF '+ read_blif <abc-temp-dir>/input.blif ' abc_log.out)" = 2
+!test "$(grep -cxF '+ write_blif <abc-temp-dir>/output.blif ' abc_log.out)" = 2
