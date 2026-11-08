@@ -47,11 +47,11 @@ jobs:
           restore-keys: ccache-linux-
       - name: Build wheel
         env:
-          IMAGE: ghcr.io/silimate/yosys-manylinux:${{ hashFiles('.github/workflows/wheels/manylinux.Dockerfile') }}
+          IMAGE: ghcr.io/silimate/yosys-manylinux:${{ hashFiles('.github/workflows/wheels/manylinux.Dockerfile', '.github/workflows/wheels/build_bitwuzla.sh') }}
         run: |
-          # The build image is only rebuilt when its Dockerfile changes
+          # The build image is only rebuilt when its Dockerfile or Bitwuzla's build script changes
           echo ${{ github.token }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker pull $IMAGE || (docker build -t $IMAGE - < .github/workflows/wheels/manylinux.Dockerfile && docker push $IMAGE)
+          docker pull $IMAGE || (docker build -t $IMAGE -f .github/workflows/wheels/manylinux.Dockerfile .github/workflows/wheels && docker push $IMAGE)
           docker run --rm -v $PWD:$PWD -w $PWD -e PYOSYS_VERSION_OVERRIDE $IMAGE \
             sh -c '.github/workflows/wheels/build.sh && auditwheel repair --plat manylinux2014_x86_64 -w dist wheelhouse/*.whl && python3 .github/workflows/wheels/silimate_check_release.py dist'
       - uses: actions/upload-artifact@v7

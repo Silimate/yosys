@@ -14,8 +14,8 @@ library the wheel carries as share/tcl.
 
 The lec pass proves cut miters with the Bitwuzla a release wheel carries beside yosys-abc,
 and quietly skips that proof without one, so when the build was given one
-(YOSYS_BITWUZLA_EXECUTABLE) check it is there, solves, and on macOS links only system
-libraries (on Linux it is a static binary).
+(YOSYS_BITWUZLA_EXECUTABLE) check it is there with its licenses, solves, and on macOS links
+only system libraries (on Linux it is a static binary).
 """
 
 import os
@@ -51,6 +51,8 @@ ys.run_pass("read_verilog t.v; hierarchy -top t; sdc t.sdc", ys.Design())
 BITWUZLA_SMOKE = """
 import os, subprocess, sys, pyosys
 bitwuzla = os.path.join(os.path.dirname(pyosys.__file__), "bitwuzla")
+licenses = os.path.join(os.path.dirname(pyosys.__file__), "share", "licenses", "bitwuzla", "README")
+print("licenses=" + ("yes" if os.path.isfile(licenses) else "no"))
 query = "(declare-const x (_ BitVec 8))(assert (distinct (bvadd x x) (bvshl x #x01)))(check-sat)"
 print("bitwuzla=" + subprocess.run([bitwuzla], input=query, capture_output=True, text=True).stdout.strip())
 if sys.platform == "darwin":
@@ -72,7 +74,7 @@ def smoke(wheel):
 	tcl = sdc.returncode == 0 and "Tcl_Init() call failed" not in out and \
 		re.search(r"^tcl_library=\S*/pyosys/share/tcl$", out, re.M) is not None
 	bitwuzla = smt.returncode == 0 and re.search(r"^bitwuzla=unsat$", smt.stdout, re.M) is not None and \
-		re.search(r"^nonsystem=\S", smt.stdout, re.M) is None
+		re.search(r"^nonsystem=\S", smt.stdout, re.M) is None and re.search(r"^licenses=yes$", smt.stdout, re.M) is not None
 	return tcl, bitwuzla
 
 
@@ -90,7 +92,7 @@ def main(dirs):
 		if not tcl:
 			bad.append(f"{wheel.name} (no Tcl: sdc failed or did not start Tcl from share/tcl)")
 		if not bitwuzla and os.environ.get("YOSYS_BITWUZLA_EXECUTABLE"):
-			bad.append(f"{wheel.name} (no Bitwuzla: pyosys/bitwuzla missing, failing, or linking non-system libraries)")
+			bad.append(f"{wheel.name} (no Bitwuzla: pyosys/bitwuzla missing, failing, linking non-system libraries, or without its licenses)")
 	if bad:
 		sys.exit("bad wheels: " + ", ".join(bad))
 

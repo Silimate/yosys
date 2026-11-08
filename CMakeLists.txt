@@ -533,11 +533,16 @@ if (YOSYS_ENABLE_PYTHON)
 				DESTINATION ${pyosys_install_dir}
 			)
 		endif()
-		# SILIMATE: see YOSYS_BITWUZLA_EXECUTABLE
+		# SILIMATE: see YOSYS_BITWUZLA_EXECUTABLE. Its licenses, and those of the libraries it links,
+		# sit in ../share/licenses/bitwuzla from the binary (build_bitwuzla.sh puts them there)
 		if (YOSYS_BITWUZLA_EXECUTABLE)
 			install(PROGRAMS ${YOSYS_BITWUZLA_EXECUTABLE}
 				DESTINATION ${pyosys_install_dir}
 				RENAME bitwuzla
+			)
+			cmake_path(GET YOSYS_BITWUZLA_EXECUTABLE PARENT_PATH bitwuzla_bindir)
+			install(DIRECTORY ${bitwuzla_bindir}/../share/licenses/bitwuzla
+				DESTINATION ${pyosys_install_dir}/share/licenses
 			)
 		endif()
 		yosys_install_component_data(${library_components} DESTINATION ${pyosys_install_dir}/share)

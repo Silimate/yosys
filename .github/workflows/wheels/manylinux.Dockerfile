@@ -1,14 +1,15 @@
 # Toolchain for the Linux wheel (release.yml builds it once and caches it on ghcr.io)
 
-# Bitwuzla, the SMT solver the lec pass proves cut miters with, as one static binary that runs
-# wherever the wheel does. It needs newer GMP and MPFR than CentOS 7 has, so it builds on Ubuntu.
+# Bitwuzla, the SMT solver the lec pass proves cut miters with: a static binary runs on any Linux,
+# and CentOS 7's toolchain can't build it, so it builds on Ubuntu (build context: this directory)
 FROM ubuntu:24.04 AS bitwuzla
-RUN apt-get update -qq && apt-get install -y -qq g++ git meson ninja-build pkg-config python3 libgmp-dev libmpfr-dev
-RUN git clone -q --depth 1 -b 0.9.1 https://github.com/bitwuzla/bitwuzla /src && cd /src \
-	&& ./configure.py --static --prefix /opt/bitwuzla && ninja -C build install
+RUN apt-get update -qq && apt-get install -y -qq g++ make m4 curl xz-utils git meson ninja-build pkg-config python3
+COPY build_bitwuzla.sh /
+RUN /build_bitwuzla.sh /opt/bitwuzla
 
 FROM quay.io/pypa/manylinux2014_x86_64
 COPY --from=bitwuzla /opt/bitwuzla/bin/bitwuzla /opt/bitwuzla/bin/bitwuzla
+COPY --from=bitwuzla /opt/bitwuzla/share/licenses /opt/bitwuzla/share/licenses
 ENV YOSYS_BITWUZLA_EXECUTABLE=/opt/bitwuzla/bin/bitwuzla
 RUN yum install -y devtoolset-11 gperf ccache tcl-devel zlib-devel libffi-devel
 ENV PATH=/opt/rh/devtoolset-11/root/usr/bin:/opt/python/cp313-cp313/bin:$PATH
