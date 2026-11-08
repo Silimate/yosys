@@ -54,6 +54,8 @@ option(YOSYS_DISABLE_THREADS "Disable threading" OFF)
 set(YOSYS_ABC_EXECUTABLE "" CACHE FILEPATH
 	"Path to the ABC executable (empty for vendored, 'INTEGRATED-NOTFOUND' for in-process)")
 option(YOSYS_WITHOUT_ABC "Disable ABC support (not recommended)" OFF)
+# SILIMATE: the lec pass proves cut miters with Bitwuzla, which it looks for beside yosys-abc
+set(YOSYS_BITWUZLA_EXECUTABLE "" CACHE FILEPATH "Bitwuzla binary for pyosys to ship beside yosys-abc (empty for none)")
 option(YOSYS_WITHOUT_ZLIB "Disable zlib integration" OFF)
 option(YOSYS_WITHOUT_LIBFFI "Disable libffi integration" OFF)
 option(YOSYS_WITHOUT_READLINE "Disable readline integration" ON)
@@ -529,6 +531,18 @@ if (YOSYS_ENABLE_PYTHON)
 		if (NOT MSVC AND NOT YOSYS_WITHOUT_SLANG)
 			install(TARGETS sn
 				DESTINATION ${pyosys_install_dir}
+			)
+		endif()
+		# SILIMATE: see YOSYS_BITWUZLA_EXECUTABLE. Its licenses, and those of the libraries it links,
+		# sit in ../share/licenses/bitwuzla from the binary (build_bitwuzla.sh puts them there)
+		if (YOSYS_BITWUZLA_EXECUTABLE)
+			install(PROGRAMS ${YOSYS_BITWUZLA_EXECUTABLE}
+				DESTINATION ${pyosys_install_dir}
+				RENAME bitwuzla
+			)
+			cmake_path(GET YOSYS_BITWUZLA_EXECUTABLE PARENT_PATH bitwuzla_bindir)
+			install(DIRECTORY ${bitwuzla_bindir}/../share/licenses/bitwuzla
+				DESTINATION ${pyosys_install_dir}/share/licenses
 			)
 		endif()
 		yosys_install_component_data(${library_components} DESTINATION ${pyosys_install_dir}/share)
