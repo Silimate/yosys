@@ -154,7 +154,9 @@ struct AbcConfig
 	int abc_max_node_retention_origins = 5; // number of node retention origins (default 5)
 	std::string signal_map_file;
 	std::string cdc_file;
-	std::string log_file; // SILIMATE: -log
+	// SILIMATE: -log, one stream for every run of the pass, each line written by one locked fprintf
+	std::string log_file;
+	FILE *log_out = nullptr;
 	dict<std::string, double> gate_delays; // SILIMATE: -gate_delays, "<gate>" or "<gate>.<pin>" -> delay
 
 	bool is_yosys_abc() const {
@@ -314,11 +316,7 @@ struct RunAbcState {
 	bool clk_polarity = false;
 	RTLIL::SigSpec clk_sig;
 
-	// SILIMATE: -log, which gets each line of ABC's output as ABC prints it
-	FILE *log_out = nullptr;
-
 	RunAbcState(const AbcConfig &config) : config(config) {}
-	~RunAbcState() { if (log_out) fclose(log_out); }
 	void run(ConcurrentStack<AbcProcess> &process_pool);
 	void write_signal_map();
 };
@@ -967,9 +965,9 @@ struct abc_output_filter
 	void emit(const std::string &text)
 	{
 		state.logs.log("ABC: %s\n", text);
-		if (state.log_out) {
-			fprintf(state.log_out, "%s\n", text.c_str());
-			fflush(state.log_out);
+		if (state.config.log_out) {
+			fprintf(state.config.log_out, "%s\n", text.c_str());
+			fflush(state.config.log_out);
 		}
 	}
 };
@@ -1204,12 +1202,6 @@ void AbcModuleState::prepare_module(RTLIL::Design *design, RTLIL::Module *module
 	run_abc.clk_polarity = clk_polarity;
 	run_abc.clk_sig = clk_sig;
 	run_abc.write_signal_map();
-	// SILIMATE: -log, opened here so that, like the signal map, the first run truncates it
-	if (!run_abc.config.log_file.empty()) {
-		run_abc.log_out = fopen(run_abc.config.log_file.c_str(), state_index == 0 ? "wt" : "at");
-		if (run_abc.log_out == nullptr)
-			log_warning("Opening %s for writing failed: %s\n", run_abc.config.log_file, strerror(errno));
-	}
 }
 
 
@@ -2184,7 +2176,8 @@ struct AbcPass : public Pass {
 		log("    -log <file>\n");
 		log("        write ABC's output to <file> a line at a time, as ABC prints it.\n");
 		log("        the log only gets these lines once ABC exits, so a run that is\n");
-		log("        killed while ABC is running leaves them in <file> alone.\n");
+		log("        killed while ABC is running leaves them in <file> alone. A build\n");
+		log("        that links ABC into yosys writes them only once ABC returns.\n");
 		log("\n");
 		log("    -reserved_cores <num>\n");
 		log("        number of CPU cores to reserve for the main thread and other work.\n");
@@ -2612,6 +2605,15 @@ struct AbcPass : public Pass {
 		}
 
 		emit_global_input_files(config);
+
+		// SILIMATE: -log, closed once the worker threads, declared after it, have joined
+		std::unique_ptr<FILE, decltype(&fclose)> log_out(nullptr, fclose);
+		if (!config.log_file.empty()) {
+			log_out.reset(fopen(config.log_file.c_str(), "wt"));
+			if (!log_out)
+				log_warning("Opening %s for writing failed: %s\n", config.log_file, strerror(errno));
+			config.log_out = log_out.get();
+		}
 
 		// SILIMATE: -max_threads (-1 = no limit, 0 = main thread only) and -reserved_cores
 		int max_threads = config.max_threads < 0 ? INT_MAX : config.max_threads;
