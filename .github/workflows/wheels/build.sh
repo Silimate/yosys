@@ -8,6 +8,7 @@ mkdir -p $TMPDIR
 ccache -z
 
 make -C verific/tclmain -j$(getconf _NPROCESSORS_ONLN)
-python3 -m pip wheel . --no-build-isolation -Ccmake="-DCMAKE_BUILD_TYPE=Release -DYOSYS_COMPILER_LAUNCHER=ccache" -w wheelhouse
+# YOSYS_BITWUZLA_EXECUTABLE, when set, ships Bitwuzla beside yosys-abc
+python3 -m pip wheel . --no-build-isolation -Ccmake="-DCMAKE_BUILD_TYPE=Release -DYOSYS_COMPILER_LAUNCHER=ccache -DYOSYS_BITWUZLA_EXECUTABLE=$YOSYS_BITWUZLA_EXECUTABLE" -w wheelhouse
 python3 .github/workflows/wheels/silimate_check_release.py wheelhouse
 ccache -s
