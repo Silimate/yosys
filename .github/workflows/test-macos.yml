@@ -13,6 +13,8 @@ on:
       - '.github/workflows/test-macos.yml'
       - '.github/actions/setup-build-env/**'
       - '.github/actions/setup-iverilog/**'
+      - '.github/actions/setup-bitwuzla/**'
+      - '.github/workflows/wheels/build_bitwuzla.sh'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,6 +40,10 @@ jobs:
           runs-on: macos-latest
           get-build-deps: true
           get-iverilog: true
+
+      # SILIMATE: Bitwuzla for lec's SMT proofs, built like the release's and cached
+      - name: Setup Bitwuzla
+        uses: ./.github/actions/setup-bitwuzla
 
       - name: Build Verific
         run: cd verific/tclmain && make -j$procs
