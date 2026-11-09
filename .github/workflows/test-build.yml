@@ -128,10 +128,30 @@ jobs:
           lookup-only: true
           fail-on-cache-miss: true
 
+  # SILIMATE: the lec pass proves cut miters with Bitwuzla, which the release wheels ship. This
+  # builds it beside build-yosys, so a rebuild (only when its build script or Dockerfile changes) rarely delays
+  # the tests and a cache hit never does. It runs on pushes to main too, so pull requests find the
+  # cache there.
+  build-bitwuzla:
+    name: Build Bitwuzla
+    runs-on: ubuntu-latest
+    needs: pre_docs_job
+    if: needs.pre_docs_job.outputs.should_skip != 'true'
+    steps:
+      - name: Checkout Yosys
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github
+          persist-credentials: false
+
+      - name: Setup Bitwuzla
+        uses: ./.github/actions/setup-bitwuzla
+
   test-yosys:
     name: Run tests
     runs-on: ${{ matrix.os }}
-    needs: [build-yosys, pre_job]
+    # SILIMATE: build-bitwuzla too, so the Bitwuzla cache is there
+    needs: [build-yosys, build-bitwuzla, pre_job]
     if: github.event_name != 'push' && needs.pre_job.outputs.should_skip != 'true'
     env:
       CC: clang
@@ -153,6 +173,10 @@ jobs:
           runs-on: ${{ matrix.os }}
           get-build-deps: true
           get-iverilog: true
+
+      # SILIMATE: restores what build-bitwuzla cached and sets $BITWUZLA for lec
+      - name: Setup Bitwuzla
+        uses: ./.github/actions/setup-bitwuzla
 
       - name: Restore Build Directory from Cache
         uses: actions/cache/restore@v6
@@ -318,6 +342,8 @@ jobs:
       - test-cells
       - test-docs
       - test-docs-build
+      # SILIMATE: if build-bitwuzla fails, test-yosys is skipped, not failed, so check it here
+      - build-bitwuzla
     if: always()
     steps:
       - name: Check results
