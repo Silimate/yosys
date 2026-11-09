@@ -155,6 +155,17 @@ for name in ("top", "bused"):
   assert ports(f"{tmp}/{name}_wrap.json", f"{name}_wrap") == want, name
 EOT
 
+# After a dump that fails once W is set, the import still elaborates at W's default: interactive
+# commands go on after an error, where -p ends
+printf '%s\n' "verific -sv $tmp/pkg.sv $tmp/top.sv" \
+  "verific -dump-ports -chparam W 4 -chparam L 1 $tmp/top.json top" \
+  "verific -import top" "write_json $tmp/recovered.json" | $YOSYS -q > /dev/null 2>&1 || true
+python3 - $tmp <<'EOT'
+import json, sys
+y = json.load(open(f"{sys.argv[1]}/recovered.json"))["modules"]["top"]["ports"]["y[0]"]
+assert len(y["bits"]) == 8, y
+EOT
+
 # What can't be written is refused: <options>|<module>|<error>
 for case in "-chparam L 1|top|no parameter 'L'" "|renamed|isn't a declaration of its own" \
             "|part|isn't a declaration of its own" "|named_ansi|isn't a declaration of its own" \
