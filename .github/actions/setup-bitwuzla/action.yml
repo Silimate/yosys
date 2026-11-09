@@ -1,0 +1,52 @@
+name: Bitwuzla setup
+description: Cached build of Bitwuzla, the SMT solver the lec pass proves cut miters with, exported as $BITWUZLA
+
+# SILIMATE: the release wheels ship Bitwuzla beside yosys-abc. A Yosys built from source has none,
+# so lec falls back to ABC and the silimate tests that expect an SMT proof fail. This builds it
+# with the release's own script, .github/workflows/wheels/build_bitwuzla.sh, and caches it on that
+# script's hash, so it is only rebuilt when the script changes.
+
+runs:
+  using: composite
+  steps:
+    # Not release-macos.yml's bitwuzla-macos- key: a build made here, with the test job's
+    # environment, must never be the one a release restores and ships.
+    - uses: actions/cache/restore@v6
+      id: restore-bitwuzla
+      with:
+        path: ~/bitwuzla
+        key: bitwuzla-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/wheels/build_bitwuzla.sh') }}
+
+    # What manylinux.Dockerfile's Bitwuzla stage installs that ubuntu-latest lacks
+    - name: Bitwuzla Linux deps
+      if: steps.restore-bitwuzla.outputs.cache-hit != 'true' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq m4 meson ninja-build
+
+    - name: Bitwuzla macOS deps
+      if: steps.restore-bitwuzla.outputs.cache-hit != 'true' && runner.os == 'macOS'
+      shell: bash
+      run: |
+        brew install meson ninja
+
+    # With the runner's default compilers, as the release builds it, not the job's CC
+    - name: Build Bitwuzla
+      if: steps.restore-bitwuzla.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        env -u CC -u CXX .github/workflows/wheels/build_bitwuzla.sh ~/bitwuzla
+
+    - uses: actions/cache/save@v6
+      if: steps.restore-bitwuzla.outputs.cache-hit != 'true'
+      with:
+        path: ~/bitwuzla
+        key: ${{ steps.restore-bitwuzla.outputs.cache-primary-key }}
+
+    # lec takes $BITWUZLA over a bitwuzla beside yosys-abc
+    - name: Export BITWUZLA
+      shell: bash
+      run: |
+        "$HOME/bitwuzla/bin/bitwuzla" --version
+        echo "BITWUZLA=$HOME/bitwuzla/bin/bitwuzla" >> "$GITHUB_ENV"
