@@ -129,7 +129,7 @@ jobs:
           fail-on-cache-miss: true
 
   # SILIMATE: the lec pass proves cut miters with Bitwuzla, which the release wheels ship. This
-  # builds it beside build-yosys, so a rebuild (only when build_bitwuzla.sh changes) rarely delays
+  # builds it beside build-yosys, so a rebuild (only when its build script or Dockerfile changes) rarely delays
   # the tests and a cache hit never does. It runs on pushes to main too, so pull requests find the
   # cache there.
   build-bitwuzla:

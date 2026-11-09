@@ -3,8 +3,8 @@ description: Cached build of Bitwuzla, the SMT solver the lec pass proves cut mi
 
 # SILIMATE: the release wheels ship Bitwuzla beside yosys-abc. A Yosys built from source has none,
 # so lec falls back to ABC and the silimate tests that expect an SMT proof fail. This builds it
-# with the release's own script, .github/workflows/wheels/build_bitwuzla.sh, and caches it on that
-# script's hash, so it is only rebuilt when the script changes.
+# the way the release does, with .github/workflows/wheels/build_bitwuzla.sh, and caches it on the
+# files that build reads, so it is only rebuilt when they change.
 
 runs:
   using: composite
@@ -15,15 +15,19 @@ runs:
       id: restore-bitwuzla
       with:
         path: ~/bitwuzla
-        key: bitwuzla-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/wheels/build_bitwuzla.sh') }}
+        key: bitwuzla-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/wheels/build_bitwuzla.sh', '.github/workflows/wheels/manylinux.Dockerfile') }}
 
-    # What manylinux.Dockerfile's Bitwuzla stage installs that ubuntu-latest lacks
-    - name: Bitwuzla Linux deps
+    # On Linux, the release's own build: manylinux.Dockerfile's bitwuzla stage, on the Ubuntu it
+    # pins. The runner's Ubuntu may be newer than the script's GMP builds on (GCC 15's C23 default
+    # fails GMP 6.3.0's configure), and the binary is static, so it runs on any runner.
+    - name: Build Bitwuzla (Linux)
       if: steps.restore-bitwuzla.outputs.cache-hit != 'true' && runner.os == 'Linux'
       shell: bash
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq m4 meson ninja-build
+        docker build --target bitwuzla -t bitwuzla-build -f .github/workflows/wheels/manylinux.Dockerfile .github/workflows/wheels
+        id=$(docker create bitwuzla-build)
+        docker cp "$id:/opt/bitwuzla" ~/bitwuzla
+        docker rm "$id"
 
     - name: Bitwuzla macOS deps
       if: steps.restore-bitwuzla.outputs.cache-hit != 'true' && runner.os == 'macOS'
@@ -31,9 +35,9 @@ runs:
       run: |
         brew install meson ninja
 
-    # With the runner's default compilers, as the release builds it, not the job's CC
-    - name: Build Bitwuzla
-      if: steps.restore-bitwuzla.outputs.cache-hit != 'true'
+    # With the runner's default compilers, as release-macos.yml builds it, not the job's CC
+    - name: Build Bitwuzla (macOS)
+      if: steps.restore-bitwuzla.outputs.cache-hit != 'true' && runner.os == 'macOS'
       shell: bash
       run: |
         env -u CC -u CXX .github/workflows/wheels/build_bitwuzla.sh ~/bitwuzla
