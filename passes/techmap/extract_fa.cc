@@ -89,6 +89,9 @@ struct ExtractFaWorker
 			bool bit_cell = cell->type.in(ID($not), ID($and), ID($or), ID($xor)) &&
 					GetSize(cell->getPort(ID::Y)) == 1 && GetSize(cell->getPort(ID::A)) == 1 &&
 					(!cell->hasPort(ID::B) || GetSize(cell->getPort(ID::B)) == 1);
+			// SILIMATE: so is abc -g XOR3/XOR4's reduction, so a full adder's sum may be one
+			bit_cell = bit_cell || (cell->type.in(ID($reduce_xor), ID($reduce_xnor)) &&
+					GetSize(cell->getPort(ID::Y)) == 1 && GetSize(cell->getPort(ID::A)) <= 4);
 			if (bit_cell || cell->type.in( ID($_BUF_), ID($_NOT_), ID($_AND_), ID($_NAND_), ID($_OR_), ID($_NOR_),
 					ID($_XOR_), ID($_XNOR_), ID($_ANDNOT_), ID($_ORNOT_), ID($_MUX_), ID($_NMUX_),
 					ID($_AOI3_), ID($_OAI3_), ID($_AOI4_), ID($_OAI4_)))
@@ -269,10 +272,9 @@ struct ExtractFaWorker
 			for (auto port : {ID::A, ID::B, ID::C, ID::D}) {
 				if (!cell->hasPort(port))
 					continue;
-				auto bit = sigmap(SigBit(cell->getPort(port)));
-				if (!bit.wire)
-					continue;
-				new_leaves.insert(bit);
+				for (auto bit : sigmap(cell->getPort(port))) // SILIMATE: a reduction's port has several bits
+					if (bit.wire)
+						new_leaves.insert(bit);
 			}
 
 			if (GetSize(new_leaves) > maxbreadth)

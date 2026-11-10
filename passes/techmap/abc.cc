@@ -111,7 +111,26 @@ static const dict<std::string, std::string> builtin_gate_pins = {
 	{"XOR", "AB"}, {"XNOR", "AB"}, {"ANDNOT", "AB"}, {"ORNOT", "AB"}, {"AOI3", "ABC"},
 	{"OAI3", "ABC"}, {"AOI4", "ABCD"}, {"OAI4", "ABCD"}, {"MUX", "ABS"}, {"NMUX", "ABS"},
 	{"MUX4", "STABCD"}, {"MUX8", "STUABCDEFGH"}, {"MUX16", "STUVABCDEFGHIJKLMNOP"},
+	{"XOR3", "ABC"}, {"XNOR3", "ABC"}, {"XOR4", "ABCD"}, {"XNOR4", "ABCD"},
 };
+
+// SILIMATE: the wide XOR/XNOR gates, which map back to $reduce_xor/$reduce_xnor
+static const std::vector<std::string> builtin_wide_xors = {"XOR3", "XNOR3", "XOR4", "XNOR4"};
+
+// SILIMATE: genlib sum of products for the parity of `n` inputs A, B, ..., inverted for XNOR
+static std::string parity_sop(int n, bool xnor)
+{
+	std::string sop;
+	for (int m = 0; m < (1 << n); m++) {
+		if ((__builtin_popcount(m) % 2 == 0) != xnor)
+			continue;
+		sop += sop.empty() ? "(" : "+(";
+		for (int i = 0; i < n; i++)
+			sop += stringf("%s%s%c", i ? "*" : "", (m >> i) & 1 ? "" : "!", 'A' + i);
+		sop += ")";
+	}
+	return sop;
+}
 
 struct gate_t
 {
@@ -1558,6 +1577,14 @@ void emit_global_input_files(const AbcConfig &config)
 			fprintf(f, "GATE MUX    %d Y=(A*B)+(S*B)+(!S*A); %s\n", cell_cost.at(ID($_MUX_)), pins("MUX", "UNKNOWN").c_str());
 		if (config.enabled_gates.count("NMUX"))
 			fprintf(f, "GATE NMUX   %d Y=!((A*B)+(S*B)+(!S*A)); %s\n", cell_cost.at(ID($_NMUX_)), pins("NMUX", "UNKNOWN").c_str());
+		// SILIMATE: a wide XOR costs the XOR2 tree it replaces, so only its delay can pick it
+		for (auto &gate : builtin_wide_xors)
+			if (config.enabled_gates.count(gate)) {
+				int n = GetSize(builtin_gate_pins.at(gate));
+				bool xnor = gate[1] == 'N';
+				fprintf(f, "GATE %-6s %d Y=%s; %s\n", gate.c_str(), (n - 1) * cell_cost.at(xnor ? ID($_XNOR_) : ID($_XOR_)),
+						parity_sop(n, xnor).c_str(), pins(gate, "UNKNOWN").c_str());
+			}
 		if (config.map_mux4)
 			fprintf(f, "GATE MUX4   %d Y=(!S*!T*A)+(S*!T*B)+(!S*T*C)+(S*T*D); %s\n", 2*cell_cost.at(ID($_MUX_)), pins("MUX4", "UNKNOWN").c_str());
 		if (config.map_mux8)
@@ -1777,6 +1804,20 @@ void AbcModuleState::extract(RTLIL::Design *design, RTLIL::Module *module)
 					cell->setPort(name, module->wire(remapped_name));
 				}
 				cell->add_strpool_attribute(ID::src, src_pool); // SILIMATE: set src attribute from wire pool
+				design->select(module, cell);
+				continue;
+			}
+			// SILIMATE: there is no 3- or 4-input XOR gate cell, so a wide XOR comes back as a reduction
+			if (c->type.in(ID(XOR3), ID(XNOR3), ID(XOR4), ID(XNOR4))) {
+				RTLIL::SigSpec sig_a;
+				for (auto name : {ID::A, ID::B, ID::C, ID::D})
+					if (c->hasPort(name))
+						sig_a.append(module->wire(remap_name(c->getPort(name).as_wire()->name)));
+				RTLIL::SigSpec sig_y = module->wire(remap_name(c->getPort(ID::Y).as_wire()->name));
+				RTLIL::Cell *cell = c->type.in(ID(XNOR3), ID(XNOR4)) ? module->addReduceXnor(remap_name(c->name), sig_a, sig_y) :
+						module->addReduceXor(remap_name(c->name), sig_a, sig_y);
+				if (markgroups) cell->attributes[ID::abcgroup] = map_autoidx;
+				cell->add_strpool_attribute(ID::src, src_pool);
 				design->select(module, cell);
 				continue;
 			}
@@ -2101,8 +2142,10 @@ struct AbcPass : public Pass {
 		log("        Map to the specified list of gate types. Supported gates types are:\n");
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("           AND, NAND, OR, NOR, XOR, XNOR, ANDNOT, ORNOT, MUX,\n");
-		log("           NMUX, AOI3, OAI3, AOI4, OAI4.\n");
+		log("           NMUX, AOI3, OAI3, AOI4, OAI4, XOR3, XNOR3, XOR4, XNOR4.\n");
 		log("        (The NOT gate is always added to this list automatically.)\n");
+		log("        No alias includes the wide XOR3, XNOR3, XOR4 and XNOR4, which come back\n");
+		log("        as $reduce_xor and $reduce_xnor cells.\n");
 		log("\n");
 		log("        The following aliases can be used to reference common sets of gate\n");
 		log("        types:\n");
@@ -2480,6 +2523,7 @@ struct AbcPass : public Pass {
 				if (g == "OAI3") goto ok_gate;
 				if (g == "AOI4") goto ok_gate;
 				if (g == "OAI4") goto ok_gate;
+				if (std::count(builtin_wide_xors.begin(), builtin_wide_xors.end(), g)) goto ok_gate; // SILIMATE
 				if (g == "simple") {
 					gate_list.push_back("AND");
 					gate_list.push_back("OR");
