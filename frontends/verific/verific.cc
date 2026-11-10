@@ -62,6 +62,7 @@ USING_YOSYS_NAMESPACE
 #include "VeriId.h"
 #include "VeriModuleItem.h"
 #include "VeriVisitor.h"
+#include "VeriBaseValue_Stat.h" // SILIMATE
 #endif
 
 #ifdef VERIFIC_VHDL_SUPPORT
@@ -259,6 +260,299 @@ static void dump_verific_modules(const char *output_path)
 	}
 	json.end_object();
 }
+
+// SILIMATE: write a module's port declarations, unelaborated, so they compile on their own; see
+// "verific -dump-ports"
+struct VerificPortWriter
+{
+	// A declaration's type: its keyword or inline body, and its packed and unpacked dimensions
+	struct Type {
+		std::string core, packed, unpacked;
+	};
+
+	std::vector<VeriTreeNode *> declarations;
+	pool<VeriTreeNode *> listed;
+
+	static std::string join(std::initializer_list<std::string> words)
+	{
+		std::string out;
+		for (auto &word : words)
+			if (!word.empty())
+				out += (out.empty() ? "" : " ") + word;
+		return out;
+	}
+
+	static std::string identifier(const char *name)
+	{
+		std::ostringstream out;
+		VeriTreeNode::PrintIdentifier(out, name);
+		return out.str();
+	}
+
+	static std::string token(unsigned id)
+	{
+		return id ? VeriTreeNode::PrintToken(id) : "";
+	}
+
+	static std::string where(VeriTreeNode *node)
+	{
+		linefile_type linefile = node ? node->Linefile() : nullptr;
+		return linefile ? stringf("%s:%d", LineFile::GetFileName(linefile), LineFile::GetLineNo(linefile)) : "?";
+	}
+
+	static std::string bound(VeriExpression *expr)
+	{
+		VeriBaseValue *value = expr->StaticEvaluate(0, nullptr);
+		if (!value || value->HasXZ() || value->Type() == VeriBaseValue::REAL) {
+			delete value;
+			log_cmd_error("Cannot evaluate the dimension at %s.\n", where(expr).c_str());
+		}
+		std::string out = std::to_string(value->Get64bitInteger());
+		delete value;
+		return out;
+	}
+
+	static std::string dims(VeriRange *range)
+	{
+		std::string out;
+		for (; range; range = range->GetNext()) {
+			if (!range->GetLeft())
+				log_cmd_error("The dimension at %s has no bound.\n", where(range).c_str());
+			out += "[" + bound(range->GetLeft()) + (range->GetRight() ? ":" + bound(range->GetRight()) : "") + "]";
+		}
+		return out;
+	}
+
+	// Whether named type `data_type` can be written as what it names: not an enum, a class or an
+	// unpacked struct or union, nor a packed one with an unnamed enum member, as a type of the same
+	// shape but another declaration doesn't connect to one of those
+	static bool writable_inline(VeriDataType *data_type, bool member = false)
+	{
+		VeriDataType *base = data_type ? data_type->GetBaseDataType() : nullptr;
+		if (!base || base->IsClassType())
+			return false;
+		if (base->IsEnum())
+			return member && data_type->IsTypeRef();
+		if (!base->IsStructUnionType())
+			return true;
+		if (!base->IsPacked())
+			return member && data_type->IsTypeRef();
+		unsigned i;
+		VeriModuleItem *decl;
+		FOREACH_ARRAY_ITEM(base->GetDecls(), i, decl)
+			if (!writable_inline(decl->GetDataType(), true))
+				return false;
+		return true;
+	}
+
+	// The package declaring `id`; the compilation unit, if it declares it there
+	static VeriModule *declaring(VeriIdDef *id)
+	{
+		MapIter li, mi;
+		VeriLibrary *library;
+		VeriModule *unit;
+		FOREACH_VERILOG_LIBRARY(li, library)
+			FOREACH_VERILOG_MODULE_IN_LIBRARY(library, mi, unit)
+				if (unit->IsPackage() && unit->GetScope() && unit->GetScope()->FindLocal(id->Name()) == id)
+					return unit;
+		return nullptr;
+	}
+
+	// List package or interface `unit` after the packages it uses and the interfaces it instantiates.
+	// The compilation unit, which every unit uses, is listed only from qualified(), and then whole,
+	// since which of its items a type needs isn't tracked
+	void list(VeriModule *unit)
+	{
+		if (listed.count(unit))
+			return;
+		listed.insert(unit);
+		VerificInstantiatedModules instances;
+		unit->Accept(instances);
+		for (auto &name : instances.names) {
+			VeriModule *instance = veri_file::GetModule(name.c_str(), 1, unit->GetLibrary()->GetName());
+			if (instance && instance->IsInterface())
+				list(instance);
+		}
+		SetIter si;
+		VeriScope *used;
+		if (unit->GetScope() && unit->GetScope()->GetUsing())
+			FOREACH_SET_ITEM(unit->GetScope()->GetUsing(), si, &used) {
+				VeriModule *package = used->GetOwner() && used->GetOwner()->IsPackage() ? used->GetOwner()->GetModule() : nullptr;
+				if (package && !package->IsRootModule())
+					list(package);
+			}
+		if (!unit->IsRootModule()) {
+			declarations.push_back(unit);
+			return;
+		}
+		unsigned i;
+		VeriModuleItem *item;
+		FOREACH_ARRAY_ITEM(unit->GetModuleItems(), i, item)
+			if (item)
+				declarations.push_back(item);
+	}
+
+	// The name of type `id` outside the design: <package>::<id>, or <id> for the compilation unit's;
+	// lists what declares it
+	std::string qualified(VeriIdDef *id)
+	{
+		VeriModule *unit = declaring(id);
+		if (!unit)
+			log_cmd_error("Cannot find where type '%s' is declared.\n", id->Name());
+		list(unit);
+		return unit->IsRootModule() ? identifier(id->Name()) : identifier(unit->Name()) + "::" + identifier(id->Name());
+	}
+
+	Type type(VeriDataType *data_type)
+	{
+		if (!data_type)
+			return {};
+		if (data_type->IsTypeRef())
+			return named(data_type);
+		if (data_type->IsNetDataType()) {
+			// Its dimensions are its data type's
+			Type of = type(data_type->GetDataType());
+			return {join({token(data_type->GetType()), of.core}), of.packed, of.unpacked};
+		}
+		std::string sign = token(data_type->GetSigning());
+		if (data_type->IsStructUnionType()) {
+			if (!data_type->IsPacked())
+				log_cmd_error("The unpacked struct or union at %s has no name.\n", where(data_type).c_str());
+			std::string body = join({data_type->IsUnionType() ? "union" : "struct", "packed", sign}) + " {";
+			unsigned i, j;
+			VeriModuleItem *decl;
+			VeriIdDef *member;
+			FOREACH_ARRAY_ITEM(data_type->GetDecls(), i, decl) {
+				Type of = type(decl->GetDataType());
+				FOREACH_ARRAY_ITEM(decl->GetIds(), j, member)
+					body += " " + join({of.core, of.packed, identifier(member->Name())}) + ";";
+			}
+			return {body + " }", dims(data_type->GetDimensions()), ""};
+		}
+		if (data_type->IsEnum())
+			log_cmd_error("The enum at %s has no name.\n", where(data_type).c_str());
+		return {join({token(data_type->GetType()), sign}),
+				dims(data_type->GetDimensions()), ""};
+	}
+
+	Type named(VeriDataType *ref)
+	{
+		VeriIdDef *id = ref->GetTypeName() ? ref->GetTypeName()->GetId() : nullptr;
+		if (!id)
+			log_cmd_error("Cannot resolve the type at %s.\n", where(ref).c_str());
+		std::string packed = dims(ref->GetDimensions());
+		// A type parameter stands for its default, which -chparam can't set
+		if (!id->IsParam() && !writable_inline(ref))
+			return {qualified(id), packed, ""};
+		Type of = type(id->GetDataType());
+		return {of.core, packed + of.packed, dims(id->GetDimensions()) + of.unpacked};
+	}
+
+	// Declaration `node` as its source writes it, else as Verific prints it: where a directive or
+	// macro is, which would compile differently apart from the design
+	static std::string text(VeriTreeNode *node)
+	{
+		std::string out;
+#ifdef VERIFIC_LINEFILE_INCLUDES_COLUMNS
+		linefile_type from = node->StartingLinefile(), to = node->EndingLinefile();
+		std::ifstream file(LineFile::GetFileName(from));
+		std::string line;
+		for (unsigned n = 1; std::getline(file, line) && n <= to->GetRightLine(); n++) {
+			if (n < from->GetLeftLine())
+				continue;
+			unsigned start = n == from->GetLeftLine() ? from->GetLeftCol() - 1 : 0;
+			unsigned stop = n == to->GetRightLine() ? to->GetRightCol() - 1 : line.size();
+			out += line.substr(start, stop - start) + (n == to->GetRightLine() ? "" : "\n");
+		}
+#endif
+		if (!out.empty() && out.find('`') == std::string::npos)
+			return out;
+		std::ostringstream printed;
+		node->PrettyPrint(printed, 0);
+		return printed.str();
+	}
+
+	void write(VeriModule *module, const char *filename)
+	{
+		// Names are escaped where they are keywords of SystemVerilog, whatever was analyzed last
+		struct SystemVerilog {
+			unsigned mode = veri_file::GetAnalysisMode();
+			SystemVerilog() { veri_file::SetAnalysisMode(veri_file::SYSTEM_VERILOG); }
+			~SystemVerilog() { veri_file::SetAnalysisMode(mode); }
+		} system_verilog;
+		if (module->IsPackage() || module->IsInterface() || module->IsConfiguration())
+			log_cmd_error("'%s' is not a module.\n", module->Name());
+		// Each port must be declared under its own name: Verific types a renamed port (.q(x)) or an
+		// expression port (x[1:0]) from the expression, which isn't written
+		unsigned i;
+		VeriExpression *connect;
+		FOREACH_ARRAY_ITEM(module->GetPortConnects(), i, connect)
+			if (!connect || (connect->GetClassId() != ID_VERIANSIPORTDECL && !connect->IsIdRef()))
+				log_cmd_error("The port at %s isn't a declaration of its own.\n", where(connect).c_str());
+		Json::array ports;
+		VeriIdDef *port;
+		FOREACH_ARRAY_ITEM(module->GetPorts(), i, port) {
+			if (port->IsNamedPort())
+				log_cmd_error("The port at %s isn't a declaration of its own.\n", where(port).c_str());
+			std::string name = identifier(port->Name()) + dims(port->GetDimensions());
+			// Elaboration resolves an interface port's type: written as declared, its interface listed
+			if (port->IsInterfacePort()) {
+				if (port->IsGenericInterfacePort() || !port->GetDataType())
+					log_cmd_error("Port '%s' has no interface type of its own.\n", port->Name());
+				VeriName *type_name = port->GetDataType()->GetTypeName();
+				VeriName *interface_name = type_name && type_name->GetPrefix() ? type_name->GetPrefix() : type_name;
+				VeriModule *unit = interface_name ? veri_file::GetModule(interface_name->GetName(), 1, module->GetLibrary()->GetName()) : nullptr;
+				if (!unit)
+					log_cmd_error("Cannot find the interface of port '%s'.\n", port->Name());
+				list(unit);
+				std::ostringstream written;
+				port->GetDataType()->PrintTypeWithoutDim(written);
+				ports.push_back(join({written.str(), name}));
+				continue;
+			}
+			Type of = type(port->GetDataType());
+			ports.push_back(join({token(port->Dir()), of.core, of.packed,
+					name + of.unpacked}));
+		}
+		Json::array texts;
+		for (auto node : declarations)
+			texts.push_back(text(node));
+		PrettyJson json;
+		if (!json.write_to_file(filename))
+			log_cmd_error("Cannot open '%s' for writing.\n", filename);
+		json.begin_object();
+		json.entry_json("ports", Json(ports));
+		json.entry_json("declarations", Json(texts));
+		json.end_object();
+	}
+};
+
+// SILIMATE: sets module parameters while the ports are written, and puts their defaults back when
+// destroyed, even on an error, as later commands read the same parse tree
+struct VerificParamOverrides
+{
+	std::vector<std::pair<VeriIdDef *, VeriExpression *>> defaults;
+
+	void set(VeriModule *module, const std::string &name, const std::string &value)
+	{
+		VeriIdDef *id = module->GetScope() ? module->GetScope()->FindLocal(name.c_str()) : nullptr;
+		if (!id || !id->IsParam() || id->IsLocalParam() || id->IsType())
+			log_cmd_error("Module '%s' has no parameter '%s' that -chparam can set.\n", module->Name(), name.c_str());
+		VeriExpression *expr = veri_file::AnalyzeExpr(value.c_str(), veri_file::SYSTEM_VERILOG, 0, module->GetScope());
+		if (!expr)
+			log_cmd_error("Cannot read '%s' as a value of parameter '%s'.\n", value.c_str(), name.c_str());
+		defaults.emplace_back(id, id->TakeInitialValue());
+		id->SetInitialValue(expr);
+	}
+
+	~VerificParamOverrides()
+	{
+		for (auto it = defaults.rbegin(); it != defaults.rend(); ++it) {
+			delete it->first->TakeInitialValue();
+			it->first->SetInitialValue(it->second);
+		}
+	}
+};
 #endif
 
 const char *get_message_type(msg_type_t msg_type)
@@ -4062,6 +4356,25 @@ struct VerificPass : public Pass {
 		log("elaborating.\n");
 		log("\n");
 		log("\n");
+		log("    verific [-work <libname>] -dump-ports [-chparam <name> <value>]... <output.json> <module>\n");
+		log("\n");
+		log("Write <module>'s port declarations to <output.json>, without elaborating. Under\n");
+		log("\"ports\", each port's declaration compiles on its own: a named packed type is\n");
+		log("written inline, a type parameter as its default, and every dimension as its\n");
+		log("value. An enum, a class, an unpacked struct or union (or a packed one with an\n");
+		log("unnamed enum member), or an interface keeps its name. Under \"declarations\",\n");
+		log("the packages and interfaces declaring them are listed, each after the packages\n");
+		log("it uses and the interfaces it instantiates, as their source writes them (as\n");
+		log("Verific prints them where a directive or macro is).\n");
+		log("A type declared in the compilation unit lists all of the unit's declarations.\n");
+		log("A port must be a declaration of its own, not an expression or another name.\n");
+		log("\n");
+		log("  -chparam <name> <value>\n");
+		log("    Evaluate the dimensions with parameter <name> set to the constant\n");
+		log("    expression <value>, rather than its default. Not a localparam or a type\n");
+		log("    parameter. Can be given more than once.\n");
+		log("\n");
+		log("\n");
 #endif
 		log("    verific [-work <libname>] {-sv|-vhdl|...} <hdl-file>\n");
 		log("\n");
@@ -5131,6 +5444,32 @@ struct VerificPass : public Pass {
 #endif
 			goto check_error;
 		}
+
+#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
+		// SILIMATE: a module's ports, without elaborating it
+		if (argidx < GetSize(args) && args[argidx] == "-dump-ports")
+		{
+			std::vector<std::pair<std::string, std::string>> params;
+			for (argidx++; argidx+2 < GetSize(args) && args[argidx] == "-chparam"; argidx += 3)
+				params.emplace_back(args[argidx+1], args[argidx+2]);
+			if (argidx+2 != GetSize(args))
+				log_cmd_error("-dump-ports needs an output path and a module, after any -chparam.\n");
+			VeriModule *veri_module = veri_file::GetModule(args[argidx+1].c_str(), 1, work.c_str());
+			if (!veri_module)
+				log_cmd_error("No analyzed Verilog module '%s'.\n", args[argidx+1].c_str());
+			try {
+				VerificParamOverrides values;
+				for (auto &param : params)
+					values.set(veri_module, param.first, param.second);
+				VerificPortWriter().write(veri_module, args[argidx].c_str());
+			} catch (...) {
+				// So the next command doesn't report this one's Verific errors
+				verific_error_msg.clear();
+				throw;
+			}
+			goto check_error;
+		}
+#endif
 
 		if (GetSize(args) > argidx && args[argidx] == "-import")
 		{
