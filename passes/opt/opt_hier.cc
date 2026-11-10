@@ -356,6 +356,32 @@ struct UsageData {
 			Wire *repl_wire = module->addWire(module->uniquify(std::string("$") + chunk.wire->name.str()), chunk.size());
 			for (int i = 0; i < repl_wire->width; i++)
 				replacement_map[SigSpec(chunk)[i]] = SigBit(repl_wire, i);
+			// The port is tied to x below and its driver moves to the new wire, so the driver's
+			// initial value moves with it; left on the port, it would claim an init for x
+			auto it = chunk.wire->attributes.find(ID::init);
+			if (it == chunk.wire->attributes.end())
+				continue;
+			Const port_init = it->second;
+			Const repl_init(State::Sx, chunk.size());
+			bool moved = false;
+			for (int i = 0; i < chunk.size(); i++) {
+				int k = chunk.offset + i;
+				if (k < GetSize(port_init) && port_init[k] != State::Sx) {
+					repl_init.set(i, port_init[k]);
+					port_init.set(k, State::Sx);
+					moved = true;
+				}
+			}
+			if (!moved)
+				continue;
+			repl_wire->attributes[ID::init] = repl_init;
+			bool any_left = false;
+			for (int k = 0; k < GetSize(port_init); k++)
+				any_left |= port_init[k] != State::Sx;
+			if (any_left)
+				chunk.wire->attributes[ID::init] = port_init;
+			else
+				chunk.wire->attributes.erase(ID::init);
 		}
 		auto disconnect_rewrite = [&](SigSpec &signal) {
 			signal.replace(replacement_map);

@@ -1,0 +1,42 @@
+# opt_hier disconnects an output no instance reads: what drove the port moves to a
+# new wire and the port is tied to x. An initial value on the port belongs to that
+# driver, so it has to move to the new wire too.
+
+# A flop whose initial value sits on an output nobody reads keeps it.
+read_verilog <<EOT
+module leaf(input clk, input d, output reg q, output y);
+	initial q = 1'b1;
+	always @(posedge clk) q <= d;
+	assign y = q ^ d;
+endmodule
+module top(input clk, input d, output y);
+	leaf u(.clk(clk), .d(d), .y(y));
+endmodule
+EOT
+hierarchy -top top
+proc
+opt_hier
+opt_clean
+select -assert-count 0 leaf/w:q leaf/a:init %i
+select -assert-count 1 leaf/a:init=1'1
+design -reset
+
+# A partly undefined initial value: left on a port tied to x, its defined and
+# undefined bits would both be init values of 1'x, which opt_clean rejects as a
+# conflict.
+read_verilog <<EOT
+module leaf(input clk, input [1:0] d, output reg [1:0] q, output y);
+	initial q = 2'bx1;
+	always @(posedge clk) q <= d;
+	assign y = ^q;
+endmodule
+module top(input clk, input [1:0] d, output y);
+	leaf u(.clk(clk), .d(d), .y(y));
+endmodule
+EOT
+hierarchy -top top
+proc
+opt_hier
+opt_clean
+select -assert-count 0 leaf/w:q leaf/a:init %i
+select -assert-count 1 leaf/a:init=2'bx1
