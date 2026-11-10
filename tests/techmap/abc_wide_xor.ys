@@ -1,0 +1,56 @@
+# -g XOR3,XNOR3,XOR4,XNOR4: wide XOR gates come back as $reduce_xor/$reduce_xnor
+
+read_verilog <<EOT
+module top(input a, b, c, d, output x3, n3, x4, n4);
+  assign x3 = a ^ b ^ c;
+  assign n3 = ~(b ^ c ^ d);
+  assign x4 = a ^ b ^ c ^ d;
+  assign n4 = ~(a ^ b ^ c ^ d);
+endmodule
+EOT
+techmap
+design -save xors
+
+# The cmos alias leaves them out
+equiv_opt -assert -post abc -g cmos
+select -assert-none t:$reduce_xor t:$reduce_xnor
+
+# Each output is one wide gate
+design -load xors
+equiv_opt -assert -post abc -g cmos,XOR3,XNOR3,XOR4,XNOR4
+select -assert-count 1 t:$reduce_xor r:A_WIDTH=3 %i
+select -assert-count 1 t:$reduce_xnor r:A_WIDTH=3 %i
+select -assert-count 1 t:$reduce_xor r:A_WIDTH=4 %i
+select -assert-count 1 t:$reduce_xnor r:A_WIDTH=4 %i
+select -assert-none t:$_XOR_ t:$_XNOR_ t:$xor
+
+# A wide gate slower than the XOR2 tree it replaces is not used
+design -load xors
+equiv_opt -assert -post abc -g cmos,XOR3,XNOR3,XOR4,XNOR4 -gate_delays XOR3=3,XNOR3=3,XOR4=3,XNOR4=3
+select -assert-none t:$reduce_xor t:$reduce_xnor
+
+# A 9-input parity mixes them, and a wide gate takes a per-pin delay
+design -reset
+read_verilog <<EOT
+module top(input [8:0] a, output y);
+  assign y = ^a;
+endmodule
+EOT
+techmap
+equiv_opt -assert -post abc -g cmos,XOR3,XOR4 -gate_delays XOR3.C=0.5
+select -assert-min 1 t:$reduce_xor
+
+# extract_fa reads a full adder whose sum is one XOR3
+design -reset
+read_verilog <<EOT
+module top(input a, b, c, output s, co);
+  assign {co, s} = a + b + c;
+endmodule
+EOT
+techmap
+abc -g cmos,XOR3
+select -assert-count 1 t:$reduce_xor
+equiv_opt -assert -post extract_fa -fa
+opt_clean
+select -assert-count 1 t:$fa
+select -assert-none t:$reduce_xor
