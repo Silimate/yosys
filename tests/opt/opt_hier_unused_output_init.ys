@@ -40,3 +40,27 @@ opt_hier
 opt_clean
 select -assert-count 0 leaf/w:q leaf/a:init %i
 select -assert-count 1 leaf/a:init=2'bx1
+design -reset
+
+# A partly read output: each unread range moves its own bits of the init to its own
+# new wire, and the port keeps the init of the bits the parent still reads.
+read_verilog <<EOT
+module leaf(input clk, input [3:0] d, output reg [3:0] q, output y);
+	initial q = 4'b1010;
+	always @(posedge clk) q <= d;
+	assign y = ^q;
+endmodule
+module top(input clk, input [3:0] d, output y, output [1:0] p);
+	wire [3:0] w;
+	leaf u(.clk(clk), .d(d), .q(w), .y(y));
+	assign p = w[2:1];
+endmodule
+EOT
+hierarchy -top top
+proc
+opt_hier
+opt_clean
+select -assert-count 1 leaf/w:q leaf/a:init=4'bx01x %i
+select -assert-count 1 leaf/a:init=1'0
+select -assert-count 1 leaf/a:init=1'1
+select -assert-count 3 leaf/a:init
