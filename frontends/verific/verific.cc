@@ -472,14 +472,16 @@ struct VerificPortWriter
 		return printed.str();
 	}
 
+	// Names are escaped where they are keywords of SystemVerilog, whatever was analyzed last
+	struct SystemVerilog {
+		unsigned mode = veri_file::GetAnalysisMode();
+		SystemVerilog() { veri_file::SetAnalysisMode(veri_file::SYSTEM_VERILOG); }
+		~SystemVerilog() { veri_file::SetAnalysisMode(mode); }
+	};
+
 	void write(VeriModule *module, const char *filename)
 	{
-		// Names are escaped where they are keywords of SystemVerilog, whatever was analyzed last
-		struct SystemVerilog {
-			unsigned mode = veri_file::GetAnalysisMode();
-			SystemVerilog() { veri_file::SetAnalysisMode(veri_file::SYSTEM_VERILOG); }
-			~SystemVerilog() { veri_file::SetAnalysisMode(mode); }
-		} system_verilog;
+		SystemVerilog system_verilog;
 		if (module->IsPackage() || module->IsInterface() || module->IsConfiguration())
 			log_cmd_error("'%s' is not a module.\n", module->Name());
 		// Each port must be declared under its own name: Verific types a renamed port (.q(x)) or an
@@ -551,6 +553,102 @@ struct VerificParamOverrides
 			delete it->first->TakeInitialValue();
 			it->first->SetInitialValue(it->second);
 		}
+	}
+};
+
+// SILIMATE: writes the type a type parameter resolved to, from its TypeRange alone, as SystemVerilog
+// that compiles in any scope: {"type": <packed type>, "unpacked": <unpacked dimensions>}, to declare
+// as "typedef <type> T <unpacked>;", or {"why": <what it is>} for a type it can't write that way.
+// An enum is written as its base type, as an enum written out would declare its literals again.
+// Known limits, of types no synthesizable port has: a queue, dynamic or associative array has the
+// TypeRange of an unpacked [0:0], a typedef of an event that of a logic, and a tagged union that of
+// a plain union, as which it is written
+struct VerificTypeWriter
+{
+	std::string why;
+
+	std::string refuse(const std::string &reason)
+	{
+		if (why.empty())
+			why = reason;
+		return "";
+	}
+
+	static std::string range(const TypeRange *tr)
+	{
+		return stringf("[%d:%d]", tr->LeftRangeBound(), tr->RightRangeBound());
+	}
+
+	// The range of an enum's base type or of an integral scalar. A scalar's TypeRange is named after
+	// its typedef, so only a built-in integral keyword proves it integral, unless it is `integral`:
+	// in a packed struct, union or array, where it is integral anyway. Else a type of 0, 32 or 64
+	// bits may be a string, a real, a chandle or a class handle
+	std::string bits(const TypeRange *tr, bool integral)
+	{
+		if (tr->IsTypeEnum())
+			return tr->HasBaseIndex() || tr->LeftRangeBound() != tr->RightRangeBound() ? range(tr) : "";
+		static const pool<std::string> keywords = {"logic", "bit", "reg", "byte", "shortint", "int", "integer", "longint", "time"};
+		static const pool<std::string> others = {"real", "shortreal", "realtime", "string", "event", "chandle"};
+		std::string name = tr->GetTypeName() ? tr->GetTypeName() : "";
+		int width = tr->LeftRangeBound() - tr->RightRangeBound() + 1;
+		if (others.count(name))
+			return refuse("type " + name);
+		if (!integral && !keywords.count(name) && (width < 1 || width == 32 || width == 64))
+			return refuse(stringf("type %s, which may not be integral", name.c_str()));
+		return width > 1 ? range(tr) : "";
+	}
+
+	std::string aggregate(const TypeRange *tr)
+	{
+		bool packed = tr->IsPackedDimensionRange();
+		std::string body = VerificPortWriter::join({tr->IsTypeVerilogUnion() ? "union" : "struct",
+				packed ? "packed" : "", tr->IsRangeSigned() ? "signed" : ""}) + " {";
+		MapIter mi;
+		const char *name;
+		TypeRange *member;
+		FOREACH_MAP_ITEM(tr->GetElementTypeRangeMap(), mi, &name, &member) {
+			std::string unpacked;
+			std::string member_type = type(member, unpacked, packed);
+			body += " " + VerificPortWriter::join({member_type, VerificPortWriter::identifier(name) + unpacked}) + ";";
+		}
+		return body + " }";
+	}
+
+	// The packed type of `tr`, its unpacked dimensions appended to `unpacked`; `integral` in a packed
+	// struct or union
+	std::string type(const TypeRange *tr, std::string &unpacked, bool integral = false)
+	{
+		std::string packed;
+		std::vector<bool> signs; // of each packed level, outermost first
+		for (; tr && tr->IsTypeArray(); tr = tr->GetNext())
+			if (tr->IsPackedDimensionRange()) {
+				packed += range(tr);
+				signs.push_back(tr->IsRangeSigned());
+			} else
+				unpacked += range(tr);
+		if (!tr)
+			return refuse("a type of another kind");
+		// A struct or union carries its own signing, which a packed array of it doesn't take
+		if (tr->IsTypeVerilogStructure() || tr->IsTypeVerilogUnion())
+			return VerificPortWriter::join({aggregate(tr), packed});
+		if (!tr->IsTypeScalar() && !tr->IsTypeEnum())
+			return refuse("an interface or a type of another kind");
+		std::string own = bits(tr, integral || !packed.empty());
+		signs.push_back(tr->IsRangeSigned());
+		// Written as logic, only the whole can be signed: its outermost level
+		if (!signs[0] && std::find(signs.begin(), signs.end(), true) != signs.end())
+			return refuse("a packed array of signed elements");
+		return VerificPortWriter::join({"logic", signs[0] ? "signed" : "", packed + own});
+	}
+
+	Json write(const TypeRange *tr)
+	{
+		VerificPortWriter::SystemVerilog system_verilog;
+		std::string unpacked;
+		std::string packed = type(tr, unpacked);
+		if (!why.empty())
+			return Json::object{{"why", why}};
+		return Json::object{{"type", packed}, {"unpacked", unpacked}};
 	}
 };
 #endif
@@ -2191,12 +2289,21 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 	const char *param_name ;
 	const char *param_value ;
 	MapIter mi;
+	Json::object type_params;
 	FOREACH_PARAMETER_OF_NETLIST(nl, mi, param_name, param_value) {
 		module->avail_parameters(RTLIL::escape_id(param_name));
 		const TypeRange *tr = nl->GetTypeRange(param_name) ;
 		const char* type_name = (tr) ? tr->GetTypeName() : nullptr;
 		module->parameter_default_values[RTLIL::escape_id(param_name)] = verific_const(type_name, param_value, nl);
+#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
+		// SILIMATE: a type parameter's value is its actual's text, which may not resolve where the
+		// module is, so the type it resolved to is written out too
+		if (tr && tr->IsTypeParameterType())
+			type_params[param_name] = nl->IsFromVerilog() ? VerificTypeWriter().write(tr) : Json::object{{"why", "a VHDL type"}};
+#endif
 	}
+	if (!type_params.empty())
+		module->set_string_attribute(ID(type_params), Json(type_params).dump());
 
 	SetIter si;
 	MapIter mi2;
