@@ -45,6 +45,7 @@ module top import p::*; (input logic i, output logic o1, o2);
   e_t e_a; s_t s_a, q_a; local_t l_a; unit_t n_a; e_t d_a; logic [3:0] b_a; logic [0:3] t_a;
   logic signed [-2:1] g_a; s4 [1:0] f_a; ee_t w_a; flag_t h_a; ss_t [1:0] k_a; u_t v_a;
   arr_t x_a, x_y; us_t z_a, z_y;
+  byte by_a; int unsigned iu_a; time tm_a; shortint si_a; longint li_a;
   m #(.T(e_t)) u_enum (.a(e_a), .y(), .idle(), .lt(), .wide());
   m #(.T(s_t)) u_struct (.a(s_a), .y(), .idle(), .lt(), .wide());
   m #(.T(p::s_t)) u_scoped (.a(q_a), .y(), .idle(), .lt(), .wide());
@@ -59,6 +60,11 @@ module top import p::*; (input logic i, output logic o1, o2);
   m #(.T(flag_t)) u_flag (.a(h_a), .y(), .idle(), .lt(), .wide());
   m #(.T(ss_t [1:0])) u_signed_structs (.a(k_a), .y(), .idle(), .lt(), .wide());
   m #(.T(u_t)) u_union (.a(v_a), .y(), .idle(), .lt(), .wide());
+  m #(.T(byte)) u_byte (.a(by_a), .y(), .idle(), .lt(), .wide());
+  m #(.T(int unsigned)) u_int_unsigned (.a(iu_a), .y(), .idle(), .lt(), .wide());
+  m #(.T(time)) u_time (.a(tm_a), .y(), .idle(), .lt(), .wide());
+  m #(.T(shortint)) u_shortint (.a(si_a), .y(), .idle(), .lt(), .wide());
+  m #(.T(longint)) u_longint (.a(li_a), .y(), .idle(), .lt(), .wide());
   mu #(.T(arr_t)) u_unpacked (.a(x_a), .y(x_y));
   mu #(.T(us_t)) u_unpacked_struct (.a(z_a), .y(z_y));
   r #(.T(real)) u_real (.a(i), .y(o1));
@@ -95,6 +101,11 @@ want = {
   "u_flag": {"type": "logic", "unpacked": ""},
   "u_signed_structs": {"type": "struct packed signed { logic [1:0] a; } [1:0]", "unpacked": ""},
   "u_union": {"type": "union packed { logic [3:0] a; logic signed [3:0] b; }", "unpacked": ""},
+  "u_byte": {"type": "logic signed [7:0]", "unpacked": ""},
+  "u_int_unsigned": {"type": "logic [31:0]", "unpacked": ""},
+  "u_time": {"type": "logic [63:0]", "unpacked": ""},
+  "u_shortint": {"type": "logic signed [15:0]", "unpacked": ""},
+  "u_longint": {"type": "logic signed [63:0]", "unpacked": ""},
   "u_unpacked": {"type": "logic [3:0]", "unpacked": "[0:1]"},
   "u_unpacked_struct": {"type": "struct { logic signed [3:0] a[0:1]; logic [1:0] b; }", "unpacked": ""},
   "u_real": {"why": "type real"},
