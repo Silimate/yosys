@@ -49,3 +49,10 @@ select -assert-count 1 w:gclk a:$DUTY=0.125000* %i
 # A replay that starts inside a gated pulse keeps it: sim_icg_high.vcd opens with clk, en and
 # gclk high, and gclk must match the dump from the first step on.
 sim -r sim_icg_high.vcd -scope top -sim-cmp
+
+# A trace without gclk leaves the latch as -zinit set it. sim_icg_zinit.vcd opens with clk and
+# en high: over its two 10ns cycles GCLK stays low through the first high phase and pulses in
+# the second (duty 5/20).
+sim -r sim_icg_zinit.vcd -scope top -zinit -activity
+select -assert-count 1 w:gclk a:$ACKT=0.666667* %i
+select -assert-count 1 w:gclk a:$DUTY=0.250000* %i
