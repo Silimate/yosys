@@ -88,3 +88,153 @@ splitcells -format []:
 select -assert-count 2 t:$dff
 select -assert-count 1 c:*[19:17]
 select -assert-count 1 c:*[22:20]
+
+design -reset
+
+# Test 5: each slice gets its own bits of D, AD, SET and CLR and of
+# ARST_VALUE and SRST_VALUE (cut from the wide cell, not from a copy of it)
+
+read_rtlil <<EOT
+module \test_ff_types
+  wire input 1 \clk
+  wire input 2 \rst
+  wire input 3 \al
+  wire width 4 input 4 \d
+  wire width 4 input 5 \ad
+  wire width 4 input 6 \set
+  wire width 4 input 7 \clr
+  wire width 4 output 8 \qa
+  wire width 4 output 9 \qs
+  wire width 4 output 10 \qal
+  wire width 4 output 11 \qsr
+  cell $adff \ra
+    parameter \WIDTH 4
+    parameter \CLK_POLARITY 1
+    parameter \ARST_POLARITY 1
+    parameter \ARST_VALUE 4'1010
+    connect \CLK \clk
+    connect \ARST \rst
+    connect \D \d
+    connect \Q \qa
+  end
+  cell $sdff \rs
+    parameter \WIDTH 4
+    parameter \CLK_POLARITY 1
+    parameter \SRST_POLARITY 1
+    parameter \SRST_VALUE 4'0111
+    connect \CLK \clk
+    connect \SRST \rst
+    connect \D \d
+    connect \Q \qs
+  end
+  cell $aldff \ral
+    parameter \WIDTH 4
+    parameter \CLK_POLARITY 1
+    parameter \ALOAD_POLARITY 1
+    connect \CLK \clk
+    connect \ALOAD \al
+    connect \AD \ad
+    connect \D \d
+    connect \Q \qal
+  end
+  cell $dffsr \rsr
+    parameter \WIDTH 4
+    parameter \CLK_POLARITY 1
+    parameter \SET_POLARITY 1
+    parameter \CLR_POLARITY 1
+    connect \CLK \clk
+    connect \SET \set
+    connect \CLR \clr
+    connect \D \d
+    connect \Q \qsr
+  end
+end
+EOT
+equiv_opt -assert -async2sync splitcells -blast -format []:
+design -load postopt
+
+select -assert-count 4 t:$adff r:WIDTH=1 %i
+select -assert-count 2 t:$adff r:ARST_VALUE=1'1 %i
+select -assert-count 4 t:$sdff r:WIDTH=1 %i
+select -assert-count 3 t:$sdff r:SRST_VALUE=1'1 %i
+select -assert-count 4 t:$aldff r:WIDTH=1 %i
+select -assert-count 4 t:$dffsr r:WIDTH=1 %i
+
+design -reset
+
+# Test 6: logic cells, including a $pmux, whose B port holds one word per case
+
+read_rtlil <<EOT
+module \test_logic
+  wire width 4 input 1 \a
+  wire width 8 input 2 \b
+  wire width 2 input 3 \s
+  wire width 4 output 4 \y
+  wire width 4 output 5 \z
+  cell $pmux \pm
+    parameter \WIDTH 4
+    parameter \S_WIDTH 2
+    connect \A \a
+    connect \B \b
+    connect \S \s
+    connect \Y \y
+  end
+  cell $and \an
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 4
+    parameter \B_WIDTH 4
+    parameter \Y_WIDTH 4
+    connect \A \a
+    connect \B \b [7:4]
+    connect \Y \z
+  end
+end
+EOT
+equiv_opt -assert splitcells -blast -format []:
+design -load postopt
+
+select -assert-count 4 t:$pmux r:WIDTH=1 %i
+select -assert-count 4 t:$and r:Y_WIDTH=1 %i
+
+design -reset
+
+# Test 7: each slice of a register gets its own bits of rtl_bind and
+# rtl_bind_status; an rtl_bind that does not match the register is dropped
+
+read_rtlil <<EOT
+module \test_rtl_bind
+  wire input 1 \clk
+  wire width 4 input 2 \d
+  wire width 4 output 3 \q
+  wire width 3 input 4 \e
+  wire width 3 output 5 \p
+  attribute \rtl_bind "mem/8[4:7]"
+  attribute \rtl_bind_status "bound*3 absent"
+  attribute \keep_me "yes"
+  cell $dff \r
+    parameter \WIDTH 4
+    parameter \CLK_POLARITY 1
+    connect \CLK \clk
+    connect \D \d
+    connect \Q \q
+  end
+  attribute \rtl_bind "mem/8[0:3]"
+  cell $dff \bad
+    parameter \WIDTH 3
+    parameter \CLK_POLARITY 1
+    connect \CLK \clk
+    connect \D \e
+    connect \Q \p
+  end
+end
+EOT
+splitcells -blast -format []:
+
+select -assert-count 7 t:$dff
+select -assert-count 4 a:keep_me=yes
+select -assert-count 1 a:rtl_bind=mem/8?4?
+select -assert-count 1 a:rtl_bind=mem/8?7?
+select -assert-count 4 a:rtl_bind
+select -assert-count 3 a:rtl_bind_status=bound
+select -assert-count 1 a:rtl_bind_status=absent

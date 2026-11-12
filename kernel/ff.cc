@@ -534,17 +534,18 @@ std::string YOSYS_NAMESPACE_PREFIX rtl_bind_status_compress(const std::vector<st
 }
 
 // Keep only some of a width-bit cell's rtl_bind and rtl_bind_status entries (the Q bits in `bits`).
-// Each is read as runs rather than expanded to one entry per bit.
-void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, const std::vector<int> &bits)
+// Each is read as runs rather than expanded to one entry per bit. Reads `from` and writes `to`,
+// which may be the same dict: each value is read in full before `to` changes.
+void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(const dict<IdString, Const> &from, dict<IdString, Const> &to, int width, const std::vector<int> &bits)
 {
 	static thread_local ParsedRuns<RtlBindRun> bind;
 	static thread_local ParsedRuns<std::pair<std::string_view, int>> status;
 
-	auto it = attributes.find(ID(rtl_bind));
-	if (it != attributes.end()) {
+	auto it = from.find(ID(rtl_bind));
+	if (it != from.end()) {
 		bind.update(it->second, rtl_bind_runs, [](const RtlBindRun &run) { return run.count; });
 		if (bind.total != width) {
-			attributes.erase(it); // string does not match this cell; drop it rather than lie
+			to.erase(ID(rtl_bind)); // string does not match this cell; drop it rather than lie
 		} else {
 			// parent Q bit b becomes the next bit of the slice; written as rtl_bind_compress writes
 			auto &runs = bind.runs;
@@ -570,15 +571,15 @@ void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attribute
 				out += "]";
 				i = j;
 			}
-			it->second = Const(out);
+			to[ID(rtl_bind)] = Const(out);
 		}
 	}
 
-	it = attributes.find(ID(rtl_bind_status));
-	if (it != attributes.end()) {
+	it = from.find(ID(rtl_bind_status));
+	if (it != from.end()) {
 		status.update(it->second, rtl_bind_status_runs, [](const std::pair<std::string_view, int> &run) { return run.second; });
 		if (status.total != width) {
-			attributes.erase(it);
+			to.erase(ID(rtl_bind_status));
 		} else {
 			auto kept = status.locate(width, bits);
 			std::string out;
@@ -591,18 +592,29 @@ void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attribute
 				if (j - i > 1)
 					out += "*" + std::to_string(j - i);
 			}
-			it->second = Const(out);
+			to[ID(rtl_bind_status)] = Const(out);
 		}
 	}
 }
 
 // Same as above for a contiguous [lsb, msb] slice
-void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, int lsb, int msb)
+void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(const dict<IdString, Const> &from, dict<IdString, Const> &to, int width, int lsb, int msb)
 {
 	std::vector<int> bits;
 	for (int b = lsb; b <= msb; b++)
 		bits.push_back(b);
-	slice_rtl_bind_attr(attributes, width, bits);
+	slice_rtl_bind_attr(from, to, width, bits);
+}
+
+// The same, narrowing a cell's own attributes in place
+void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, const std::vector<int> &bits)
+{
+	slice_rtl_bind_attr(attributes, attributes, width, bits);
+}
+
+void YOSYS_NAMESPACE_PREFIX slice_rtl_bind_attr(dict<IdString, Const> &attributes, int width, int lsb, int msb)
+{
+	slice_rtl_bind_attr(attributes, attributes, width, lsb, msb);
 }
 
 FfData FfData::slice(const std::vector<int> &bits) {
