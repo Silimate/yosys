@@ -1444,6 +1444,11 @@ struct SimInstance
 			}
 		}
 
+		// An $icg that starts with CLK high is partway through the pulse its GCLK shows
+		for (auto &it : icg_database)
+			if (get_state(it.first->getPort(ID::CLK))[0] == State::S1)
+				it.second = get_state(it.first->getPort(ID::GCLK))[0];
+
 		// Mark children dirty when their state changes so parents re-propagate.
 		for (auto child : children)
 			if (child.second->setInitState()) {

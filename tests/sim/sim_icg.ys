@@ -45,3 +45,7 @@ EOT
 sim -r sim_icg.vcd -scope top -activity
 select -assert-count 1 w:gclk a:$ACKT=0.250000* %i
 select -assert-count 1 w:gclk a:$DUTY=0.125000* %i
+
+# A replay that starts inside a gated pulse keeps it: sim_icg_high.vcd opens with clk, en and
+# gclk high, and gclk must match the dump from the first step on.
+sim -r sim_icg_high.vcd -scope top -sim-cmp

@@ -1,0 +1,26 @@
+$timescale 1ns $end
+$scope module top $end
+$var wire 1 ! clk $end
+$var wire 1 " en $end
+$var wire 1 # gclk $end
+$upscope $end
+$enddefinitions $end
+#0
+1!
+1"
+1#
+#5
+0!
+0#
+#10
+1!
+1#
+#15
+0!
+0"
+0#
+#20
+1!
+#25
+0!
+#30
