@@ -2260,6 +2260,32 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 	if (design->has(module_name)) {
 		if (!nl->IsOperator() && !is_blackbox(nl))
 			log_cmd_error("Re-definition of module `%s'.\n", netlist_name);
+		// SILIMATE: a blackbox is named without its parameters, so one box stands for every
+		// parameter set; give it the ports each set adds (a split array's elements) or widens
+		RTLIL::Module *box = design->module(module_name);
+		if (!nl->IsOperator() && box->get_bool_attribute(ID::blackbox) &&
+				box->get_string_attribute(ID(library)) == nl->Owner()->Owner()->Name()) {
+			RTLIL::Design scratch;
+			VerificImporter importer(mode_gates, mode_keep, mode_nosva, mode_sva_continue, mode_names, mode_verific, mode_autocover, mode_fullinit);
+			std::map<std::string,Netlist*> todo;
+			importer.import_netlist(&scratch, nl, todo, norename);
+			RTLIL::Module *other = scratch.module(module_name);
+			int changed = 0, base = GetSize(box->ports);
+			for (auto name : other->ports) {
+				RTLIL::Wire *theirs = other->wire(name), *ours = box->wire(name);
+				if (!ours)
+					box->addWire(name, theirs)->port_id += base;
+				else if (ours->port_id && ours->width < theirs->width)
+					ours->width = theirs->width;
+				else
+					continue;
+				changed++;
+			}
+			if (changed) {
+				log("Merged %d new or wider port(s) of %s into blackbox module %s.\n", changed, nl->Owner()->Name(), log_id(box));
+				box->fixup_ports();
+			}
+		}
 		return;
 	}
 
@@ -3008,7 +3034,8 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 	import_verific_cells:
 		std::string inst_type = is_blackbox(inst->View()) ? inst->View()->CellBaseName() : inst->View()->Owner()->Name();
 
-		nl_todo[inst_type] = inst->View();
+		// SILIMATE: queue a blackbox's every parameter set, which import_netlist merges into one box
+		nl_todo[inst->View()->Owner()->Name()] = inst->View();
 
 		if (inst->View()->IsOperator() || inst->View()->IsPrimitive()) {
 			inst_type = "$verific$" + inst_type;
