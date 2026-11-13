@@ -1444,8 +1444,8 @@ struct SimInstance
 			}
 		}
 
-		// An $icg that starts with CLK high is partway through the pulse its GCLK shows,
-		// when the trace has one
+		// An $icg that starts with CLK high is partway through the pulse its GCLK shows. Nothing has
+		// propagated yet, so this sees only a CLK and GCLK the trace has on the cell's own nets
 		for (auto &it : icg_database) {
 			State gclk = get_state(it.first->getPort(ID::GCLK))[0];
 			if ((gclk == State::S0 || gclk == State::S1) &&
