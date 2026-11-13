@@ -246,6 +246,8 @@ struct SimInstance
 	};
 
 	dict<Cell*, ff_state_t> ff_database;
+	// Enable latch of each $icg: EN | SE as of the last step its CLK was low
+	dict<Cell*, State> icg_database;
 	dict<IdString, mem_state_t> mem_database;
 	pool<Cell*> formal_database;
 	pool<Cell*> initstate_database;
@@ -449,6 +451,9 @@ struct SimInstance
 				}
 			}
 
+			if (cell->type == ID($icg))
+				icg_database[cell] = State::Sx;
+
 			if (cell->is_mem_cell())
 			{
 				std::string name = cell->parameters.at(ID::MEMID).decode_string();
@@ -497,6 +502,9 @@ struct SimInstance
 					zinit(val);
 				zinit(mem.data);
 			}
+
+			for (auto &it : icg_database)
+				it.second = State::S0;
 		}
 	}
 
@@ -707,12 +715,9 @@ struct SimInstance
 
 		if (cell->type == ID($icg))
 		{
-			// Integrated clock gate: GCLK = CLK & (EN | SE)
+			// Integrated clock gate: GCLK = CLK & latched (EN | SE), see update_ph3
 			Const clk = get_state(cell->getPort(ID::CLK));
-			Const en = get_state(cell->getPort(ID::EN));
-			Const se = cell->hasPort(ID::SE) ? get_state(cell->getPort(ID::SE)) : Const(State::S0);
-			Const en_or_se = const_or(en, se, false, false, 1);
-			Const gclk = const_and(clk, en_or_se, false, false, 1);
+			Const gclk = const_and(clk, Const(icg_database.at(cell)), false, false, 1);
 			set_state(cell->getPort(ID::GCLK), gclk);
 			return;
 		}
@@ -1082,6 +1087,18 @@ struct SimInstance
 			}
 		}
 
+		// An $icg's enable latch is transparent while CLK is low, so an enable that changes
+		// on or after a rising edge only gates the next one
+		for (auto &it : icg_database)
+		{
+			Cell *cell = it.first;
+			if (get_state(cell->getPort(ID::CLK))[0] != State::S0)
+				continue;
+			Const en = get_state(cell->getPort(ID::EN));
+			Const se = cell->hasPort(ID::SE) ? get_state(cell->getPort(ID::SE)) : Const(State::S0);
+			it.second = const_or(en, se, false, false, 1)[0];
+		}
+
 		// Do prints *before* assertions
 		for (auto &print : print_database) {
 			Cell *cell = print.cell;
@@ -1425,6 +1442,15 @@ struct SimInstance
 				for (auto &data : fst_memories[memid])
 					set_memory_state(memid, Const(data.first), fst_value(data.second));
 			}
+		}
+
+		// An $icg that starts with CLK high is partway through the pulse its GCLK shows. Nothing has
+		// propagated yet, so this sees only a CLK and GCLK the trace has on the cell's own nets
+		for (auto &it : icg_database) {
+			State gclk = get_state(it.first->getPort(ID::GCLK))[0];
+			if ((gclk == State::S0 || gclk == State::S1) &&
+					get_state(it.first->getPort(ID::CLK))[0] == State::S1)
+				it.second = gclk;
 		}
 
 		// Mark children dirty when their state changes so parents re-propagate.
