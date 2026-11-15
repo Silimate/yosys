@@ -227,7 +227,9 @@ struct OptBalanceTreeWorker {
 	// Get the driver of a cell input port if it continues the chain, else nullptr
 	Cell *chain_driver(Cell *cell, IdString port, IdString cell_type) {
 		auto sig = sigmap(cell->getPort(port));
-		Cell *drv = sig_to_driver[sig];
+		// SILIMATE: find, so an undriven operand adds no entry
+		auto it = sig_to_driver.find(sig);
+		Cell *drv = it == sig_to_driver.end() ? nullptr : it->second;
 		if (!drv)
 			drv = slice_driver(cell, port);  // SILIMATE
 		if (!drv || !is_right_type(drv, cell_type))
@@ -481,6 +483,123 @@ struct OptBalanceTreeWorker {
 		return true;
 	}
 
+	// SILIMATE: the cells of `cell_type` whose output is read other than by a chain
+	// link through them: a port, a kept wire, a kept, consumed or unselected cell, or
+	// a reader that does not continue the chain. Only these head a chain. A cell
+	// read only by links is rebuilt inside the tree of each head it feeds, so a tree
+	// of its own would be dead.
+	pool<Cell*> used_outside_chains(IdString cell_type)
+	{
+		pool<Cell*> used;
+		auto mark = [&](SigBit bit, Cell *link) {
+			auto it = bit_driver.find(bit);
+			if (it != bit_driver.end() && it->second != link && it->second->type == cell_type)
+				used.insert(it->second);
+		};
+		for (auto wire : module->wires())
+			if (wire->port_output || wire->get_bool_attribute(ID::keep))
+				for (auto bit : sigmap(wire))
+					mark(bit, nullptr);
+		for (auto cell : module->cells()) {
+			bool links = module->selected(cell) && !consumed_cells.count(cell) &&
+					!cell->has_keep_attr() && is_right_type(cell, cell_type);
+			for (auto &conn : cell->connections()) {
+				// A port of unknown direction counts as read
+				if (cell->output(conn.first) && !cell->input(conn.first))
+					continue;
+				Cell *link = links && conn.first.in(ID::A, ID::B) ? chain_driver(cell, conn.first, cell_type) : nullptr;
+				for (auto bit : sigmap(conn.second))
+					mark(bit, link);
+			}
+		}
+		return used;
+	}
+
+	// Replace `head_cell` with a balanced tree of its chain's sources. False when the
+	// chain has a combinational loop or mixes signedness and is left as it is.
+	bool balance_chain(Cell *head_cell, IdString cell_type)
+	{
+		// Collect the chain cone into a topological sort
+		TopoSort<Cell*, IdString::compare_ptr_by_name<Cell>> toposort;
+		toposort.analyze_loops = false;
+		toposort.node(head_cell);
+		vector<Cell*> queue = {head_cell};
+		while (!queue.empty())
+		{
+			Cell *x = queue.back();
+			queue.pop_back();
+			for (IdString port: {ID::A, ID::B})
+				if (Cell *drv = chain_driver(x, port, cell_type)) {
+					if (!toposort.has_node(drv))
+						queue.push_back(drv);
+					toposort.edge(drv, x);
+				}
+		}
+
+		// Abandon chains containing combinational loops, since
+		// rebalancing them is not sound (and would not terminate)
+		if (!toposort.sort())
+			return false;
+
+		// Get sources of the chain: process cells from head to
+		// drivers, counting the paths leading back to the head so
+		// reconvergent sources are counted with multiplicity
+		dict<SigSpec, int> sources;
+		dict<SigSpec, bool> signeds;
+		int inner_cells = GetSize(toposort.sorted) - 1;
+		dict<Cell*, int> reach;
+		reach[head_cell] = 1;
+		for (int i = GetSize(toposort.sorted); i-- > 0; )
+		{
+			Cell* x = toposort.sorted[i];
+			for (IdString port: {ID::A, ID::B}) {
+				if (Cell *drv = chain_driver(x, port, cell_type)) {
+					reach[drv] += reach[x];
+				} else {
+					auto sig = sigmap(x->getPort(port));
+					sources[sig] += reach[x];
+					signeds[sig] = x->getParam(port == ID::A ? ID::A_SIGNED : ID::B_SIGNED).as_bool();
+				}
+			}
+		}
+
+		if (!inner_cells)
+			return true;
+
+		// Create a tree
+		log_debug("  Creating tree for %s with %d sources and %d inner cells...\n", head_cell, GetSize(sources), inner_cells);
+
+		// Build a vector of all source signals
+		vector<SigSpec> source_signals;
+		vector<bool> signed_flags;
+		for (auto &source : sources) {
+			for (int i = 0; i < source.second; i++) {
+				source_signals.push_back(source.first);
+				signed_flags.push_back(signeds[source.first]);
+			}
+		}
+
+		// If not all signed flags are the same, do not balance
+		if (!std::all_of(signed_flags.begin(), signed_flags.end(), [&](bool flag) { return flag == signed_flags[0]; }))
+			return false;
+
+		// Create the balanced tree
+		SigSpec tree_output = create_balanced_tree(source_signals, cell_type, head_cell);
+
+		// Connect the tree output to the head cell's output
+		SigSpec head_output = sigmap(head_cell->getPort(ID::Y));
+		int connect_width = std::min(head_output.size(), tree_output.size());
+		module->connect(head_output.extract(0, connect_width), tree_output.extract(0, connect_width));
+		if (head_output.size() > tree_output.size()) {
+			SigBit sext_bit = head_cell->getParam(ID::A_SIGNED).as_bool() ? head_output[connect_width - 1] : State::S0;
+			module->connect(head_output.extract(connect_width, head_output.size() - connect_width), SigSpec(sext_bit, head_output.size() - connect_width));
+		}
+
+		// Mark consumed cell for removal
+		consumed_cells.insert(head_cell);
+		return true;
+	}
+
 	OptBalanceTreeWorker(Module *module, const vector<IdString> cell_types) : module(module), sigmap(module) {
 		// Do for each cell type
 		for (auto cell_type : cell_types) {
@@ -488,7 +607,6 @@ struct OptBalanceTreeWorker {
 			sig_to_driver.clear();
 			bit_driver.clear();
 			bounds.clear();
-			dict<SigSpec, pool<Cell*>> sig_to_sink;
 			SlicedAddContext sliced_add_ctx;
 			// SILIMATE: only try_sliced_add_tree reads the sliced index, and only for
 			// $add, so skip it for the other types (a pool per input bit, never read)
@@ -509,40 +627,22 @@ struct OptBalanceTreeWorker {
 						}
 					}
 
-					if (cell->input(conn.first))
-					{
-						if (sig_to_sink.count(sig) == 0)
-							sig_to_sink[sig] = pool<Cell*>();
-						sig_to_sink[sig].insert(cell);
-						if (index_sliced)  // SILIMATE
-							for (auto bit : sig)
-								sliced_add_ctx.bit_to_sink[bit].insert(cell);
-					}
+					if (index_sliced && cell->input(conn.first))  // SILIMATE
+						for (auto bit : sig)
+							sliced_add_ctx.bit_to_sink[bit].insert(cell);
 				}
 			}
 
-			// SILIMATE: a slice reader continues the chain as a whole reader does, so
-			// the search for chain ends below follows it too
-			for (auto cell : module->selected_cells())
-				if (cell->type == cell_type)
-					for (IdString port : {ID::A, ID::B})
-						if (Cell *drv = slice_driver(cell, port))
-							sig_to_sink[sigmap(drv->getPort(ID::Y))].insert(cell);
-
 			// Need to check if any wires connect to module ports
 			input_port_sigs.clear();
-			pool<SigSpec> output_port_sigs;
 			for (auto wire : module->selected_wires())
 				if (wire->port_input || wire->port_output) {
 					SigSpec sig = sigmap(wire);
 					for (auto bit : sig) {
 						if (wire->port_input)
 							input_port_sigs.insert(bit);
-						if (wire->port_output) {
-							output_port_sigs.insert(bit);
-							if (index_sliced)  // SILIMATE
-								sliced_add_ctx.output_port_sigs.insert(bit);
-						}
+						if (wire->port_output && index_sliced)  // SILIMATE
+							sliced_add_ctx.output_port_sigs.insert(bit);
 					}
 				}
 
@@ -552,168 +652,25 @@ struct OptBalanceTreeWorker {
 				for (auto cell : module->selected_cells())
 					try_sliced_add_tree(cell, consumed_cells, sliced_add_ctx);
 
+			// SILIMATE: only a cell whose value is used outside a chain heads one.
+			// Heading every cell with a load of another type somewhere downstream
+			// rebuilds the cone above each link of a chain, quadratic in its length,
+			// and leaves all but the last of those trees dead.
+			pool<Cell*> used_outside = used_outside_chains(cell_type);
+			vector<Cell*> heads;
 			for (auto cell : module->selected_cells())
-			{
-				// If consumed or not the correct type, skip
-				if (consumed_cells.count(cell) || !is_right_type(cell, cell_type))
+				if (used_outside.count(cell) && !consumed_cells.count(cell) && is_right_type(cell, cell_type))
+					heads.push_back(cell);
+			pool<Cell*> queued(heads.begin(), heads.end());
+			for (int i = 0; i < GetSize(heads); i++) {
+				Cell *head_cell = heads[i];
+				if (consumed_cells.count(head_cell) || balance_chain(head_cell, cell_type))
 					continue;
-
-				// BFS, following all chains until they hit a cell of a different type
-				// Pick the longest one
-				auto y = sigmap(cell->getPort(ID::Y));
-				pool<Cell*> sinks;
-
-				// SILIMATE: a sink the carry guard refuses to merge ends the chain
-				// here, so this cell heads its own subchain
-				for (auto x : sig_to_sink[y])
-					if (is_right_type(x, cell_type) && carry_link_unsafe(cell, x)) {
-						sinks.insert(cell);
-						break;
-					}
-
-				pool<Cell*> current_loads = sig_to_sink[y];
-				pool<Cell*> next_loads;
-				pool<Cell*> visited_loads;
-				while (!current_loads.empty())
-				{
-					// Find each sink and see what they are
-					for (auto x : current_loads)
-					{
-						if (!visited_loads.insert(x).second)
-							continue;
-
-						// If not the correct type, don't follow any further
-						// (but add the originating cell to the list of sinks)
-						if (!is_right_type(x, cell_type))
-						{
-							sinks.insert(cell);
-							continue;
-						}
-
-						auto xy = sigmap(x->getPort(ID::Y));
-
-						// If this signal drives a port, add it to the sinks
-						// (even though it may not be the end of a chain)
-						for (auto bit : xy) {
-							if (output_port_sigs.count(bit) && !consumed_cells.count(x)) {
-								sinks.insert(x);
-								break;
-							}
-						}
-
-						// Search signal's fanout
-						auto& next = sig_to_sink[xy];
-						for (auto z : next)
-							next_loads.insert(z);
-					}
-
-					// If we couldn't find any downstream loads, stop.
-					// Create a reduction for each of the max-length chains we found
-					if (next_loads.empty())
-					{
-						for (auto s : current_loads)
-						{
-							// Not one of our gates? Don't follow any further
-							if (!is_right_type(s, cell_type))
-								continue;
-
-							sinks.insert(s);
-						}
-						break;
-					}
-
-					// Otherwise, continue down the chain
-					current_loads = next_loads;
-					next_loads.clear();
-				}
-
-				// We have our list of sinks, now go tree balance the chains
-				for (auto head_cell : sinks)
-				{
-					// Avoid duplication if we already were covered
-					if (consumed_cells.count(head_cell))
-						continue;
-
-					// Collect the chain cone into a topological sort
-					TopoSort<Cell*, IdString::compare_ptr_by_name<Cell>> toposort;
-					toposort.analyze_loops = false;
-					toposort.node(head_cell);
-					vector<Cell*> queue = {head_cell};
-					while (!queue.empty())
-					{
-						Cell *x = queue.back();
-						queue.pop_back();
-						for (IdString port: {ID::A, ID::B})
-							if (Cell *drv = chain_driver(x, port, cell_type)) {
-								if (!toposort.has_node(drv))
-									queue.push_back(drv);
-								toposort.edge(drv, x);
-							}
-					}
-
-					// Abandon chains containing combinational loops, since
-					// rebalancing them is not sound (and would not terminate)
-					if (!toposort.sort())
-						continue;
-
-					// Get sources of the chain: process cells from head to
-					// drivers, counting the paths leading back to the head so
-					// reconvergent sources are counted with multiplicity
-					dict<SigSpec, int> sources;
-					dict<SigSpec, bool> signeds;
-					int inner_cells = GetSize(toposort.sorted) - 1;
-					dict<Cell*, int> reach;
-					reach[head_cell] = 1;
-					for (int i = GetSize(toposort.sorted); i-- > 0; )
-					{
-						Cell* x = toposort.sorted[i];
-						for (IdString port: {ID::A, ID::B}) {
-							if (Cell *drv = chain_driver(x, port, cell_type)) {
-								reach[drv] += reach[x];
-							} else {
-								auto sig = sigmap(x->getPort(port));
-								sources[sig] += reach[x];
-								signeds[sig] = x->getParam(port == ID::A ? ID::A_SIGNED : ID::B_SIGNED).as_bool();
-							}
-						}
-					}
-
-					if (inner_cells)
-					{
-						// Create a tree
-						log_debug("  Creating tree for %s with %d sources and %d inner cells...\n", head_cell, GetSize(sources), inner_cells);
-
-						// Build a vector of all source signals
-						vector<SigSpec> source_signals;
-						vector<bool> signed_flags;
-						for (auto &source : sources) {
-							for (int i = 0; i < source.second; i++) {
-								source_signals.push_back(source.first);
-								signed_flags.push_back(signeds[source.first]);
-							}
-						}
-
-						// If not all signed flags are the same, do not balance
-						if (!std::all_of(signed_flags.begin(), signed_flags.end(), [&](bool flag) { return flag == signed_flags[0]; })) {
-							continue;
-						}
-
-						// Create the balanced tree
-						SigSpec tree_output = create_balanced_tree(source_signals, cell_type, head_cell);
-
-						// Connect the tree output to the head cell's output
-						SigSpec head_output = sigmap(head_cell->getPort(ID::Y));
-						int connect_width = std::min(head_output.size(), tree_output.size());
-						module->connect(head_output.extract(0, connect_width), tree_output.extract(0, connect_width));
-						if (head_output.size() > tree_output.size()) {
-							SigBit sext_bit = head_cell->getParam(ID::A_SIGNED).as_bool() ? head_output[connect_width - 1] : State::S0;
-							module->connect(head_output.extract(connect_width, head_output.size() - connect_width), SigSpec(sext_bit, head_output.size() - connect_width));
-						}
-
-						// Mark consumed cell for removal
-						consumed_cells.insert(head_cell);
-					}
-				}
+				// A chain left as it is still reads its links, so each heads its own
+				for (IdString port : {ID::A, ID::B})
+					if (Cell *drv = chain_driver(head_cell, port, cell_type))
+						if (!consumed_cells.count(drv) && queued.insert(drv).second)
+							heads.push_back(drv);
 			}
 
 			// Remove all consumed cells, which now have been replaced by trees
