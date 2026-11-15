@@ -544,8 +544,24 @@ struct OptBalanceTreeWorker {
 		// Get sources of the chain: process cells from head to
 		// drivers, counting the paths leading back to the head so
 		// reconvergent sources are counted with multiplicity
+		// SILIMATE: x & x = x | x = x and x ^ x = 0, so a logic tree needs each source
+		// once, and under $xor only when an odd number of paths reach it. Counting
+		// every path grows the tree of a reconvergent cone, such as a CRC unrolled
+		// over its data bits, exponentially with the cone's depth.
+		bool idempotent = cell_type.in(ID($and), ID($or));
+		bool parity = cell_type == ID($xor);
+		bool overflow = false;
+		auto add_paths = [&](int &count, int paths) {
+			if (idempotent)
+				count = 1;
+			else if (parity)
+				count = (count + paths) & 1;
+			else if (__builtin_add_overflow(count, paths, &count))
+				overflow = true;
+		};
 		dict<SigSpec, int> sources;
 		dict<SigSpec, bool> signeds;
+		bool mixed_signs = false;
 		int inner_cells = GetSize(toposort.sorted) - 1;
 		dict<Cell*, int> reach;
 		reach[head_cell] = 1;
@@ -554,11 +570,18 @@ struct OptBalanceTreeWorker {
 			Cell* x = toposort.sorted[i];
 			for (IdString port: {ID::A, ID::B}) {
 				if (Cell *drv = chain_driver(x, port, cell_type)) {
-					reach[drv] += reach[x];
+					add_paths(reach[drv], reach[x]);
 				} else {
 					auto sig = sigmap(x->getPort(port));
-					sources[sig] += reach[x];
-					signeds[sig] = x->getParam(port == ID::A ? ID::A_SIGNED : ID::B_SIGNED).as_bool();
+					add_paths(sources[sig], reach[x]);
+					// SILIMATE: judged on every read, since copies of a source only
+					// merge or cancel when each read extends it alike
+					bool is_signed = x->getParam(port == ID::A ? ID::A_SIGNED : ID::B_SIGNED).as_bool();
+					auto it = signeds.find(sig);
+					if (it == signeds.end())
+						signeds[sig] = is_signed;
+					else if (it->second != is_signed)
+						mixed_signs = true;
 				}
 			}
 		}
@@ -569,25 +592,32 @@ struct OptBalanceTreeWorker {
 		// Create a tree
 		log_debug("  Creating tree for %s with %d sources and %d inner cells...\n", head_cell, GetSize(sources), inner_cells);
 
+		// If not all signed flags are the same, do not balance
+		// SILIMATE: over every source reached, a cancelled one included
+		for (auto &it : signeds)
+			if (it.second != signeds.begin()->second)
+				mixed_signs = true;
+		if (mixed_signs || overflow)
+			return false;
+
 		// Build a vector of all source signals
 		vector<SigSpec> source_signals;
-		vector<bool> signed_flags;
-		for (auto &source : sources) {
-			for (int i = 0; i < source.second; i++) {
+		for (auto &source : sources)
+			for (int i = 0; i < source.second; i++)
 				source_signals.push_back(source.first);
-				signed_flags.push_back(signeds[source.first]);
-			}
-		}
 
-		// If not all signed flags are the same, do not balance
-		if (!std::all_of(signed_flags.begin(), signed_flags.end(), [&](bool flag) { return flag == signed_flags[0]; }))
-			return false;
+		SigSpec head_output = sigmap(head_cell->getPort(ID::Y));
+		// SILIMATE: every source of an $xor tree cancelled
+		if (source_signals.empty()) {
+			module->connect(head_output, SigSpec(State::S0, GetSize(head_output)));
+			consumed_cells.insert(head_cell);
+			return true;
+		}
 
 		// Create the balanced tree
 		SigSpec tree_output = create_balanced_tree(source_signals, cell_type, head_cell);
 
 		// Connect the tree output to the head cell's output
-		SigSpec head_output = sigmap(head_cell->getPort(ID::Y));
 		int connect_width = std::min(head_output.size(), tree_output.size());
 		module->connect(head_output.extract(0, connect_width), tree_output.extract(0, connect_width));
 		if (head_output.size() > tree_output.size()) {
