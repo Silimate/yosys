@@ -1881,3 +1881,111 @@ select w:spare -assert-count 1
 
 design -reset
 log -pop
+
+
+# Test 46
+log -header "A chain with a side load builds only the trees it keeps"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input  wire a, b, c, d, e, f, g, h, i,
+  output wire x, z
+);
+  // s is read by a NOT as well as by the last link, so s and x head trees.
+  // Each link before s is read only by the next and needs no tree of its own.
+  wire s = a & b & c & d & e & f & g & h;
+  assign x = s & i;
+  assign z = ~s;
+endmodule
+EOF
+check -assert
+
+# 7 cells for s and 8 for x, which rebuilds the cone of s in its own tree
+logger -expect log "Converted 15 \$and cells into trees" 1
+equiv_opt -assert opt_balance_tree
+logger -check-expected
+design -load postopt
+select t:$and -assert-count 15
+select o:x %ci* t:$and %i -assert-count 8
+select o:z %ci* t:$and %i -assert-count 7
+
+design -reset
+log -pop
+
+
+# Test 47
+log -header "Links above a chain left for mixed signedness head their own trees"
+log -push
+design -reset
+read_rtlil <<EOF
+module \top
+  wire input 1 \a
+  wire input 2 \b
+  wire input 3 \c
+  wire input 4 \d
+  wire input 5 \e
+  wire output 6 \y
+  wire \t1
+  wire \t2
+  wire \t3
+  cell $and \and1
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \a
+    connect \B \b
+    connect \Y \t1
+  end
+  cell $and \and2
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \t1
+    connect \B \c
+    connect \Y \t2
+  end
+  cell $and \and3
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \t2
+    connect \B \d
+    connect \Y \t3
+  end
+  # Signed, so the chain it ends mixes signedness and stays as it is
+  cell $and \and4
+    parameter \A_SIGNED 1
+    parameter \B_SIGNED 1
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 1
+    connect \A \t3
+    connect \B \e
+    connect \Y \y
+  end
+end
+EOF
+check -assert
+
+equiv_opt -assert opt_balance_tree
+design -load postopt
+
+# and4 stays and reads t3, which becomes (a & b) & (c & d)
+select t:$and -assert-count 4
+select c:and4 -assert-count 1
+select i:a %co2 t:$and %i -set a_cells
+select i:b %co2 t:$and %i -set b_cells
+select i:c %co2 t:$and %i -set c_cells
+select i:d %co2 t:$and %i -set d_cells
+select @a_cells @b_cells %i -assert-count 1
+select @c_cells @d_cells %i -assert-count 1
+
+design -reset
+log -pop
