@@ -490,6 +490,9 @@ struct OptBalanceTreeWorker {
 			bounds.clear();
 			dict<SigSpec, pool<Cell*>> sig_to_sink;
 			SlicedAddContext sliced_add_ctx;
+			// SILIMATE: only try_sliced_add_tree reads the sliced index, and only for
+			// $add, so skip it for the other types (a pool per input bit, never read)
+			bool index_sliced = cell_type == ID($add);
 			for (auto cell : module->selected_cells())
 			{
 				for (auto &conn : cell->connections())
@@ -499,6 +502,8 @@ struct OptBalanceTreeWorker {
 						sig_to_driver[sig] = cell;
 						for (int i = 0; i < GetSize(sig); i++) {
 							bit_driver[sig[i]] = cell;
+							if (!index_sliced)  // SILIMATE
+								continue;
 							sliced_add_ctx.bit_to_driver[sig[i]] = cell;
 							sliced_add_ctx.bit_to_driver_index[sig[i]] = i;
 						}
@@ -509,8 +514,9 @@ struct OptBalanceTreeWorker {
 						if (sig_to_sink.count(sig) == 0)
 							sig_to_sink[sig] = pool<Cell*>();
 						sig_to_sink[sig].insert(cell);
-						for (auto bit : sig)
-							sliced_add_ctx.bit_to_sink[bit].insert(cell);
+						if (index_sliced)  // SILIMATE
+							for (auto bit : sig)
+								sliced_add_ctx.bit_to_sink[bit].insert(cell);
 					}
 				}
 			}
@@ -534,7 +540,8 @@ struct OptBalanceTreeWorker {
 							input_port_sigs.insert(bit);
 						if (wire->port_output) {
 							output_port_sigs.insert(bit);
-							sliced_add_ctx.output_port_sigs.insert(bit);
+							if (index_sliced)  // SILIMATE
+								sliced_add_ctx.output_port_sigs.insert(bit);
 						}
 					}
 				}
