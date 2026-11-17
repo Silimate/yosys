@@ -1989,3 +1989,122 @@ select @c_cells @d_cells %i -assert-count 1
 
 design -reset
 log -pop
+
+# Test 48
+log -header "A reconvergent cone puts each source in its tree once, or not at all when XOR cancels it"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input  wire a, b, c, d, e,
+  input  wire [5:0] p, q,
+  output wire x, y,
+  output reg  z
+);
+  // t and s are each read by two links of the cone below them
+  wire t = a ^ b;
+  assign x = (t ^ c) ^ (t ^ d) ^ e;
+  wire s = a & b;
+  assign y = (s & c) & (s & d) & e;
+  // Each step reads the one before twice, so 2**6 paths reach a and b
+  integer i;
+  reg r, u, v;
+  always @* begin
+    r = a & b;
+    for (i = 0; i < 6; i = i + 1) begin
+      u = r & p[i];
+      v = r & q[i];
+      r = u & v;
+    end
+    z = r;
+  end
+endmodule
+EOF
+proc
+check -assert
+
+# x = c ^ d ^ e, as a and b each reach it twice and cancel; y needs 4 cells for
+# its 5 sources and z 13 for its 14, where counting every path would emit 253
+logger -expect log "Converted 2 \$xor cells into trees" 1
+logger -expect log "Converted 17 \$and cells into trees" 1
+equiv_opt -assert opt_balance_tree
+logger -check-expected
+design -load postopt
+select t:$xor -assert-count 2
+select t:$and -assert-count 17
+select i:a %co1 t:$xor %i -assert-none
+select i:b %co1 t:$xor %i -assert-none
+
+design -reset
+log -pop
+
+# Test 49
+log -header "A source read both signed and unsigned leaves its chain as it is"
+log -push
+design -reset
+read_rtlil <<EOF
+module \top
+  wire input 1 \x
+  wire input 2 \y
+  wire width 2 output 3 \o
+  wire width 2 \t
+  # t = {0, x & y}, x zero-extended
+  cell $and \and1
+    parameter \A_SIGNED 0
+    parameter \B_SIGNED 0
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 1
+    parameter \Y_WIDTH 2
+    connect \A \x
+    connect \B \y
+    connect \Y \t
+  end
+  # Reads x again, sign-extended: o = {x & 0, x & x & y} = {0, x & y}
+  cell $and \and2
+    parameter \A_SIGNED 1
+    parameter \B_SIGNED 1
+    parameter \A_WIDTH 1
+    parameter \B_WIDTH 2
+    parameter \Y_WIDTH 2
+    connect \A \x
+    connect \B \t
+    connect \Y \o
+  end
+end
+EOF
+check -assert
+
+# A tree of x, x and y built signed would sign-extend y and set o[1]
+equiv_opt -assert opt_balance_tree
+design -load postopt
+select t:$and -assert-count 2
+select c:and1 c:and2 -assert-count 2
+
+design -reset
+log -pop
+
+# Test 50
+log -header "An XOR cone whose sources all cancel drives its head with zero"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input  wire [1:0] a, b, c,
+  output wire [1:0] x
+);
+  // Two paths reach each of a, b and c, so x = 0
+  wire [1:0] t = a ^ b;
+  assign x = (t ^ c) ^ (t ^ c);
+endmodule
+EOF
+check -assert
+
+logger -expect log "Converted 0 \$xor cells into trees" 1
+equiv_opt -assert opt_balance_tree
+logger -check-expected
+design -load postopt
+select t:$xor -assert-none
+sat -verify -prove x 2'b00
+
+design -reset
+log -pop
