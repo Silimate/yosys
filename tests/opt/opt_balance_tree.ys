@@ -2082,3 +2082,29 @@ select c:and1 c:and2 -assert-count 2
 
 design -reset
 log -pop
+
+# Test 50
+log -header "An XOR cone whose sources all cancel drives its head with zero"
+log -push
+design -reset
+read_verilog <<EOF
+module top (
+  input  wire [1:0] a, b, c,
+  output wire [1:0] x
+);
+  // Two paths reach each of a, b and c, so x = 0
+  wire [1:0] t = a ^ b;
+  assign x = (t ^ c) ^ (t ^ c);
+endmodule
+EOF
+check -assert
+
+logger -expect log "Converted 0 \$xor cells into trees" 1
+equiv_opt -assert opt_balance_tree
+logger -check-expected
+design -load postopt
+select t:$xor -assert-none
+sat -verify -prove x 2'b00
+
+design -reset
+log -pop
