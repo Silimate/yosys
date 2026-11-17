@@ -93,7 +93,7 @@ FstData::FstData(std::string filename) : ctx(nullptr), max_handle(0)
 	} else {
 		#if defined(YOSYS_ENABLE_SPAWN)
 		std::string filename_trim = file_base_name(filename);
-		if (filename_trim.size() > 4 && filename_trim.compare(filename_trim.size()-4, std::string::npos, ".vcd") == 0) {
+		if (ext == ".vcd") {
 			filename_trim.erase(filename_trim.size()-4);
 			idx->tmp_file = stringf("%s/converted_%s.fst", get_base_tmpdir(), filename_trim);
 			std::string cmd = stringf("vcd2fst %s %s", filename, idx->tmp_file);

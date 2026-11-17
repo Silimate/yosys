@@ -8,10 +8,15 @@ inline void bind_waveform(pybind11::module_ &m)
 	using namespace Yosys;
 	WaveformStream::resolve_reader = [] {
 		py::gil_scoped_acquire gil;
-		auto command = py::module_::import("pyosys").attr("_fsdb_reader_command")();
-		std::vector<std::string> argv;
-		for (auto item : command) argv.push_back(py::cast<std::string>(item));
-		return argv;
+		auto providers = py::module_::import("importlib.metadata").attr("entry_points")(
+			py::arg("group") = "yosys.waveform_readers", py::arg("name") = "fsdb");
+		for (auto provider : providers) {
+			auto command = provider.attr("load")()();
+			std::vector<std::string> argv;
+			for (auto item : command) argv.push_back(py::cast<std::string>(item));
+			return argv;
+		}
+		return WaveformStream::Command{"fsdb-reader"};
 	};
 	m.def("waveform_info", [](const std::string &filename) {
 		FstData data(filename);

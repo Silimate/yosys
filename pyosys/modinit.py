@@ -17,11 +17,3 @@ if os.path.isfile(_abc_candidate):
     sys._pyosys_abc = _abc_candidate
 
 __all__ = ["libyosys"]
-
-
-def _fsdb_reader_command():
-    """Discover a packaged reader on first use, including in embedded Python."""
-    from importlib.metadata import entry_points
-    for provider in entry_points(group="yosys.waveform_readers", name="fsdb"):
-        return provider.load()()
-    return ["fsdb-reader"]
