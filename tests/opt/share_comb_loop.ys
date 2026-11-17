@@ -1,0 +1,15 @@
+# t feeds amt only when s=1 and sh feeds t only when s=0, so the loop is never
+# sensitized; amt is live while s=0 and must not be removed as "never active"
+read_verilog <<EOT
+module top(input s, input [7:0] x, input [2:0] n, m, output [7:0] y, z);
+  wire [7:0] t;
+  wire [2:0] amt = s ? t[2:0] : n;
+  wire [7:0] sh = x >> amt;
+  assign t = s ? x : sh;
+  assign y = s ? 8'hff : t;
+  assign z = s ? x << m : 8'd0;
+endmodule
+EOT
+proc
+opt_clean
+equiv_opt -assert -nocheck share
