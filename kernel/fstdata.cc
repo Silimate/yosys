@@ -18,6 +18,9 @@
  */
 
 #include "kernel/fstdata.h"
+#include "libs/json11/json11.hpp"
+#include <charconv>
+#include <cmath>
 
 USING_YOSYS_NAMESPACE
 
@@ -42,13 +45,36 @@ FstIndex::~FstIndex()
 		remove(tmp_file.c_str());
 }
 
+static const std::vector<std::string> wave_units = {"s", "ms", "us", "ns", "ps", "fs", "as", "zs"};
+
+static uint64_t time_tick(const std::string &s)
+{
+	uint64_t value;
+	auto parsed = std::from_chars(s.data(), s.data() + s.size(), value);
+	if (parsed.ec != std::errc() || parsed.ptr != s.data() + s.size())
+		throw std::runtime_error("Invalid waveform time bound");
+	return value;
+}
+
 FstData::FstData(std::string filename) : ctx(nullptr), max_handle(0)
 {
+	rewrite_filename(filename);
 	// Reuse an index built earlier in this process, or inherited from the parent by fork
+	auto ext = std::filesystem::path(filename).extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+	bool external = ext == ".fsdb";
+	if (external) filename = std::filesystem::absolute(filename).string();
 	auto cached = indexCache().find(filename);
+	if (external && cached != indexCache().end() &&
+	    (cached->second->mtime != std::filesystem::last_write_time(filename) ||
+	     cached->second->file_size != std::filesystem::file_size(filename))) {
+		indexCache().erase(cached);
+		cached = indexCache().end();
+	}
 	if (cached != indexCache().end()) {
 		index = cached->second;
 		max_handle = index->max_handle;
+		if (external) return;
 		ctx = (fstReaderContext *)fstReaderOpen(index->fst_path.c_str());
 		if (!ctx)
 			log_error("Error opening '%s' as FST file\n", index->fst_path);
@@ -59,26 +85,35 @@ FstData::FstData(std::string filename) : ctx(nullptr), max_handle(0)
 	}
 
 	auto idx = std::make_shared<FstIndex>();
-	#if defined(YOSYS_ENABLE_SPAWN)
-	std::string filename_trim = file_base_name(filename);
-	if (filename_trim.size() > 4 && filename_trim.compare(filename_trim.size()-4, std::string::npos, ".vcd") == 0) {
-		filename_trim.erase(filename_trim.size()-4);
-		idx->tmp_file = stringf("%s/converted_%s.fst", get_base_tmpdir(), filename_trim);
-		std::string cmd = stringf("vcd2fst %s %s", filename, idx->tmp_file);
-		log("Exec: %s\n", cmd);
-		if (run_command(cmd) != 0)
-			log_cmd_error("Shell command failed!\n");
-		idx->fst_path = idx->tmp_file;
-	} else
-	#endif
-		idx->fst_path = filename;
+	if (external) {
+		idx->external_path = filename;
+		idx->mtime = std::filesystem::last_write_time(filename);
+		idx->file_size = std::filesystem::file_size(filename);
+		readExternalHeader(*idx);
+	} else {
+		#if defined(YOSYS_ENABLE_SPAWN)
+		std::string filename_trim = file_base_name(filename);
+		if (filename_trim.size() > 4 && filename_trim.compare(filename_trim.size()-4, std::string::npos, ".vcd") == 0) {
+			filename_trim.erase(filename_trim.size()-4);
+			idx->tmp_file = stringf("%s/converted_%s.fst", get_base_tmpdir(), filename_trim);
+			std::string cmd = stringf("vcd2fst %s %s", filename, idx->tmp_file);
+			log("Exec: %s\n", cmd);
+			if (run_command(cmd) != 0)
+				log_cmd_error("Shell command failed!\n");
+			idx->fst_path = idx->tmp_file;
+		} else
+		#endif
+			idx->fst_path = filename;
 
-	const std::vector<std::string> g_units = { "s", "ms", "us", "ns", "ps", "fs", "as", "zs" };
-	ctx = (fstReaderContext *)fstReaderOpen(idx->fst_path.c_str());
-	if (!ctx)
-		log_error("Error opening '%s' as FST file\n", idx->fst_path);
-	max_handle = idx->max_handle = fstReaderGetMaxHandle(ctx);
-	int scale = idx->scale = (int)fstReaderGetTimescale(ctx);
+		ctx = (fstReaderContext *)fstReaderOpen(idx->fst_path.c_str());
+		if (!ctx)
+			log_error("Error opening '%s' as FST file\n", idx->fst_path);
+		idx->max_handle = fstReaderGetMaxHandle(ctx);
+		idx->scale = (int)fstReaderGetTimescale(ctx);
+		extractVarNames(*idx);
+	}
+	max_handle = idx->max_handle;
+	int scale = idx->scale;
 	std::string timescale_str = "";
 	int unit = 0;
 	int zeros = 0;
@@ -94,11 +129,9 @@ FstData::FstData(std::string filename) : ctx(nullptr), max_handle(0)
 		}
 	}
 	for (int i=0;i<zeros; i++) timescale_str += "0";
-	timescale_str += g_units[unit];
+	timescale_str += wave_units.at(unit);
 	idx->timescale_str = timescale_str;
 
-	// Walking hierarchy forces libfst to inflate it to a temp file, so this cache exists to do the work once.
-	extractVarNames(*idx);
 	index = idx;
 	indexCache()[filename] = index;
 }
@@ -114,9 +147,9 @@ void FstData::clearIndexCache()
 	indexCache().clear();
 }
 
-uint64_t FstData::getStartTime() { return fstReaderGetStartTime(ctx); }
+uint64_t FstData::getStartTime() { return ctx ? fstReaderGetStartTime(ctx) : index->start; }
 
-uint64_t FstData::getEndTime() { return fstReaderGetEndTime(ctx); }
+uint64_t FstData::getEndTime() { return ctx ? fstReaderGetEndTime(ctx) : index->end; }
 
 static void normalize_brackets(std::string &str)
 {
@@ -144,6 +177,42 @@ static std::string remove_spaces(std::string str)
 {
 	str.erase(std::remove(str.begin(), str.end(), ' '), str.end());
 	return str;
+}
+
+void FstData::readExternalHeader(FstIndex &idx)
+{
+	WaveformStream stream({"--header", idx.external_path});
+	std::string line, error;
+	bool got_time = false;
+	while (stream.line(line)) {
+		auto record = json11::Json::parse(line, error);
+		const auto &row = record.array_items();
+		if (!error.empty() || row.empty()) throw std::runtime_error("Invalid waveform header record");
+		if (row.size() == 4 && row[0].string_value() == "time" && !got_time) {
+			double scale = row[1].number_value();
+			if (!row[1].is_number() || scale != std::floor(scale) || scale < -21 || scale > 2)
+				throw std::runtime_error("Unsupported waveform timescale exponent");
+			idx.scale = int(scale);
+			idx.start = time_tick(row[2].string_value());
+			idx.end = time_tick(row[3].string_value());
+			if (idx.start > idx.end) throw std::runtime_error("Reversed waveform time range");
+			got_time = true;
+		} else if (got_time && row.size() == 6 && row[0].string_value() == "var" &&
+		           row[2].is_string() && row[3].is_string() && row[5].is_bool()) {
+			double id = row[1].number_value(), width = row[4].number_value();
+			if (id < 1 || id >= UINT32_MAX || id != std::floor(id) ||
+			    width < 1 || width > INT_MAX || width != std::floor(width))
+				throw std::runtime_error("Invalid waveform signal id or width");
+			FstVar var{fstHandle(id), remove_spaces(row[3].string_value()), idx.handle_to_var.count(fstHandle(id)) != 0,
+			           row[5].bool_value(), row[2].string_value(), int(width)};
+			normalize_brackets(var.scope);
+			registerVar(idx, var);
+			idx.max_handle = std::max(idx.max_handle, var.id);
+		} else {
+			throw std::runtime_error("Unexpected waveform header record");
+		}
+	}
+	if (!got_time) throw std::runtime_error("Missing waveform time range");
 }
 
 // Index `prefix + name` by full name and, when it ends in an address, as a memory word.
@@ -393,15 +462,32 @@ void FstData::reconstruct_callback_attimes(uint64_t pnt_time, fstHandle pnt_faci
 	last_data[pnt_facidx].assign((const char *)pnt_value); // reuses existing capacity
 }
 
+void FstData::replayExternal(const std::vector<fstHandle> &handles, uint64_t end)
+{
+	if (handles.empty()) return;
+	WaveformStream stream({"--changes", index->external_path, std::to_string(end)}, handles);
+	uint64_t time;
+	fstHandle id;
+	std::string value;
+	while (curr_cycle <= last_cycle && stream.change(time, id, value))
+		reconstruct_callback_attimes(time, id, reinterpret_cast<const unsigned char *>(value.c_str()), value.size());
+}
+
 void FstData::reconstructAllAtTimes(std::vector<fstHandle> &signal, uint64_t start, uint64_t end, unsigned int end_cycle, CallbackFunction cb)
 {
 	clk_signals = signal;
 	callback = cb;
 	resetReplay(start, end, end_cycle);
 
-	fstReaderSetUnlimitedTimeRange(ctx);
-	fstReaderSetFacProcessMaskAll(ctx);
-	fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
+	if (!ctx) {
+		std::vector<fstHandle> handles;
+		for (const auto &entry : index->handle_to_var) handles.push_back(entry.first);
+		replayExternal(handles, end);
+	} else {
+		fstReaderSetUnlimitedTimeRange(ctx);
+		fstReaderSetFacProcessMaskAll(ctx);
+		fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
+	}
 	if (last_time!=end_time && curr_cycle <= last_cycle) {
 		flushDirty();
 		callback(last_time);
@@ -421,20 +507,27 @@ void FstData::reconstructAllAtTimesFiltered(std::vector<fstHandle> &clk_signal, 
 	callback = cb;
 	resetReplay(start, end, end_cycle);
 
-	// Need pre-start VCs so stable signals are not x at -start.
-	fstReaderSetUnlimitedTimeRange(ctx);
-	// Only decompress mapped DUT handles (+ clocks); skip the rest of the dump.
-	fstReaderClrFacProcessMaskAll(ctx);
-	auto add = [&](fstHandle h) {
-		if (h != 0)
-			fstReaderSetFacProcessMask(ctx, h);
-	};
-	for (auto h : fac_mask)
-		add(h);
-	for (auto h : clk_signals)
-		add(h);
+	if (!ctx) {
+		std::vector<fstHandle> handles = fac_mask;
+		handles.insert(handles.end(), clk_signals.begin(), clk_signals.end());
+		handles.erase(std::remove(handles.begin(), handles.end(), 0), handles.end());
+		replayExternal(handles, end);
+	} else {
+		// Need pre-start VCs so stable signals are not x at -start.
+		fstReaderSetUnlimitedTimeRange(ctx);
+		// Only decompress mapped DUT handles (+ clocks); skip the rest of the dump.
+		fstReaderClrFacProcessMaskAll(ctx);
+		auto add = [&](fstHandle h) {
+			if (h != 0)
+				fstReaderSetFacProcessMask(ctx, h);
+		};
+		for (auto h : fac_mask)
+			add(h);
+		for (auto h : clk_signals)
+			add(h);
 
-	fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
+		fstReaderIterBlocks2(ctx, reconstruct_clb_attimes, reconstruct_clb_varlen_attimes, this, nullptr);
+	}
 
 	// Flush final sample(s) if the last VC was before end_time / end_cycle.
 	if (last_time!=end_time && curr_cycle <= last_cycle) {

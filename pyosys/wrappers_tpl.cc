@@ -27,6 +27,9 @@
 
 #include "pyosys/hashlib.h"
 #include "pyosys/ostream.h"
+#ifdef YOSYS_ENABLE_ZLIB
+#include "pyosys/waveform.h"
+#endif
 
 namespace py = pybind11;
 
@@ -185,6 +188,10 @@ namespace pyosys {
 				yosys_shutdown();
 			}));
 		}
+
+#ifdef YOSYS_ENABLE_ZLIB
+		bind_waveform(m);
+#endif
 
 		// Logging Methods
 		m.def("log_header", [](Design *d, std::string s) { logger().formatted_header(d, "%s", s); });

@@ -163,14 +163,18 @@ set_source_files_properties(yosys.cc PROPERTIES
 )
 
 yosys_core(fstdata
+	waveform_stream.cc
+	waveform_stream.h
 	fstdata.cc
 	fstdata.h
 	REQUIRES
 		fst
+		json11
 	DATA_DIR
 		include/kernel
 	DATA_FILES
 		fstdata.h
+		waveform_stream.h
 )
 
 if (NOT YOSYS_BUILD_PYTHON_ONLY)
