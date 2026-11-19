@@ -1,0 +1,4 @@
+# C#(A)::x is still an error when A does not declare x
+logger -expect error "'nope_t' is not declared under prefix 'cfg_t'" 1
+verific -sv class_type_param_scope.sv
+verific -import bad
