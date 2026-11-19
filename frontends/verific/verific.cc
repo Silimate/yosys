@@ -2127,6 +2127,11 @@ void VerificImporter::merge_past_ffs(pool<RTLIL::Cell*> &candidates)
 		merge_past_ffs_clock(it.second, it.first.first, it.first.second);
 }
 
+// SILIMATE: a module's name spells out its parameter values, a type parameter's whole type
+// included, so nested type parameters can make it megabytes long
+static const size_t max_module_name_size = 4096;
+static const size_t long_module_name_prefix = 256;
+
 static std::string sha1_if_contain_spaces(std::string str)
 {
 	if(str.find_first_of(' ') != std::string::npos) {
@@ -2139,6 +2144,9 @@ static std::string sha1_if_contain_spaces(std::string str)
 			return sha1(str);
 		}
 	}
+	// SILIMATE: keep the start of a very long name, then a hash of all of it
+	if (str.size() > max_module_name_size)
+		return str.substr(0, long_module_name_prefix) + "$" + sha1(str);
 	return str;
 }
 
@@ -2223,6 +2231,7 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 {
 	std::string netlist_name = nl->GetAtt(" \\top") || is_blackbox(nl) ? nl->CellBaseName() : nl->Owner()->Name();
 	std::string module_name = netlist_name;
+	std::string long_name; // SILIMATE: the whole name, when it is too long to keep
 
 	if (nl->IsOperator() || nl->IsPrimitive()) {
 		module_name = "$verific$" + module_name;
@@ -2232,6 +2241,8 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 			module_name += nl->Name();
 			module_name += ")";
 		}
+		if (module_name.size() > max_module_name_size)
+			long_name = module_name;
 		module_name = "\\" + sha1_if_contain_spaces(module_name);
 	}
 
@@ -2305,6 +2316,8 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 	if (module->name.isPublic())
 		module->set_string_attribute(ID::hdlname, nl->CellBaseName());
 	module->set_string_attribute(ID(library), nl->Owner()->Owner()->Name());
+	if (!long_name.empty())
+		module->set_string_attribute(ID(verific_name), long_name); // SILIMATE
 #ifdef VERIFIC_VHDL_SUPPORT
 	if (nl->IsFromVhdl()) {
 		NameSpace name_space(0);
