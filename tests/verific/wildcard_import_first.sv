@@ -55,3 +55,14 @@ module first_a_one_line
 );
 	assign w = Width;
 endmodule
+
+// The same, with the first wildcard import in an included file
+module first_a_include
+	import pkg_b::B_DONE;
+(
+	output logic [31:0] w
+);
+	`include "wildcard_import_first_a.svh"
+	import pkg_b::*;
+	assign w = Width;
+endmodule

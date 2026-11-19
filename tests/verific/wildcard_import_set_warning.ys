@@ -1,12 +1,13 @@
 # With VERI-1390 demoted, a name two wildcard imports declare resolves to the first one's
 # declaration, rather than being reported as not declared (VERI-1128)
-logger -expect warning "VERI-1390\] .*'Width' is visible via multiple package imports" 4
+logger -expect warning "VERI-1390\] .*'Width' is visible via multiple package imports" 5
 logger -expect warning "VERI-1390\] .*'state_e' is visible via multiple package imports" 2
 verific -set-warning VERI-1390
 verific -sv wildcard_import_first.sv
-verific -import first_a first_b first_a_explicit_b first_a_one_line
+verific -import first_a first_b first_a_explicit_b first_a_one_line first_a_include
 logger -check-expected
 sat -verify -prove w 8 -prove bits 2 -prove st 1 first_a
 sat -verify -prove w 16 -prove bits 3 first_b
 sat -verify -prove w 8 -prove done 2 first_a_explicit_b
 sat -verify -prove w 8 first_a_one_line
+sat -verify -prove w 8 first_a_include
