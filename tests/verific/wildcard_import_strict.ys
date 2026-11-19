@@ -1,0 +1,3 @@
+# Without relaxed checking, IEEE 1800-2017 26.3 still makes such a reference an error
+logger -expect error "Reading Verilog/SystemVerilog sources failed" 1
+verific -sv wildcard_import_same.sv

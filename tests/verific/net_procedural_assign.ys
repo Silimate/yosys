@@ -1,0 +1,14 @@
+# Under relaxed checking, a procedural assignment to a net is a warning (VERI-1100, and VERI-1042
+# for a concatenation of nets), and the net becomes a flop as a variable would. Each warning is
+# reported twice: when the file is analyzed, and again when the module is imported.
+logger -expect warning "VERI-1100\] .*net_procedural_assign.sv:10: procedural assignment to a non-register 'qa' is not permitted" 2
+logger -expect warning "VERI-1100\] .*net_procedural_assign.sv:11: procedural assignment to a non-register 'qc' is not permitted" 2
+logger -expect warning "VERI-1042\] .*net_procedural_assign.sv:10: illegal expression in target" 2
+verific -set_relaxed_checking
+verific -sv net_procedural_assign.sv
+verific -import top ref_top
+logger -check-expected
+select -assert-count 3 top/t:$dff
+equiv_make top ref_top equiv
+equiv_induct equiv
+equiv_status -assert equiv
