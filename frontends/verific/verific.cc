@@ -141,6 +141,7 @@ vector<string> verific_force_ram_signals;
 static pool<std::string> verific_compile_as_blackbox;
 static int verific_promote_params_min; // SILIMATE: see param_ports.cc
 int verific_promote_params(const Array *veri_modules, const Array *vhdl_units, const Map *parameters, int min_variants);
+int verific_resolve_class_type_params(); // SILIMATE: see class_type_params.cc
 
 static unsigned compile_as_blackbox_cb(const char *module_name)
 {
@@ -3765,6 +3766,7 @@ void import_all(const char* work, std::map<std::string,Netlist*> *nl_todo, Map *
 {
 #ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
 	apply_force_ram_signals(work); // SILIMATE
+	verific_resolve_class_type_params(); // SILIMATE: C#(A)::x reached through C's type parameter
 #endif
 #ifdef YOSYSHQ_VERIFIC_EXTENSIONS
 	save_blackbox_msg_state();
@@ -3837,6 +3839,7 @@ std::set<std::string> import_tops(const char* work, std::map<std::string,Netlist
 
 #ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
 	apply_force_ram_signals(work); // SILIMATE
+	verific_resolve_class_type_params(); // SILIMATE: C#(A)::x reached through C's type parameter
 #endif
 
 #ifdef VERIFIC_VHDL_SUPPORT

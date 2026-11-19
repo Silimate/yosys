@@ -1,0 +1,13 @@
+# C#(A)::x reached through class C's type parameter T has A's type in each specialization:
+# cfg_a's data_t is 9 bits, cfg_b's 17 (see class_type_param_scope.sv)
+verific -sv class_type_param_scope.sv
+verific -import top
+hierarchy -check -top top
+flatten
+# The port of type data_t, and a member selected from it
+sat -verify -prove qa[8:0] d[8:0] -prove qa[31:9] 23'b0 -prove xa[7:0] d[8:1] -prove xa[15:8] 8'b0 top
+sat -verify -prove qb[16:0] d[16:0] -prove qb[31:17] 15'b0 -prove xb d[16:1] top
+# $bits of each form, low byte first: named actual, positional, default (cfg_a), package-qualified,
+# extends T, through another class, a module typedef, a default naming another parameter (type T = U)
+# with U given, and with U's default (cfg_a)
+sat -verify -prove wa 72'h090909090909090909 -prove wb 72'h091111111111091111 top
