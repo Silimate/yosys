@@ -2127,6 +2127,11 @@ void VerificImporter::merge_past_ffs(pool<RTLIL::Cell*> &candidates)
 		merge_past_ffs_clock(it.second, it.first.first, it.first.second);
 }
 
+// SILIMATE: a module's name spells out its parameter values, a type parameter's whole type
+// included, so nested type parameters can make it megabytes long
+static const size_t max_module_name_size = 4096;
+static const size_t long_module_name_prefix = 256;
+
 static std::string sha1_if_contain_spaces(std::string str)
 {
 	if(str.find_first_of(' ') != std::string::npos) {
@@ -2139,6 +2144,9 @@ static std::string sha1_if_contain_spaces(std::string str)
 			return sha1(str);
 		}
 	}
+	// SILIMATE: keep the start of a very long name, then a hash of all of it
+	if (str.size() > max_module_name_size)
+		return str.substr(0, long_module_name_prefix) + "$" + sha1(str);
 	return str;
 }
 
@@ -2223,6 +2231,7 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 {
 	std::string netlist_name = nl->GetAtt(" \\top") || is_blackbox(nl) ? nl->CellBaseName() : nl->Owner()->Name();
 	std::string module_name = netlist_name;
+	std::string long_name; // SILIMATE: the whole name, when it is too long to keep
 
 	if (nl->IsOperator() || nl->IsPrimitive()) {
 		module_name = "$verific$" + module_name;
@@ -2232,6 +2241,8 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 			module_name += nl->Name();
 			module_name += ")";
 		}
+		if (module_name.size() > max_module_name_size)
+			long_name = module_name;
 		module_name = "\\" + sha1_if_contain_spaces(module_name);
 	}
 
@@ -2305,6 +2316,10 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 	if (module->name.isPublic())
 		module->set_string_attribute(ID::hdlname, nl->CellBaseName());
 	module->set_string_attribute(ID(library), nl->Owner()->Owner()->Name());
+	// SILIMATE: the whole name, kept once: an attribute would be copied with the module, and into
+	// each $scopeinfo cell flatten makes from it
+	if (!long_name.empty())
+		design->scratchpad_set_string("verific.long_name." + module->name.unescape(), long_name);
 #ifdef VERIFIC_VHDL_SUPPORT
 	if (nl->IsFromVhdl()) {
 		NameSpace name_space(0);
@@ -4297,9 +4312,10 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 
 		// SILIMATE: use Verific optimizations
 		if (verific_opt) {
-			log("  Optimizing netlist for %s.\n", it->first.c_str());
+			std::string name = sha1_if_contain_spaces(it->first);
+			log("  Optimizing netlist for %s.\n", name.c_str());
 
-			log("    Running post-elaboration for %s.\n", it->first.c_str());
+			log("    Running post-elaboration for %s.\n", name.c_str());
 			nl->PostElaborationProcess();
 		}
 
