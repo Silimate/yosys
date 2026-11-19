@@ -33,3 +33,16 @@ module first_b
 	assign w = Width;
 	assign bits = $bits(state_e);
 endmodule
+
+// An explicit import from pkg_b before the wildcard imports doesn't make pkg_b's declaration first
+module first_a_explicit_b
+	import pkg_b::B_DONE;
+	import pkg_a::*;
+	import pkg_b::*;
+(
+	output logic [31:0] w,
+	output logic [31:0] done
+);
+	assign w = Width;
+	assign done = B_DONE;
+endmodule
