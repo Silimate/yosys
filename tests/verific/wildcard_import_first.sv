@@ -46,3 +46,12 @@ module first_a_explicit_b
 	assign w = Width;
 	assign done = B_DONE;
 endmodule
+
+// The same, with the imports on one line
+module first_a_one_line
+	import pkg_b::B_DONE, pkg_a::*, pkg_b::*;
+(
+	output logic [31:0] w
+);
+	assign w = Width;
+endmodule
