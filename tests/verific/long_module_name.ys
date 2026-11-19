@@ -1,11 +1,18 @@
-# A module name over 4096 characters keeps its first 256 and a hash of the whole name, which the
-# module keeps in attribute verific_name; shorter names stay as they are.
+# A module name over 4096 characters keeps its first 256 and a hash of the whole name, and the
+# design's scratchpad keeps the whole name once; shorter names stay as they are.
 
 verific -sv long_module_name.sv
 verific -import top
 hierarchy -check -top top
 select -assert-mod-count 4 *
 select -assert-mod-count 2 m(P=*$????????????????????????????????????????
-select -assert-mod-count 2 A:verific_name
 select -assert-mod-count 1 m(P=8192'b01)
-select -assert-mod-count 0 m(P=8192'b01) A:verific_name %i
+select -assert-mod-count 0 A:verific_name
+scratchpad -assert-set verific.long_name.m(P=8192'b110111101010110110111110111011111101111010101101101111101110111111011110101011011011111011101111110111101010110110111110111011111101111010101101101111101110111111011110101011011011111011101111110111101010110110111110111011111101111010101101101111$1d04adc566a50bd503669b1a12aedc26cad4256e
+scratchpad -assert-set verific.long_name.m(P=8192'b110010101111111011110000000011011100101011111110111100000000110111001010111111101111000000001101110010101111111011110000000011011100101011111110111100000000110111001010111111101111000000001101110010101111111011110000000011011100101011111110111100$e8a7ac1425c4c179fe1b36bc9f2d56316306205b
+scratchpad -assert-unset verific.long_name.m(P=8192'b01)
+
+# flatten copies module attributes into each $scopeinfo; the whole name is not among them
+flatten
+select -assert-count 3 t:$scopeinfo
+select -assert-count 0 t:$scopeinfo a:module_verific_name %i

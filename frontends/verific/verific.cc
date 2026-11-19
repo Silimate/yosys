@@ -2316,8 +2316,10 @@ void VerificImporter::import_netlist(RTLIL::Design *design, Netlist *nl, std::ma
 	if (module->name.isPublic())
 		module->set_string_attribute(ID::hdlname, nl->CellBaseName());
 	module->set_string_attribute(ID(library), nl->Owner()->Owner()->Name());
+	// SILIMATE: the whole name, kept once: an attribute would be copied with the module, and into
+	// each $scopeinfo cell flatten makes from it
 	if (!long_name.empty())
-		module->set_string_attribute(ID(verific_name), long_name); // SILIMATE
+		design->scratchpad_set_string("verific.long_name." + module->name.unescape(), long_name);
 #ifdef VERIFIC_VHDL_SUPPORT
 	if (nl->IsFromVhdl()) {
 		NameSpace name_space(0);
@@ -4310,9 +4312,10 @@ static std::string elaborate_and_import(Design *design, const std::map<std::stri
 
 		// SILIMATE: use Verific optimizations
 		if (verific_opt) {
-			log("  Optimizing netlist for %s.\n", it->first.c_str());
+			std::string name = sha1_if_contain_spaces(it->first);
+			log("  Optimizing netlist for %s.\n", name.c_str());
 
-			log("    Running post-elaboration for %s.\n", it->first.c_str());
+			log("    Running post-elaboration for %s.\n", name.c_str());
 			nl->PostElaborationProcess();
 		}
 
