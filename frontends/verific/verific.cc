@@ -4486,6 +4486,10 @@ struct VerificPass : public Pass {
 		log("        +systemverilogext+<filepath>\n");
 		log("        +verilog1995ext+<filepath>\n");
 		log("        +verilog2001ext+<filepath>\n");
+#ifdef VERIFIC_VHDL_SUPPORT
+		// SILIMATE: say which files are read as VHDL
+		log("    A file whose extension is .vhd, .vhdl or .vho, in any case, is read as VHDL.\n");
+#endif
 		log("\n");
 		log("    analysis mode:\n");
 		log("        -ams\n");
@@ -5254,8 +5258,13 @@ struct VerificPass : public Pass {
 			Array *file_names_sv = new Array(POINTER_HASH);
 			FOREACH_ARRAY_ITEM(file_names, i, filename) {
 				std::string filename_str = filename;
-				if ((filename_str.substr(filename_str.find_last_of(".") + 1) == "vhd") ||
-						(filename_str.substr(filename_str.find_last_of(".") + 1) == "vhdl")) {
+				// SILIMATE: match the extension in any case, read .vho (a VHDL netlist) as VHDL,
+				// and don't take a name without a dot as its own extension
+				size_t dot = filename_str.find_last_of('.');
+				std::string ext = dot == std::string::npos ? "" : filename_str.substr(dot + 1);
+				for (auto &c : ext)
+					c = tolower((unsigned char)c);
+				if (ext == "vhd" || ext == "vhdl" || ext == "vho") {
 					if (!vhdl_file::Analyze(filename, work.c_str(), vhdl_mode)) {
 						verific_error_msg.clear();
 						log_cmd_error("Reading VHDL sources failed.\n");
