@@ -1,0 +1,56 @@
+# Under relaxed checking, registers that only a conditional generate block declares can be driven from
+# outside the block. When the block is generated, that drives the block's registers. When it is not, the
+# reference is left unresolved with a warning and drives nothing, so code under the block's
+# condition elaborates as it does in Quartus.
+
+log -header "The block is generated"
+log -push
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref_off.sv:17: 'r' is declared only in an unnamed generate block; using 'genblk1.r'" 1
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref_off.sv:17: 's' is declared only in an unnamed generate block; using 'genblk1.s'" 1
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref_off.sv
+verific -import -chparam P 1 top ref_top
+logger -check-expected
+select -assert-min 1 top/t:$dff
+miter -equiv -flatten -make_assert top ref_top miter
+sat -verify -tempinduct -prove-asserts -set-init-zero miter
+design -reset
+log -pop
+
+log -header "The block is not generated"
+log -push
+logger -expect warning "VERI-1187\] .*unnamed_generate_ref_off.sv:17: 'r' is not declared under prefix 'genblk1'" 1
+logger -expect warning "VERI-1187\] .*unnamed_generate_ref_off.sv:17: 's' is not declared under prefix 'genblk1'" 1
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref_off.sv
+verific -import -chparam P 0 top ref_top
+logger -check-expected
+select -assert-none top/t:$dff
+equiv_make top ref_top equiv
+equiv_simple equiv
+equiv_status -assert equiv
+log -pop
+design -reset
+
+log -header "No else branch: the block is generated"
+log -push
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref_off.sv:43: 'r' is declared only in an unnamed generate block; using 'genblk1.r'" 1
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref_off.sv
+verific -import -chparam P 1 no_else no_else_ref
+logger -check-expected
+miter -equiv -flatten -make_assert no_else no_else_ref miter
+sat -verify -tempinduct -prove-asserts -set-init-zero miter
+design -reset
+log -pop
+
+log -header "No else branch: the block is not generated"
+log -push
+logger -expect warning "VERI-2077\] .*unnamed_generate_ref_off.sv:43: failed to resolve 'genblk1' in hierarchical name 'genblk1.r'" 1
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref_off.sv
+verific -import -chparam P 0 no_else no_else_ref
+logger -check-expected
+miter -equiv -flatten -make_assert no_else no_else_ref miter
+sat -verify -tempinduct -prove-asserts -set-init-zero miter
+log -pop

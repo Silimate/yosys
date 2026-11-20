@@ -1,0 +1,8 @@
+# Without relaxed checking, a name that only an unnamed generate block declares is not visible outside it.
+# (In module uses, the port connection on line 28 declares an implicit net 'x', as the LRM says.)
+logger -expect log "VERI-1128\] .*unnamed_generate_ref.sv:89: 'x' is not declared" 1
+logger -expect log "VERI-1128\] .*unnamed_generate_ref.sv:90: 'c' is not declared" 1
+logger -expect log "VERI-1128\] .*unnamed_generate_ref.sv:91: 'd' is not declared" 1
+logger -expect error "Reading Verilog/SystemVerilog sources failed" 1
+logger -werror "VERI-5003"
+verific -sv unnamed_generate_ref.sv
