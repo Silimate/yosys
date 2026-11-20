@@ -866,7 +866,8 @@ static const RTLIL::Const extract_vhdl_integer(std::string &val)
 
 static const RTLIL::Const extract_vhdl_char(std::string &val)
 {
-	if (val.size()==3 && val[0]=='\"' && val.back()=='\"')
+	// A character generic's value comes as a VHDL character literal, 'a'
+	if (val.size()==3 && (val[0]=='\"' || val[0]=='\'') && val.back()==val[0])
 		return RTLIL::Const((int)val[1]);
 	log_error("Error parsing VHDL character.\n");
 }

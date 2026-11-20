@@ -1,0 +1,7 @@
+# Under relaxed checking, a literal outside the generic's subtype range is still an error
+logger -expect error "value 1146048069 is out of target constraint range idle to run" 1
+logger -werror "VHDL-5000"
+verific -set_relaxed_checking
+verific -vhdl string_enum_generic.vhd
+verific -sv string_enum_generic.sv
+verific -import out_of_range

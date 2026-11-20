@@ -1,0 +1,7 @@
+# Without relaxed checking, a string actual for an enumeration generic is read by position:
+# "false" is position 439721161573, out of the range of boolean
+logger -expect error "value 439721161573 is out of target constraint range false to true" 1
+logger -werror "VHDL-5000"
+verific -vhdl string_enum_generic.vhd
+verific -sv string_enum_generic.sv
+verific -import uses
