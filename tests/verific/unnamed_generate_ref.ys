@@ -1,0 +1,86 @@
+# Under relaxed checking, a net that only an unnamed generate block declares resolves from outside the
+# block as 'genblk<n>.name', as in Quartus, with a VERI-5003 warning for each reference. That includes a
+# port connection, where the LRM would declare an implicit net instead.
+
+log -header "Both branches of a generate-if, with each branch generated"
+log -push
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:25: 'x' is declared only in an unnamed generate block; using 'genblk1.x'" 1
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:26: 'x' is declared only in an unnamed generate block; using 'genblk1.x'" 1
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:27: 'x' is declared only in an unnamed generate block; using 'genblk1.x'" 1
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:28: 'x' is declared only in an unnamed generate block; using 'genblk1.x'" 1
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:31: 'x' is declared only in an unnamed generate block; using 'genblk1.x'" 1
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref.sv
+verific -import -chparam W 0 uses uses_ref
+logger -check-expected
+flatten
+equiv_make uses uses_ref equiv
+equiv_induct equiv
+equiv_status -assert equiv
+design -reset
+
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref.sv
+verific -import -chparam W 1 uses uses_ref
+flatten
+equiv_make uses uses_ref equiv
+equiv_induct equiv
+equiv_status -assert equiv
+design -reset
+log -pop
+
+log -header "An else-if chain, a case-generate and a block in a block, with each branch generated"
+log -push
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:89: 'x' is declared only in an unnamed generate block; using 'genblk1.x'" 1
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:90: 'c' is declared only in an unnamed generate block; using 'genblk2.c'" 1
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:91: 'd' is declared only in an unnamed generate block; using 'genblk3.genblk1.d'" 1
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref.sv
+verific -import -chparam A 0 chain chain_ref
+logger -check-expected
+equiv_make chain chain_ref equiv
+equiv_simple equiv
+equiv_status -assert equiv
+design -reset
+
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref.sv
+verific -import -chparam A 1 chain chain_ref
+equiv_make chain chain_ref equiv
+equiv_simple equiv
+equiv_status -assert equiv
+design -reset
+
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref.sv
+verific -import -chparam A 2 chain chain_ref
+equiv_make chain chain_ref equiv
+equiv_simple equiv
+equiv_status -assert equiv
+log -pop
+design -reset
+
+log -header "An implicit net that the other branch's references use stays"
+log -push
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref.sv
+verific -import -chparam P 0 kept kept_ref
+flatten
+equiv_make kept kept_ref equiv
+equiv_simple equiv
+equiv_status -assert equiv
+log -pop
+design -reset
+
+log -header "A for-generate that is a generate-if's branch"
+log -push
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:144: 'x' is declared only in an unnamed generate block; using 'genblk1.x'" 1
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref.sv
+verific -import -chparam P 1 loop_body loop_body_ref
+logger -check-expected
+flatten
+equiv_make loop_body loop_body_ref equiv
+equiv_simple equiv
+equiv_status -assert equiv
+log -pop

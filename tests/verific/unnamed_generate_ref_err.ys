@@ -1,0 +1,10 @@
+# Relaxed checking resolves a name in an unnamed generate block from outside it only when one generate
+# construct declares it, outside a loop, in a branch other than the one the reference is in
+logger -expect log "VERI-1128\] .*unnamed_generate_ref_err.sv:15: 'x' is not declared" 1
+logger -expect log "VERI-1128\] .*unnamed_generate_ref_err.sv:25: 'x' is not declared" 1
+logger -expect log "VERI-1128\] .*unnamed_generate_ref_err.sv:35: 'x' is not declared" 1
+logger -expect log "VERI-1128\] .*unnamed_generate_ref_err.sv:47: 'x' is not declared" 1
+logger -expect error "Reading Verilog/SystemVerilog sources failed" 1
+logger -werror "VERI-5003"
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref_err.sv
