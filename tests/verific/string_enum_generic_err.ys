@@ -1,0 +1,7 @@
+# Under relaxed checking, a string that names no literal of the generic's type is still an error
+logger -expect error "value 469786780261 is out of target constraint range false to true" 1
+logger -werror "VHDL-5000"
+verific -set_relaxed_checking
+verific -vhdl string_enum_generic.vhd
+verific -sv string_enum_generic.sv
+verific -import no_literal

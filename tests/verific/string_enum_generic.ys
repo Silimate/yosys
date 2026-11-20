@@ -1,0 +1,22 @@
+# Under relaxed checking, a Verilog string actual for a VHDL enumeration generic that names one of the
+# type's literals, in any case, takes that literal, as Quartus does for "true" and "false" to a boolean
+# generic. Each gives a VHDL-5000 warning, naming the generic's type or subtype. An integer actual still
+# takes the literal at that position.
+logger -expect warning "VHDL-5000\] .*string_enum_generic.sv:8: string .false. is taken as enumeration literal 'false' of type 'boolean'" 1
+logger -expect warning "VHDL-5000\] .*string_enum_generic.sv:8: string .TRUE. is taken as enumeration literal 'true' of type 'boolean'" 1
+logger -expect warning "VHDL-5000\] .*string_enum_generic.sv:8: string .run. is taken as enumeration literal 'RUN' of type 'state_t'" 1
+logger -expect warning "VHDL-5000\] .*string_enum_generic.sv:9: string .false. is taken as enumeration literal 'false' of type 'boolean'" 1
+logger -expect warning "VHDL-5000\] .*string_enum_generic.sv:9: string .True. is taken as enumeration literal 'true' of type 'boolean'" 1
+logger -expect warning "VHDL-5000\] .*string_enum_generic.sv:9: string .DONE. is taken as enumeration literal 'DONE' of type 'state_t'" 1
+logger -expect warning "VHDL-5000\] .*string_enum_generic.sv:11: string .true. is taken as enumeration literal 'true' of type 'boolean'" 1
+logger -expect warning "VHDL-5000\] .*string_enum_generic.sv:11: string .Idle. is taken as enumeration literal 'IDLE' of type 'state_t'" 1
+logger -expect warning "VHDL-5000\] .*string_enum_generic.sv:13: string .RUN. is taken as enumeration literal 'RUN' of type 'early_t'" 1
+verific -set_relaxed_checking
+verific -vhdl string_enum_generic.vhd
+verific -sv string_enum_generic.sv
+verific -import uses uses_ref
+logger -check-expected
+flatten
+equiv_make uses uses_ref equiv
+equiv_simple equiv
+equiv_status -assert equiv
