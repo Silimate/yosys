@@ -70,3 +70,17 @@ equiv_make kept kept_ref equiv
 equiv_simple equiv
 equiv_status -assert equiv
 log -pop
+design -reset
+
+log -header "A for-generate that is a generate-if's branch"
+log -push
+logger -expect warning "VERI-5003\] .*unnamed_generate_ref.sv:144: 'x' is declared only in an unnamed generate block; using 'genblk1.x'" 1
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref.sv
+verific -import -chparam P 1 loop_body loop_body_ref
+logger -check-expected
+flatten
+equiv_make loop_body loop_body_ref equiv
+equiv_simple equiv
+equiv_status -assert equiv
+log -pop

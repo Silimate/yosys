@@ -131,3 +131,27 @@ module kept_ref #(parameter P = 0) (
 	assign y = x;
 	assign n = ~{3'b000, x};
 endmodule
+
+// A for-generate that is a generate-if's branch: a reference in the loop body resolves from the body,
+// here to the block in the body that declares 'x'
+module loop_body #(parameter P = 1) (
+	input [3:0] a,
+	output [7:0] n
+);
+	generate
+		if (P)
+			for (genvar i = 0; i < 2; i = i + 1) begin
+				inv4 u (.i(x), .o(n[4*i +: 4]));
+				if (1) begin
+					wire [3:0] x = a + i;
+				end
+			end
+	endgenerate
+endmodule
+
+module loop_body_ref #(parameter P = 1) (
+	input [3:0] a,
+	output [7:0] n
+);
+	assign n = {~(a + 4'd1), ~a};
+endmodule
