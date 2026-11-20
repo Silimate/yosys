@@ -1,0 +1,6 @@
+# Identical declarations of a name in two wildcard-imported packages resolve without a warning
+logger -expect-no-warnings
+verific -set_relaxed_checking
+verific -sv wildcard_import_same.sv
+verific -import top
+sat -verify -prove width 44 top

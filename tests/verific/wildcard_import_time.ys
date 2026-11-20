@@ -1,0 +1,6 @@
+# The same time literal in two packages with different time units is reported as different
+logger -expect warning "VERI-1390\] .*wildcard_import_time.sv:[0-9]+: 'Delay' is visible via multiple package imports" 1
+verific -set_relaxed_checking
+verific -sv wildcard_import_time.sv
+verific -import top
+logger -check-expected

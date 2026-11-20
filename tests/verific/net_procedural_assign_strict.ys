@@ -1,0 +1,3 @@
+# Without relaxed checking, a procedural assignment to a net stays an error
+logger -expect error "Reading Verilog/SystemVerilog sources failed" 1
+verific -sv net_procedural_assign.sv

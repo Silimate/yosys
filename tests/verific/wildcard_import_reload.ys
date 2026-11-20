@@ -1,0 +1,10 @@
+# A package analyzed again, keeping the modules that import it, keeps its place among their
+# wildcard imports: Width is still pkg_a's, whose wildcard import (in an included file) comes first
+logger -expect warning "overwriting previous definition of package 'pkg_a'" 1
+verific -set_relaxed_checking
+verific -cfg veri_overwrite_packages_keeping_dependents_alive 1
+verific -sv wildcard_import_reload.sv
+verific -sv wildcard_import_reload_pkg.sv
+verific -import top
+logger -check-expected
+sat -verify -prove w 8 top

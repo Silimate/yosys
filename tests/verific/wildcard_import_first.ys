@@ -1,0 +1,15 @@
+# Different declarations of a name in two wildcard-imported packages: under relaxed checking the
+# first wildcard import's declaration is used, with a VERI-1390 warning
+logger -expect warning "VERI-1390\] .*wildcard_import_first.sv:[0-9]+: 'Width' is visible via multiple package imports" 5
+logger -expect warning "VERI-1390\] .*wildcard_import_first.sv:[0-9]+: 'state_e' is visible via multiple package imports" 2
+logger -expect log "VERI-5002\] .*wildcard_import_first.sv:3: using 'Width' declared here, from the first wildcard import that declares it" 4
+logger -expect log "VERI-5002\] .*wildcard_import_first.sv:8: using 'Width' declared here, from the first wildcard import that declares it" 1
+verific -set_relaxed_checking
+verific -sv wildcard_import_first.sv
+verific -import first_a first_b first_a_explicit_b first_a_one_line first_a_include
+logger -check-expected
+sat -verify -prove w 8 -prove bits 2 -prove st 1 first_a
+sat -verify -prove w 16 -prove bits 3 first_b
+sat -verify -prove w 8 -prove done 2 first_a_explicit_b
+sat -verify -prove w 8 first_a_one_line
+sat -verify -prove w 8 first_a_include

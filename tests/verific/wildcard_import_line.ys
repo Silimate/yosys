@@ -1,0 +1,8 @@
+# The first wildcard import is the first one written, whatever line `line gives it. The reference
+# comes after both imports' lines, as Verific drops an import after it (VIPER #17267)
+logger -expect warning "VERI-1390\] .*'Width' is visible via multiple package imports" 1
+verific -set_relaxed_checking
+verific -sv wildcard_import_line.sv
+verific -import top
+logger -check-expected
+sat -verify -prove w 8 top
