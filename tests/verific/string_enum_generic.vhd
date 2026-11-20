@@ -2,20 +2,25 @@
 package string_enum_generic_pkg is
   type state_t is (IDLE, RUN, DONE);
   subtype early_t is state_t range IDLE to RUN;
+  type mode_t is (\Fast\, \Slow\);
 end package;
 
 use work.string_enum_generic_pkg.all;
 
 entity flags is
   generic (
-    A : boolean := true;
-    B : boolean := false;
-    S : state_t := IDLE
+    A : boolean   := true;
+    B : boolean   := false;
+    S : state_t   := IDLE;
+    M : mode_t    := \Slow\;
+    C : character := ' '
   );
   port (
     a_o : out bit;
     b_o : out bit;
-    s_o : out bit_vector(1 downto 0)
+    s_o : out bit_vector(1 downto 0);
+    m_o : out bit;
+    c_o : out bit
   );
 end entity;
 
@@ -30,6 +35,8 @@ begin
   end generate;
   b_o <= '1' when B else '0';
   s_o <= "00" when S = IDLE else "01" when S = RUN else "10";
+  m_o <= '1' when M = \Fast\ else '0';
+  c_o <= '1' when C = 'a' else '0';
 end architecture;
 
 use work.string_enum_generic_pkg.all;
