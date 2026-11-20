@@ -58,3 +58,15 @@ equiv_make chain chain_ref equiv
 equiv_simple equiv
 equiv_status -assert equiv
 log -pop
+design -reset
+
+log -header "An implicit net that the other branch's references use stays"
+log -push
+verific -set_relaxed_checking
+verific -sv unnamed_generate_ref.sv
+verific -import -chparam P 0 kept kept_ref
+flatten
+equiv_make kept kept_ref equiv
+equiv_simple equiv
+equiv_status -assert equiv
+log -pop

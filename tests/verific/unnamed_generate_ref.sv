@@ -101,3 +101,33 @@ module chain_ref #(parameter A = 0) (
 	assign z = (A == 0) ? a + 4'd2 : a - 4'd2;
 	assign w = (A != 1) ? (a & 4'b0011) : (a | 4'b0011);
 endmodule
+
+// A reference in the other branch of the generate-if that declares 'x' is to the implicit net 'x' the
+// module-level port connection declares, so that net stays, for every reference to it
+module kept #(parameter P = 0) (
+	input [3:0] a,
+	input [3:0] b,
+	output [3:0] y,
+	output [3:0] n
+);
+	inv4 u_k (.i(x), .o(n));
+	generate
+		if (P) begin
+			wire [3:0] x = a;
+		end else begin
+			assign x = b;
+			assign y = x;
+		end
+	endgenerate
+endmodule
+
+module kept_ref #(parameter P = 0) (
+	input [3:0] a,
+	input [3:0] b,
+	output [3:0] y,
+	output [3:0] n
+);
+	wire x = b[0]; // An implicit net is 1 bit wide
+	assign y = x;
+	assign n = ~{3'b000, x};
+endmodule
