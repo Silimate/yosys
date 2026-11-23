@@ -38,6 +38,16 @@ void aiger_encode(std::ostream &f, int x)
 	f.put(x);
 }
 
+// SILIMATE: sort by name. SigBit's operator< compares IdString indices, which depend on what
+// the process created and freed before, so the same design could be numbered differently
+struct SigBitNameLess {
+	bool operator()(const SigBit &a, const SigBit &b) const {
+		if (a.wire && b.wire && a.wire != b.wire)
+			return a.wire->name.lt_by_name(b.wire->name);
+		return a < b;
+	}
+};
+
 struct AigerWriter
 {
 	Module *module;
@@ -358,11 +368,11 @@ struct AigerWriter
 		init_map.sort();
 		// we are relying here on unsorted pools iterating last-in-first-out
 		if (!no_sort) {
-			input_bits.sort();
-			output_bits.sort();
+			input_bits.sort(SigBitNameLess());
+			output_bits.sort(SigBitNameLess());
 		}
 		not_map.sort();
-		ff_map.sort();
+		ff_map.sort(SigBitNameLess());
 		and_map.sort();
 
 		aig_map[State::S0] = 0;

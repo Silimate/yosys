@@ -1,0 +1,11 @@
+# Inputs, outputs and latches are numbered by name, not by the order the names were created in
+read_verilog -icells <<EOT
+module top(input zz_in, input aa_in, output zz_q, output aa_q);
+\$_FF_ zz_ff(.D(aa_in), .Q(zz_q));
+\$_FF_ aa_ff(.D(zz_in), .Q(aa_q));
+endmodule
+EOT
+write_aiger -map aiger_order.out aiger_order.aig
+!grep -qx "input 0 0 aa_in" aiger_order.out
+!grep -qx "output 0 0 aa_q" aiger_order.out
+!grep -qx "latch 0 0 aa_q" aiger_order.out
