@@ -27,7 +27,7 @@ PRIVATE_NAMESPACE_BEGIN
 
 struct SplitnetsWorker
 {
-	std::map<RTLIL::Wire*, std::vector<RTLIL::SigBit>> splitmap;
+	dict<RTLIL::Wire*, std::vector<RTLIL::SigBit>> splitmap; // SILIMATE: insertion order, not wire addresses
 
 	void append_wire(RTLIL::Module *module, RTLIL::Wire *wire, int offset, int width, std::string format)
 	{
@@ -191,7 +191,7 @@ struct SplitnetsPass : public Pass {
 			{
 				CellTypes ct(design);
 
-				std::map<RTLIL::Wire*, std::set<int>> split_wires_at;
+				dict<RTLIL::Wire*, std::set<int>> split_wires_at; // SILIMATE: insertion order, not wire addresses
 
 				for (auto c : module->cells())
 				for (auto &p : c->connections())
