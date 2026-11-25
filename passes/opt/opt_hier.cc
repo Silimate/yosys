@@ -27,11 +27,6 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-static bool is_dw_module(Module *module)
-{
-	return RTLIL::unescape_id(module->name).compare(0, 2, "DW") == 0;
-}
-
 // Used to propagate information out of a module
 struct ModuleIndex {
 	Module *module;
@@ -492,7 +487,7 @@ static pool<Module *> run_round(RTLIL::Design *d, RoundState &st, const pool<Mod
 	auto selected = d->selected_modules(RTLIL::SELECT_WHOLE_ONLY, RTLIL::SB_UNBOXED_CMDERR);
 	dict<IdString, UsageData> usage_datas;
 	for (auto module : selected) {
-		if (module->get_bool_attribute(ID::top) || is_dw_module(module))
+		if (module->get_bool_attribute(ID::top) || module->get_bool_attribute(ID(keep_boundary)))
 			continue;
 		if (!changed_since(module->name) && !new_usage.count(module->name))
 			continue;
@@ -512,11 +507,6 @@ static pool<Module *> run_round(RTLIL::Design *d, RoundState &st, const pool<Mod
 
 	pool<Module *> changed;
 	for (auto module : selected) {
-		if (is_dw_module(module)) {
-			log_debug("Skipping DW module %s\n", log_id(module));
-			continue;
-		}
-
 		ModuleIndex &parent_index = st.indices.at(module->name);
 
 		// Rewrites the module's own body: constants and ties substituted for its
@@ -540,7 +530,7 @@ static pool<Module *> run_round(RTLIL::Design *d, RoundState &st, const pool<Mod
 			continue;
 		for (auto cell : cells) {
 			Module *child = d->module(cell->type);
-			if (child != nullptr && !is_dw_module(child) && st.indices.count(cell->type)) {
+			if (child != nullptr && !child->get_bool_attribute(ID(keep_boundary)) && st.indices.count(cell->type)) {
 				log_debug("Applying changes to instance %s of %s in %s\n", cell, cell->type.unescape(), module);
 				if (st.indices.at(cell->type).apply_changes(parent_index, cell))
 					changed.insert(module);
@@ -591,6 +581,10 @@ struct OptHierPass : Pass {
 		log("This pass considers the design hierarchy and propagates unused signals, constant\n");
 		log("signals, and tied-together signals across module boundaries to facilitate\n");
 		log("optimization. Only the selected modules are affected.\n");
+		log("\n");
+		log("A module with the keep_boundary attribute keeps its ports as they are: nothing\n");
+		log("is pushed into it from its instances, and nothing comes out of it into its\n");
+		log("parents.\n");
 		log("\n");
 		log("A round carries each of these across one module boundary, so a constant tied\n");
 		log("off N levels above the logic that reads it takes N rounds to arrive. Getting\n");
