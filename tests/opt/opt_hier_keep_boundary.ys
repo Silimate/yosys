@@ -26,3 +26,25 @@ opt_hier -max_iter 4 -purge
 select -assert-count 1 DW01_leaf/t:$and
 select -assert-count 1 DW01_leaf/t:$not
 select -assert-count 2 top/t:$not
+
+# A marked module still takes in its children's constant outputs: k folds the $and away,
+# while the constant top ties to a stays out and the $xor with it.
+design -reset
+read_verilog <<EOT
+module leaf(output k);
+	assign k = 1'b1;
+endmodule
+module wrap(input a, input b, output y);
+	wire k;
+	leaf u(.k(k));
+	assign y = (a ^ b) & k;
+endmodule
+module top(input b, output y);
+	wrap w(.a(1'b0), .b(b), .y(y));
+endmodule
+EOT
+hierarchy -top top
+setattr -mod -set keep_boundary 1 wrap
+opt_hier -max_iter 4 -purge
+select -assert-none wrap/t:$and
+select -assert-count 1 wrap/t:$xor
