@@ -1,0 +1,28 @@
+# A module's name doesn't exempt it: the tied-off input folds y to a constant that top
+# takes back, k's constant comes out, and z's logic goes because nothing reads it.
+read_verilog <<EOT
+module DW01_leaf(input a, input b, output y, output z, output k);
+	assign y = a & b;
+	assign z = ~b;
+	assign k = 1'b1;
+endmodule
+module top(input b, output y, output w, output v);
+	wire k;
+	DW01_leaf u(.a(1'b0), .b(b), .y(y), .z(), .k(k));
+	assign w = ~y;
+	assign v = ~k;
+endmodule
+EOT
+hierarchy -top top
+design -save start
+opt_hier -max_iter 4 -purge
+select -assert-none DW01_leaf/t:$and DW01_leaf/t:$not
+select -assert-none top/t:$not
+
+# keep_boundary leaves both sides of the boundary as they were.
+design -load start
+setattr -mod -set keep_boundary 1 DW01_leaf
+opt_hier -max_iter 4 -purge
+select -assert-count 1 DW01_leaf/t:$and
+select -assert-count 1 DW01_leaf/t:$not
+select -assert-count 2 top/t:$not
