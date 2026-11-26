@@ -238,3 +238,51 @@ select -assert-count 1 a:rtl_bind=mem/8?7?
 select -assert-count 4 a:rtl_bind
 select -assert-count 3 a:rtl_bind_status=bound
 select -assert-count 1 a:rtl_bind_status=absent
+
+# Test 8: -rtl-names names each bit for the array index and struct member it holds, not
+# for the one member the cell is named after. A cell whose name does not start with its
+# object's (a flattened instance's) keeps the usual names, and so does every cell without
+# -rtl-names.
+design -reset
+read_rtlil <<EOT
+attribute \rtl_bind_dims "p=u0:1 v=p3:0"
+attribute \rtl_bind_members "p=.a:2:p1:0;.v:1"
+module \test_rtl_names
+  wire input 1 \clk
+  wire width 6 input 2 \d
+  wire width 6 output 3 \q
+  wire width 4 input 4 \e
+  wire width 4 output 5 \f
+  attribute \rtl_bind "p/6[0:5]"
+  cell $dff \p[1].v_reg
+    parameter \WIDTH 6
+    parameter \CLK_POLARITY 1
+    connect \CLK \clk
+    connect \D \d
+    connect \Q \q
+  end
+  attribute \rtl_bind "v/4[0:3]"
+  cell $dff \u.v_reg
+    parameter \WIDTH 4
+    parameter \CLK_POLARITY 1
+    connect \CLK \clk
+    connect \D \e
+    connect \Q \f
+  end
+end
+EOT
+design -save rtl_names
+splitcells -blast -rtl-names -format []:
+
+select -assert-count 10 t:$dff
+select -assert-count 1 c:p?1?.v_reg
+select -assert-count 1 c:p?0?.v_reg
+select -assert-count 1 c:p?1?.a_reg?0?
+select -assert-count 1 c:p?1?.a_reg?1?
+select -assert-count 1 c:p?0?.a_reg?0?
+select -assert-count 1 c:p?0?.a_reg?1?
+select -assert-count 4 c:u.v_reg?[0123]?
+
+design -load rtl_names
+splitcells -blast -format []:
+select -assert-count 6 c:p?1?.v_reg?[012345]?
