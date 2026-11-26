@@ -275,12 +275,12 @@ design -save rtl_names
 splitcells -blast -rtl-names -format []:
 
 select -assert-count 10 t:$dff
-select -assert-count 1 c:p?1?.v_reg
-select -assert-count 1 c:p?0?.v_reg
-select -assert-count 1 c:p?1?.a_reg?0?
-select -assert-count 1 c:p?1?.a_reg?1?
-select -assert-count 1 c:p?0?.a_reg?0?
-select -assert-count 1 c:p?0?.a_reg?1?
+select -assert-count 1 c:p?1?.v_reg a:rtl_bind=p/6?0? %i
+select -assert-count 1 c:p?1?.a_reg?0? a:rtl_bind=p/6?1? %i
+select -assert-count 1 c:p?1?.a_reg?1? a:rtl_bind=p/6?2? %i
+select -assert-count 1 c:p?0?.v_reg a:rtl_bind=p/6?3? %i
+select -assert-count 1 c:p?0?.a_reg?0? a:rtl_bind=p/6?4? %i
+select -assert-count 1 c:p?0?.a_reg?1? a:rtl_bind=p/6?5? %i
 select -assert-count 4 c:u.v_reg?[0123]?
 
 design -load rtl_names
