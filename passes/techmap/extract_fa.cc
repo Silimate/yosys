@@ -269,7 +269,9 @@ struct ExtractFaWorker
 			pool<SigBit> new_leaves = leaves;
 
 			new_leaves.erase(bit);
-			for (auto port : {ID::A, ID::B, ID::C, ID::D}) {
+			// SILIMATE: follow a mux's select too, or ConstEval walks it past the leaves and can
+			// recompute a leaf it set, from a multi-bit cell that also drives the select
+			for (auto port : {ID::A, ID::B, ID::C, ID::D, ID::S}) {
 				if (!cell->hasPort(port))
 					continue;
 				for (auto bit : sigmap(cell->getPort(port))) // SILIMATE: a reduction's port has several bits

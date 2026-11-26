@@ -1,0 +1,45 @@
+# A mux select driven by a multi-bit cell whose other bit is a leaf of the same cone
+read_rtlil <<EOT
+module \top
+  wire input 1 \q
+  wire input 2 \c
+  wire output 3 \y
+  wire width 2 \n
+  wire \r
+  cell $not $n
+    parameter \A_SIGNED 0
+    parameter \A_WIDTH 2
+    parameter \Y_WIDTH 2
+    connect \A { \q \c }
+    connect \Y \n
+  end
+  cell $_AND_ $r
+    connect \A \q
+    connect \B \c
+    connect \Y \r
+  end
+  cell $_MUX_ $y
+    connect \A \n [1]
+    connect \B \r
+    connect \S \n [0]
+    connect \Y \y
+  end
+end
+EOT
+equiv_opt -assert extract_fa -fa
+design -reset
+
+# A full adder whose sum selects between a ^ b and its inverse on c
+read_verilog <<EOT
+module fa_mux(input a, b, c, output s, cy);
+	wire x = a ^ b;
+	assign s = c ? ~x : x;
+	assign cy = (a & b) | (b & c) | (a & c);
+endmodule
+EOT
+proc
+techmap
+select -assert-count 1 t:$_MUX_
+equiv_opt -assert extract_fa -fa
+design -load postopt
+select -assert-count 1 t:$fa
