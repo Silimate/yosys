@@ -1,0 +1,62 @@
+# opt_dff must build the same enable and reset logic whatever order the process first interned the
+# control names in. \rev is a copy of \fwd with renamed controls whose IdString indices sort opposite
+# to their names, and which sort differently as plain strings (\rev_10 < \rev_9) than with digit runs
+# compared by value. Once renamed back, the two must match exactly.
+
+# One burst interns \fwd's controls in name order and \rev's in reverse. Fresh indices ascend and
+# reused ones descend, so either way the two sets come out in opposite index order.
+read_rtlil <<EOT
+attribute \blackbox 1
+module \intern
+  wire \a
+  wire \b
+  wire \c
+  wire \rev_11
+  wire \rev_10
+  wire \rev_9
+end
+EOT
+
+read_verilog <<EOT
+module fwd(input clk, a, b, c, input [1:0] d, output reg [1:0] q, output reg [2:0] r);
+  always @(posedge clk) begin
+    // feedback patterns {a=1, b=0} and {a=0, c=0}
+    if (a) begin
+      if (b) q <= d;
+    end else if (c)
+      q <= ~d;
+    // resets {b, c}, and enables {a, c} and {b, c} in two groups
+    if (b) r[0] <= 0; else if (c) r[0] <= 0; else r[0] <= d[0];
+    if (a) if (c) r[1] <= d[1];
+    if (b) if (c) r[2] <= d[0];
+  end
+endmodule
+EOT
+proc
+opt_clean
+copy fwd rev
+
+cd rev
+rename a rev_9
+rename b rev_10
+rename c rev_11
+cd ..
+
+opt_dff
+
+cd rev
+rename rev_9 a
+rename rev_10 b
+rename rev_11 c
+cd ..
+
+select -assert-count 2 fwd/t:$ne
+select -assert-count 2 rev/t:$ne
+
+# copy reorders the module attributes
+setattr -mod -unset src fwd rev
+select fwd
+write_rtlil -sort -selected opt_dff_name_order_fwd.out
+select rev
+write_rtlil -sort -selected opt_dff_name_order_rev.out
+! sed 's/^module \\rev$/module \\fwd/' opt_dff_name_order_rev.out | diff opt_dff_name_order_fwd.out -
