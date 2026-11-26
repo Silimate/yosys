@@ -21,6 +21,8 @@
 #define FSTDATA_H
 
 #include "kernel/yosys.h"
+#include "kernel/waveform_stream.h"
+#include <filesystem>
 #include "libs/fst/fstapi.h"
 
 #include <memory>
@@ -43,6 +45,10 @@ struct FstVar
 // Immutable hierarchy index of one waveform file, shared (and not duplicated) by every reader of it.
 struct FstIndex
 {
+	std::string external_path;
+	std::filesystem::file_time_type mtime;
+	uintmax_t file_size = 0;
+	uint64_t start = 0, end = 0;
 	~FstIndex();
 
 	std::vector<FstVar> vars;
@@ -85,6 +91,8 @@ class FstData
 	int getWidth(fstHandle signal) const;
 	std::string autoScope(Module *topmod);
 	private:
+	void readExternalHeader(FstIndex &idx);
+	void replayExternal(const std::vector<fstHandle> &handles, uint64_t end);
 	void extractVarNames(FstIndex &idx);
 	static void registerVar(FstIndex &idx, const FstVar &var);
 	void flushDirty();

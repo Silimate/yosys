@@ -3783,8 +3783,9 @@ struct SimPass : public Pass {
 		log("\n");
 		log("    -r <filename>\n");
 		log("        read simulation or formal results file\n");
-		log("            File formats supported: FST, VCD, AIW, WIT and .yw\n");
+		log("            File formats supported: FST, VCD, FSDB, AIW, WIT and .yw\n");
 		log("            Yosys witness (.yw) replay is preferred when possible.\n");
+		log("            FSDB support uses the external fsdb-reader (or YOSYS_FSDB_READER)\n");
 		log("            VCD support requires vcd2fst external tool to be present\n");
 		log("\n");
 		log("    -no-undriven-check\n");
@@ -4177,13 +4178,14 @@ struct SimPass : public Pass {
 		worker.reg_overwrite = reg_overwrite;
 		// Multi-root (-instance) is only supported in FST/VCD cosim
 		if (!worker.instance_specs.empty() && worker.sim_filename.empty())
-			log_cmd_error("-instance requires FST/VCD cosim (-r <file.vcd|.fst>).\n");
+			log_cmd_error("-instance requires waveform cosim (-r <file.vcd|.fst|.fsdb>).\n");
 		if (worker.sim_filename.empty())
 			worker.run(top_mod, cycle_width, numcycles);
 		else {
 			std::string filename_trim = file_base_name(worker.sim_filename);
-			if (filename_trim.size() > 4 && ((filename_trim.compare(filename_trim.size()-4, std::string::npos, ".fst") == 0) ||
-				filename_trim.compare(filename_trim.size()-4, std::string::npos, ".vcd") == 0)) {
+			auto ext = filename_trim.substr(filename_trim.find_last_of('.') + 1);
+			std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+			if (ext == "fst" || ext == "vcd" || ext == "fsdb") {
 				worker.run_cosim_fst(top_mod, numcycles, log_interval);
 			} else if (filename_trim.size() > 4 && filename_trim.compare(filename_trim.size()-4, std::string::npos, ".aiw") == 0) {
 				if (worker.map_filename.empty())

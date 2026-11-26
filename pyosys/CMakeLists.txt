@@ -19,11 +19,16 @@ add_custom_command(
 	VERBATIM
 	COMMENT "Generating Python wrappers"
 )
+if (YOSYS_ENABLE_ZLIB)
+	set(waveform_component fstdata)
+endif()
 yosys_core(pyosys
 	wrappers.cc
 	INCLUDE_DIRS
 		${pybind11_INCLUDE_DIR}
 	LIBRARIES
 		$<${YOSYS_ENABLE_PYTHON}:Python3::Module>
+	REQUIRES
+		${waveform_component}
 	ESSENTIAL
 )
