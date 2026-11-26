@@ -111,7 +111,7 @@ struct SplitcellsWorker
 		}
 	}
 
-	int split(Cell *cell, const std::string &format, int limit, bool blast = false)
+	int split(Cell *cell, const std::string &format, int limit, bool blast = false, const RtlBindShapes *shapes = nullptr)
 	{
 		if (cell->type.in("$and", "$mux", "$not", "$or", "$pmux", "$xnor", "$xor"))
 		{
@@ -212,15 +212,25 @@ struct SplitcellsWorker
 
 			log_debug("Splitting %s cell %s/%s into %d slices:\n", cell->type.unescape(), module, cell, GetSize(slices)-1);
 			SliceTemplate slice_template(cell, splitports, splitparams, std::vector<IdString>{ID(rtl_bind), ID(rtl_bind_status)}); // SILIMATE
+			std::vector<RtlBindBit> binds; // SILIMATE
+			if (shapes)
+				binds = rtl_bind_expand(cell->get_string_attribute(ID(rtl_bind)));
+			Cell *cell_named = nullptr; // SILIMATE: the slice named as the cell, renamed once the cell is gone
 			for (int i = 1; i < GetSize(slices); i++)
 			{
 				int slice_msb = slices[i]-1;
 				int slice_lsb = slices[i-1];
-				// SILIMATE: named from the Q wire's bit numbering, see ff_slice_name
-				IdString slice_name = module->uniquify(ff_slice_name(cell->name.str(),
-						cell->getPort(ID::Q), slice_lsb, slice_msb, format, blast));
+				// SILIMATE: named for the RTL bit it holds, else from the Q wire's bit numbering, see ff_slice_name
+				std::string name;
+				if (slice_lsb == slice_msb && GetSize(binds) == GetSize(cell->getPort(ID::Q)))
+					name = ff_bind_slice_name(cell->name.str(), binds[slice_lsb], *shapes, format);
+				if (name.empty())
+					name = ff_slice_name(cell->name.str(), cell->getPort(ID::Q), slice_lsb, slice_msb, format, blast);
+				IdString slice_name = module->uniquify(name);
 
 				Cell *slice = slice_template.add(module, slice_name, cell); // SILIMATE
+				if (name == cell->name.str())
+					cell_named = slice;
 
 				// SILIMATE: cut from the cell's ports and parameters, not from full-width copies in the slice
 				for (IdString portname : splitports)
@@ -239,7 +249,10 @@ struct SplitcellsWorker
 				log_debug("  slice %d: %s => %s\n", i, slice_name.unescape(), log_signal(slice->getPort(ID::Q)));
 			}
 
+			IdString cell_name = cell->name; // SILIMATE
 			module->remove(cell);
+			if (cell_named)
+				module->rename(cell_named, cell_name);
 			return GetSize(slices)-1;
 		}
 
@@ -273,12 +286,18 @@ struct SplitcellsPass : public Pass {
 		log("    -blast\n");
 		log("        blast all bits (do not look at usage of the cell output bits).\n");
 		log("\n");
+		// SILIMATE
+		log("    -rtl-names\n");
+		log("        name each 1-bit slice of a flop or latch for the RTL bit it holds, from\n");
+		log("        its `rtl_bind` and the module's `rtl_bind_dims` and `rtl_bind_members`,\n");
+		log("        rather than for the cell.\n");
+		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		std::string format;
 		int limit = -1;
-		bool blast = false;
+		bool blast = false, rtl_names = false; // SILIMATE
 
 		log_header(design, "Executing SPLITCELLS pass (splitting up multi-bit cells).\n");
 
@@ -297,6 +316,10 @@ struct SplitcellsPass : public Pass {
 				blast = true;
 				continue;
 			}
+			if (args[argidx] == "-rtl-names") { // SILIMATE
+				rtl_names = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -309,12 +332,13 @@ struct SplitcellsPass : public Pass {
 		{
 			int count_split_pre = 0;
 			int count_split_post = 0;
+			RtlBindShapes shapes = rtl_names ? RtlBindShapes(module) : RtlBindShapes(); // SILIMATE
 
 			while (1) {
 				SplitcellsWorker worker(module);
 				bool did_something = false;
 				for (auto cell : module->selected_cells()) {
-					int n = worker.split(cell, format, limit, blast);
+					int n = worker.split(cell, format, limit, blast, rtl_names ? &shapes : nullptr); // SILIMATE
 					did_something |= (n != 0);
 					count_split_pre += (n != 0);
 					count_split_post += n;
